@@ -1,0 +1,65 @@
+profile_id: rookie_dealer_02
+profile_name: 新人ディーラー2号
+description: 1号より少し慎重に、地合いと業種を重視する新人ディーラー
+
+character:
+  role: 新人ディーラー
+  personality:
+    - 慎重
+    - 地合い重視
+    - 業種モメンタム重視
+    - ルール厳守
+  catchphrases:
+    - 地合いを確認します
+    - 弱い業種は避けます
+    - ルール外の期待は持ちません
+
+features:
+  market_context: true
+  sector_analysis: true
+  ai_decision: false
+  news: true
+  candlestick_analysis: true
+  openai_commentary: false
+
+# OpenAI APIによる最終判断を使うかどうか
+# falseの場合、ルールベースのスコアリング結果だけで売買判断する
+# OPENAI_API_KEYが未設定の場合は、自動的にrule_basedへフォールバックする
+ai_decision:
+  enabled: false
+  provider: openai
+  fallback_to_rule_based: true
+  daily_call_limit: 3
+
+# コメント生成方式
+# rule_based: API不要、無料、安定
+# openai: 自然な文章になるがAPIコストが発生
+ai_commentary:
+  enabled: true
+  provider: rule_based
+  fallback_to_rule_based: true
+
+initial_capital: 1000000
+
+trading:
+  max_positions: 4
+  position_size_ratio: 0.18
+  stop_loss_rate: -0.025
+  take_profit_rate: 0.05
+  max_holding_days: 4
+  use_round_lot: true
+  round_lot_size: 100
+
+selection:
+  min_score: 72
+  fallback_min_score: 67
+  min_confidence: 0.72
+  allow_top_pick_when_no_selection: true
+  top_pick_min_score: 67
+  max_selected: 4
+
+risk_margin:
+  max_daily_buy_amount: 250000
+  max_single_order_amount: 180000
+  stop_trading_if_daily_loss_rate_exceeds: -0.04
+  stop_trading_if_drawdown_exceeds: -0.12

@@ -1,0 +1,55 @@
+# Secrets
+.env
+*.pem
+*.key
+private_keys/
+keys/
+
+# Runtime logs
+logs/
+analysis_logs/
+
+# Raw and processed data
+data/raw/
+data/processed/
+
+# Generated reports
+reports/*
+!reports/backtests/
+!reports/backtests/**
+reports/backtests/preflight_latest.*
+reports/backtests/tachibana_healthcheck_latest.*
+reports/*/backtests/preflight_latest.*
+reports/*/backtests/tachibana_healthcheck_latest.*
+reports/order_previews/
+
+# Draft articles
+articles/drafts/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Safety
+storage/STOP_TRADING
+
+# Charts
+reports/charts/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# VSCode local settings
+.vscode/

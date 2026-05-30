@@ -1,0 +1,513 @@
+"""AI scoring placeholder for rookie dealer."""
+
+from __future__ import annotations
+
+import random
+from typing import Any
+
+from candlestick import detect_candlestick_signals
+
+
+def score_candidates(screening_log: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    run_id = screening_log["run_id"]
+    scored = []
+
+    for candidate in screening_log["candidates"]:
+        rng = random.Random(f"{run_id}:{candidate['code']}:scoring")
+        technical = _technical_score(candidate, config, rng)
+        news = rng.randint(8, int(config["scoring"]["news_max"]))
+        financial = rng.randint(7, int(config["scoring"]["financial_max"]))
+        total = technical + news + financial
+        confidence = round(min(0.98, max(0.30, total / 100 + rng.uniform(-0.08, 0.08))), 2)
+
+        scored.append(
+            {
+                "code": candidate["code"],
+                "name": candidate["name"],
+                "market": candidate["market"],
+                "sector": candidate["sector"],
+                "close_price": candidate["close_price"],
+                "technical_score": technical,
+                "news_score": news,
+                "financial_score": financial,
+                "total_score": total,
+                "confidence": confidence,
+                "selected": False,
+                "selection_reason": "",
+                "rejection_reason": "",
+                "score_comment": _score_comment(total, confidence),
+            }
+        )
+
+    scored.sort(key=lambda item: (item["total_score"], item["confidence"]), reverse=True)
+    max_positions = int(config["portfolio"]["max_positions"])
+    confidence_min = float(config["scoring"]["confidence_min_for_buy"])
+
+    selected_count = 0
+    for item in scored:
+        if selected_count < max_positions and item["confidence"] >= confidence_min:
+            item["selected"] = True
+            item["selection_reason"] = "総合点と信頼度が上位で、短期売買候補として採用"
+            selected_count += 1
+        else:
+            item["rejection_reason"] = _rejection_reason(item, selected_count, max_positions, confidence_min)
+
+    return {
+        "run_id": run_id,
+        "date": screening_log["date"],
+        "dealer_id": config["dealer"]["id"],
+        "scoring_policy": {
+            "technical_max": config["scoring"]["technical_max"],
+            "news_max": config["scoring"]["news_max"],
+            "financial_max": config["scoring"]["financial_max"],
+            "confidence_min_for_buy": confidence_min,
+        },
+        "scores": scored,
+        "selected": [item for item in scored if item["selected"]],
+        "rejected": [item for item in scored if not item["selected"]],
+    }
+
+
+def build_trade_decisions(scoring_log: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    decisions = []
+    for item in scoring_log["scores"]:
+        decisions.append(
+            {
+                "code": item["code"],
+                "name": item["name"],
+                "decision": "BUY" if item["selected"] else "PASS",
+                "reason": item["selection_reason"] or item["rejection_reason"],
+                "total_score": item["total_score"],
+                "technical_score": item.get("technical_score"),
+                "news_score": item.get("news_score"),
+                "financial_score": item.get("financial_score"),
+                "sector_name": item.get("sector_name"),
+                "sector_momentum_score": item.get("sector_momentum_score"),
+                "sector_rank": item.get("sector_rank"),
+                "sector_comment": item.get("sector_comment"),
+                "sector_score_adjustment": item.get("sector_score_adjustment"),
+                "candle_type": item.get("candle_type"),
+                "candlestick_signals": item.get("candlestick_signals", []),
+                "candlestick_score": item.get("candlestick_score"),
+                "trend_score": item.get("trend_score"),
+                "volume_score": item.get("volume_score"),
+                "rsi_score": item.get("rsi_score"),
+                "ma5": item.get("ma5"),
+                "ma25": item.get("ma25"),
+                "volume_ratio": item.get("volume_ratio"),
+                "macd_hist": item.get("macd_hist"),
+                "bb_position": item.get("bb_position"),
+                "atr": item.get("atr"),
+                "news_reason": item.get("news_reason", "ニュース材料は中立です"),
+                "confidence": item["confidence"],
+                "rule_snapshot": {
+                    "max_positions": config["portfolio"]["max_positions"],
+                    "max_allocation_per_symbol": config["portfolio"]["max_allocation_per_symbol"],
+                    "stop_loss_pct": config["risk"]["stop_loss_pct"],
+                    "take_profit_pct": config["risk"]["take_profit_pct"],
+                    "max_holding_business_days": config["risk"]["max_holding_business_days"],
+                    "ai_rule_change_allowed": config["risk"]["ai_rule_change_allowed"],
+                },
+            }
+        )
+
+    return {
+        "run_id": scoring_log["run_id"],
+        "date": scoring_log["date"],
+        "dealer_id": config["dealer"]["id"],
+        "decisions": decisions,
+    }
+
+
+def score_real_candidates(
+    candidates: list[dict[str, Any]],
+    target_date: str,
+    config: dict[str, Any],
+    source_provider: str,
+    news_by_code: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    scored = []
+    financial_score = 10
+    selection_config = _selection_config(config)
+    news_by_code = news_by_code or {}
+
+    for candidate in candidates:
+        technical_parts = _real_technical_score_parts(candidate)
+        sector_adjustment = _sector_score_adjustment(candidate)
+        technical = max(0, min(50, technical_parts["technical_score"] + sector_adjustment))
+        technical_parts["technical_score"] = technical
+        technical_parts["sector_adjustment"] = sector_adjustment
+        news = _score_news(news_by_code.get(candidate["code"], {}))
+        news_score = news["news_score"]
+        total = technical + news_score + financial_score
+        confidence = _real_confidence(candidate, technical)
+        score_reason = _real_score_reason(candidate, technical_parts, total)
+        scored.append(
+            {
+                "code": candidate["code"],
+                "name": candidate["name"],
+                "sector_name": candidate.get("sector_name", ""),
+                "sector_momentum_score": candidate.get("sector_momentum_score"),
+                "sector_rank": candidate.get("sector_rank"),
+                "sector_comment": candidate.get("sector_comment", ""),
+                "sector_score_adjustment": sector_adjustment,
+                "date": candidate["date"],
+                "open": candidate.get("open"),
+                "high": candidate.get("high"),
+                "low": candidate.get("low"),
+                "close": candidate["close"],
+                "volume": candidate.get("volume"),
+                "ma5": candidate.get("ma5"),
+                "ma25": candidate.get("ma25"),
+                "volume_ratio": candidate.get("volume_ratio"),
+                "rsi": candidate.get("rsi"),
+                "macd": candidate.get("macd"),
+                "macd_signal": candidate.get("macd_signal"),
+                "macd_hist": candidate.get("macd_hist"),
+                "bb_upper": candidate.get("bb_upper"),
+                "bb_middle": candidate.get("bb_middle"),
+                "bb_lower": candidate.get("bb_lower"),
+                "bb_position": candidate.get("bb_position"),
+                "atr": candidate.get("atr"),
+                "turnover_value": candidate.get("turnover_value"),
+                "five_day_volatility": candidate.get("five_day_volatility"),
+                "five_day_change_rate": candidate.get("five_day_change_rate"),
+                "candle_type": candidate.get("candle_type", "unknown"),
+                "candle_body_rate": candidate.get("candle_body_rate"),
+                "upper_shadow_rate": candidate.get("upper_shadow_rate"),
+                "lower_shadow_rate": candidate.get("lower_shadow_rate"),
+                "close_position_in_range": candidate.get("close_position_in_range"),
+                "gap_rate": candidate.get("gap_rate"),
+                "candlestick_signals": technical_parts["candlestick_signals"],
+                "candlestick_score": technical_parts["candlestick_score"],
+                "trend_score": technical_parts["trend_score"],
+                "volume_score": technical_parts["volume_score"],
+                "rsi_score": technical_parts["rsi_score"],
+                "total_score": total,
+                "technical_score": technical,
+                "news_score": news_score,
+                "news_reason": news["news_reason"],
+                "news_articles_count": news["news_articles_count"],
+                "positive_news_count": news["positive_news_count"],
+                "negative_news_count": news["negative_news_count"],
+                "news_provider": news["news_provider"],
+                "news_limitation": news["news_limitation"],
+                "financial_score": financial_score,
+                "confidence": confidence,
+                "rank": 0,
+                "selected": False,
+                "reason": score_reason,
+                "score_reason": score_reason,
+                "selection_reason": "",
+                "selected_reason": "",
+                "rejected_reason": "",
+                "source_provider": source_provider,
+                "fallback": candidate.get("fallback", False),
+            }
+        )
+
+    scored.sort(key=lambda item: (item["total_score"], item["confidence"]), reverse=True)
+    selected_count = 0
+    for index, item in enumerate(scored, start=1):
+        item["rank"] = index
+        if _meets_regular_selection(item, selection_config) and selected_count < selection_config["max_selected"]:
+            item["selected"] = True
+            item["selection_reason"] = "スコア基準を満たしたため採用"
+            item["selected_reason"] = item["selection_reason"]
+            item["reason"] = item["selection_reason"]
+            selected_count += 1
+        else:
+            item["rejected_reason"] = _real_rejected_reason(item, selected_count, selection_config)
+            item["reason"] = item["rejected_reason"]
+
+    if selected_count == 0 and selection_config["allow_top_pick_when_no_selection"]:
+        for item in scored:
+            if _meets_top_pick_selection(item, selection_config):
+                item["selected"] = True
+                item["selection_reason"] = "通常基準70点には届かなかったが、ノートレード回避ルールにより最上位候補として採用"
+                item["selected_reason"] = item["selection_reason"]
+                item["rejected_reason"] = ""
+                item["reason"] = item["selection_reason"]
+                selected_count = 1
+                break
+
+    return {
+        "date": target_date,
+        "dealer_id": config["dealer"]["id"],
+        "source_provider": source_provider,
+        "scoring_policy": {
+            "technical_max": 50,
+            "technical_breakdown": {
+                "trend_score": 15,
+                "volume_score": 10,
+                "rsi_score": 10,
+                "candlestick_score": 15,
+            },
+            "news_max": 30,
+            "financial_score_fixed": financial_score,
+            "min_total_score_for_selection": selection_config["min_score"],
+            "min_confidence_for_selection": selection_config["min_confidence"],
+            "max_selected": selection_config["max_selected"],
+        },
+        "selection_config": selection_config,
+        "scores": scored,
+        "selected": [item for item in scored if item["selected"]],
+        "rejected": [item for item in scored if not item["selected"]],
+    }
+
+
+def _selection_config(config: dict[str, Any]) -> dict[str, Any]:
+    selection = config.get("selection", {})
+    return {
+        "min_score": float(selection.get("min_score", 70)),
+        "fallback_min_score": float(selection.get("fallback_min_score", 65)),
+        "min_confidence": float(selection.get("min_confidence", config["scoring"].get("confidence_min_for_buy", 0.7))),
+        "allow_top_pick_when_no_selection": bool(selection.get("allow_top_pick_when_no_selection", True)),
+        "top_pick_min_score": float(selection.get("top_pick_min_score", 65)),
+        "max_selected": int(selection.get("max_selected", config["portfolio"].get("max_positions", 5))),
+    }
+
+
+def _score_news(news_payload: dict[str, Any]) -> dict[str, Any]:
+    if not news_payload:
+        return _neutral_news_score("ニュース取得結果なし")
+    limitation = str(news_payload.get("limitation") or "")
+    if limitation.startswith("ニュース取得に失敗"):
+        return _neutral_news_score("ニュース取得に失敗したため中立点", limitation=limitation, provider=news_payload.get("provider", ""))
+
+    articles = news_payload.get("articles", [])
+    if not articles:
+        return {
+            "news_score": 15,
+            "news_reason": "ニュースなしのため中立点",
+            "news_articles_count": 0,
+            "positive_news_count": 0,
+            "negative_news_count": 0,
+            "news_provider": news_payload.get("provider", ""),
+            "news_limitation": limitation,
+        }
+
+    positive_keywords = ["決算", "上方修正", "増益", "増収", "最高益", "自社株買い"]
+    negative_keywords = ["下方修正", "減益", "赤字", "不祥事", "行政処分", "訴訟"]
+    positive_count = 0
+    negative_count = 0
+    for article in articles:
+        title = article.get("title", "")
+        if any(keyword in title for keyword in positive_keywords):
+            positive_count += 1
+        if any(keyword in title for keyword in negative_keywords):
+            negative_count += 1
+
+    score = 18
+    score += min(positive_count * 4, 12)
+    score -= min(negative_count * 5, 18)
+    if negative_count >= 2:
+        score = min(score, 10)
+    score = max(0, min(30, score))
+    reason_parts = [f"ニュース{len(articles)}件"]
+    if positive_count:
+        reason_parts.append(f"好材料キーワード{positive_count}件")
+    if negative_count:
+        reason_parts.append(f"悪材料キーワード{negative_count}件")
+    if not positive_count and not negative_count:
+        reason_parts.append("強い材料キーワードなし")
+    return {
+        "news_score": score,
+        "news_reason": "、".join(reason_parts),
+        "news_articles_count": len(articles),
+        "positive_news_count": positive_count,
+        "negative_news_count": negative_count,
+        "news_provider": news_payload.get("provider", ""),
+        "news_limitation": limitation,
+    }
+
+
+def _neutral_news_score(reason: str, limitation: str = "", provider: str = "") -> dict[str, Any]:
+    return {
+        "news_score": 15,
+        "news_reason": reason,
+        "news_articles_count": 0,
+        "positive_news_count": 0,
+        "negative_news_count": 0,
+        "news_provider": provider,
+        "news_limitation": limitation,
+    }
+
+
+def _meets_regular_selection(item: dict[str, Any], selection_config: dict[str, Any]) -> bool:
+    return item["total_score"] >= selection_config["min_score"] and item["confidence"] >= selection_config["min_confidence"]
+
+
+def _meets_top_pick_selection(item: dict[str, Any], selection_config: dict[str, Any]) -> bool:
+    return item["total_score"] >= selection_config["top_pick_min_score"] and item["confidence"] >= selection_config["min_confidence"]
+
+
+def _real_technical_score_parts(candidate: dict[str, Any]) -> dict[str, Any]:
+    trend_score = 0.0
+    volume_score = 0.0
+    rsi_score = 0.0
+    candlestick_score = 0.0
+    volume_ratio = float(candidate.get("volume_ratio") or 0)
+    turnover_value = float(candidate.get("turnover_value") or 0)
+    rsi = float(candidate.get("rsi") or 0)
+    close = float(candidate["close"])
+    ma5 = float(candidate["ma5"])
+    ma25 = float(candidate["ma25"])
+    signals = list(candidate.get("candlestick_signals") or detect_candlestick_signals(candidate))
+
+    if close > ma5:
+        trend_score += 5
+    if ma5 > ma25:
+        trend_score += 5
+    ma_spread = (ma5 - ma25) / ma25 if ma25 else 0.0
+    trend_score += max(0.0, 1 - abs(ma_spread - 0.03) / 0.15) * 5
+
+    volume_score += min(volume_ratio, 2.5) / 2.5 * 6
+    volume_score += min(turnover_value / 2_000_000_000, 1.0) * 4
+
+    if 50 <= rsi <= 65:
+        rsi_score = 10
+    elif 40 <= rsi < 50:
+        rsi_score = 6 + (rsi - 40) / 10 * 4
+    elif 65 < rsi <= 70:
+        rsi_score = 8 - (rsi - 65) / 5 * 2
+    elif 30 <= rsi < 40:
+        rsi_score = (rsi - 30) / 10 * 6
+    elif 70 < rsi <= 80:
+        rsi_score = max(0.0, 6 - (rsi - 70) / 10 * 6)
+
+    if _has_candlestick_data(candidate):
+        if "bullish_candle" in signals:
+            candlestick_score += 4
+        if "strong_bullish_candle" in signals:
+            candlestick_score += 5
+        if "long_lower_shadow_support" in signals:
+            candlestick_score += 3
+        if "ma_reclaim" in signals:
+            candlestick_score += 2
+        if "volume_confirmed_breakout" in signals:
+            candlestick_score += 3
+        if "long_upper_shadow_warning" in signals:
+            candlestick_score -= 4
+        if "overheated_warning" in signals:
+            candlestick_score -= 5
+    else:
+        candlestick_score = 12
+
+    if candidate.get("fallback"):
+        candlestick_score -= 2
+
+    trend_score = round(max(0, min(15, trend_score)))
+    volume_score = round(max(0, min(10, volume_score)))
+    rsi_score = round(max(0, min(10, rsi_score)))
+    candlestick_score = round(max(0, min(15, candlestick_score)))
+    technical_score = max(0, min(50, trend_score + volume_score + rsi_score + candlestick_score))
+    return {
+        "technical_score": technical_score,
+        "trend_score": trend_score,
+        "volume_score": volume_score,
+        "rsi_score": rsi_score,
+        "candlestick_score": candlestick_score,
+        "candlestick_signals": signals,
+    }
+
+
+def _real_technical_score(candidate: dict[str, Any]) -> int:
+    return _real_technical_score_parts(candidate)["technical_score"]
+
+
+def _real_confidence(candidate: dict[str, Any], technical_score: int) -> float:
+    confidence = 0.45 + technical_score / 100
+    if candidate.get("fallback"):
+        confidence -= 0.08
+    required_fields = ["close", "volume", "ma5", "ma25", "rsi", "volume_ratio", "turnover_value", "five_day_volatility"]
+    missing = sum(1 for field in required_fields if candidate.get(field) is None)
+    confidence -= missing * 0.04
+    return round(max(0.1, min(0.95, confidence)), 2)
+
+
+def _real_score_reason(candidate: dict[str, Any], technical_parts: dict[str, Any], total_score: int) -> str:
+    technical_score = technical_parts["technical_score"]
+    signals = technical_parts.get("candlestick_signals", [])
+    reasons = [
+        f"technical_score={technical_score}",
+        f"trend_score={technical_parts['trend_score']}",
+        f"volume_score={technical_parts['volume_score']}",
+        f"rsi_score={technical_parts['rsi_score']}",
+        f"candlestick_score={technical_parts['candlestick_score']}",
+    ]
+    if "bullish_candle" in signals and "ma_reclaim" in signals:
+        reasons.append("陽線かつ終値が高値圏で、5日線を上回っているため短期資金流入を評価")
+    elif "long_upper_shadow_warning" in signals:
+        reasons.append("出来高増加はあるが、上ヒゲが長く高値圏で売り圧力を確認")
+    if "ma_trend_alignment" in signals:
+        reasons.append("close > ma5 > ma25 の上昇配列を確認")
+    if "overheated_warning" in signals:
+        reasons.append("RSI高水準かつ上ヒゲを伴う失速に注意")
+    if technical_parts.get("sector_adjustment"):
+        direction = "加点" if technical_parts["sector_adjustment"] > 0 else "減点"
+        reasons.append(f"業種モメンタムにより{direction}{technical_parts['sector_adjustment']:+.0f}点")
+    if candidate.get("fallback"):
+        reasons.append("fallback候補のため減点")
+    reasons.append(f"total_score={total_score}")
+    return "、".join(reasons)
+
+
+def _has_candlestick_data(candidate: dict[str, Any]) -> bool:
+    return all(candidate.get(field) is not None for field in ["candle_body_rate", "upper_shadow_rate", "lower_shadow_rate", "close_position_in_range"])
+
+
+def _sector_score_adjustment(candidate: dict[str, Any]) -> int:
+    score = candidate.get("sector_momentum_score")
+    if score is None:
+        return 0
+    try:
+        raw = (float(score) - 50.0) / 10.0
+    except (TypeError, ValueError):
+        return 0
+    return round(max(-5.0, min(5.0, raw)))
+
+
+def _real_rejected_reason(
+    item: dict[str, Any],
+    selected_count: int,
+    selection_config: dict[str, Any],
+) -> str:
+    if item["confidence"] < selection_config["min_confidence"]:
+        return "信頼度基準を満たさないため落選"
+    if item["total_score"] < selection_config["top_pick_min_score"]:
+        return "トップピック基準65点を下回るため落選"
+    if item["total_score"] < selection_config["min_score"]:
+        return "通常基準70点には届かないため落選"
+    if selected_count >= selection_config["max_selected"]:
+        return "上位候補だが最大採用数を超えたため落選"
+    return "採用条件を満たさなかったため"
+
+
+def _technical_score(candidate: dict[str, Any], config: dict[str, Any], rng: random.Random) -> int:
+    max_score = int(config["scoring"]["technical_max"])
+    momentum_part = min(max(candidate["momentum_5d"], 0), 0.12) / 0.12 * 24
+    volume_part = min(candidate["volume_ratio_20d"], 3.0) / 3.0 * 16
+    volatility_part = max(0, 0.08 - candidate["volatility_20d"]) / 0.08 * 10
+    return min(max_score, round(momentum_part + volume_part + volatility_part + rng.uniform(-3, 3)))
+
+
+def _score_comment(total: int, confidence: float) -> str:
+    if total >= 80 and confidence >= 0.75:
+        return "教科書的には優先検討に値する水準です。"
+    if total >= 65:
+        return "候補としては悪くありませんが、過信は禁物です。"
+    return "今回は見送りが妥当です。"
+
+
+def _rejection_reason(
+    item: dict[str, Any],
+    selected_count: int,
+    max_positions: int,
+    confidence_min: float,
+) -> str:
+    if item["confidence"] < confidence_min:
+        return "信頼度が採用基準に届かないため落選"
+    if selected_count >= max_positions:
+        return "最大保有銘柄数の上限に達したため落選"
+    return "総合順位が採用圏外のため落選"

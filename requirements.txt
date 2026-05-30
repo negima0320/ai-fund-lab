@@ -1,0 +1,6 @@
+PyYAML>=6.0.2
+jquants-api-client
+python-dotenv
+openai
+pytest
+pandas-ta
