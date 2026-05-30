@@ -87,6 +87,16 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
                 technical_score REAL,
                 news_score REAL,
                 financial_score REAL,
+                ma_score REAL,
+                rsi_score REAL,
+                volume_score REAL,
+                candlestick_score REAL,
+                market_context_score REAL,
+                sector_score REAL,
+                penalty_score REAL,
+                score_components TEXT,
+                score_components_total REAL,
+                score_components_match INTEGER,
                 market_regime TEXT,
                 advance_ratio REAL,
                 candlestick_signals TEXT,
@@ -170,6 +180,13 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
                 trend_score REAL,
                 volume_score REAL,
                 rsi_score REAL,
+                ma_score REAL,
+                market_context_score REAL,
+                sector_score REAL,
+                penalty_score REAL,
+                score_components TEXT,
+                score_components_total REAL,
+                score_components_match INTEGER,
                 market_filter_applied INTEGER,
                 market_regime TEXT,
                 market_filter_reason TEXT,
@@ -388,6 +405,16 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
         _add_column_if_missing(connection, "trades", "technical_score", "REAL")
         _add_column_if_missing(connection, "trades", "news_score", "REAL")
         _add_column_if_missing(connection, "trades", "financial_score", "REAL")
+        _add_column_if_missing(connection, "trades", "ma_score", "REAL")
+        _add_column_if_missing(connection, "trades", "rsi_score", "REAL")
+        _add_column_if_missing(connection, "trades", "volume_score", "REAL")
+        _add_column_if_missing(connection, "trades", "candlestick_score", "REAL")
+        _add_column_if_missing(connection, "trades", "market_context_score", "REAL")
+        _add_column_if_missing(connection, "trades", "sector_score", "REAL")
+        _add_column_if_missing(connection, "trades", "penalty_score", "REAL")
+        _add_column_if_missing(connection, "trades", "score_components", "TEXT")
+        _add_column_if_missing(connection, "trades", "score_components_total", "REAL")
+        _add_column_if_missing(connection, "trades", "score_components_match", "INTEGER")
         _add_column_if_missing(connection, "trades", "market_regime", "TEXT")
         _add_column_if_missing(connection, "trades", "advance_ratio", "REAL")
         _add_column_if_missing(connection, "trades", "candlestick_signals", "TEXT")
@@ -446,6 +473,13 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
         _add_column_if_missing(connection, "scoring_results", "trend_score", "REAL")
         _add_column_if_missing(connection, "scoring_results", "volume_score", "REAL")
         _add_column_if_missing(connection, "scoring_results", "rsi_score", "REAL")
+        _add_column_if_missing(connection, "scoring_results", "ma_score", "REAL")
+        _add_column_if_missing(connection, "scoring_results", "market_context_score", "REAL")
+        _add_column_if_missing(connection, "scoring_results", "sector_score", "REAL")
+        _add_column_if_missing(connection, "scoring_results", "penalty_score", "REAL")
+        _add_column_if_missing(connection, "scoring_results", "score_components", "TEXT")
+        _add_column_if_missing(connection, "scoring_results", "score_components_total", "REAL")
+        _add_column_if_missing(connection, "scoring_results", "score_components_match", "INTEGER")
         _add_column_if_missing(connection, "scoring_results", "market_filter_applied", "INTEGER")
         _add_column_if_missing(connection, "scoring_results", "market_regime", "TEXT")
         _add_column_if_missing(connection, "scoring_results", "market_filter_reason", "TEXT")
@@ -662,6 +696,16 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                     trade.get("technical_score"),
                     trade.get("news_score"),
                     trade.get("financial_score"),
+                    trade.get("ma_score") or trade.get("trend_score"),
+                    trade.get("rsi_score"),
+                    trade.get("volume_score"),
+                    trade.get("candlestick_score"),
+                    trade.get("market_context_score"),
+                    trade.get("sector_score") or trade.get("sector_score_adjustment"),
+                    trade.get("penalty_score"),
+                    _json(trade.get("score_components", {})),
+                    trade.get("score_components_total"),
+                    1 if trade.get("score_components_match") else 0 if trade.get("score_components_match") is not None else None,
                     trade.get("market_regime"),
                     trade.get("advance_ratio"),
                     _json(trade.get("candlestick_signals", [])),
@@ -705,7 +749,10 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                 trade_id, profile_id, profile_name, action, code, name, sector_name, entry_date, exit_date, holding_days,
                 entry_price, exit_price, shares, amount, profit, profit_rate,
                 exit_reason, result, score, rsi, volume_ratio, total_score,
-                technical_score, news_score, financial_score, market_regime,
+                technical_score, news_score, financial_score, ma_score, rsi_score,
+                volume_score, candlestick_score, market_context_score, sector_score,
+                penalty_score, score_components, score_components_total,
+                score_components_match, market_regime,
                 advance_ratio, candlestick_signals, selected_reason, reason, round_lot_size,
                 use_round_lot, skipped_reason, intended_price, executed_price,
                 slippage_amount, slippage_rate, stop_loss_rate,
@@ -716,7 +763,7 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                 estimated_tax, net_profit, net_profit_rate, dealer_comment,
                 broker_provider, order_status, live_trading, safety_checked,
                 config_version, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -742,10 +789,12 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
                 bb_lower, atr, candle_type, candle_body_rate, upper_shadow_rate,
                 lower_shadow_rate, close_position_in_range, gap_rate,
                 candlestick_signals, candlestick_score, trend_score, volume_score,
-                rsi_score, market_filter_applied, market_regime, market_filter_reason,
+                rsi_score, ma_score, market_context_score, sector_score,
+                penalty_score, score_components, score_components_total,
+                score_components_match, market_filter_applied, market_regime, market_filter_reason,
                 source_provider, ai_reason, ai_risk, ai_confidence,
                 ai_score, config_version, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -793,6 +842,13 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
                     item.get("trend_score"),
                     item.get("volume_score"),
                     item.get("rsi_score"),
+                    item.get("ma_score") or item.get("trend_score"),
+                    item.get("market_context_score"),
+                    item.get("sector_score") or item.get("sector_score_adjustment"),
+                    item.get("penalty_score"),
+                    _json(item.get("score_components", {})),
+                    item.get("score_components_total"),
+                    1 if item.get("score_components_match") else 0 if item.get("score_components_match") is not None else None,
                     1 if item.get("market_filter_applied") else 0,
                     item.get("market_regime"),
                     item.get("market_filter_reason"),

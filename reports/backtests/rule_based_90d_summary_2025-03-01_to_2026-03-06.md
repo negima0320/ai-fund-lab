@@ -3,11 +3,11 @@
 ## 実行条件
 
 - 期間: 2025-03-01 〜 2026-03-06
-- profile: rookie_dealer_02_v2_1 新人ディーラー2号 v2.1
+- profile: rookie_dealer_02_v2_2 新人ディーラー2号 v2.2
 - provider: jquants
 - ChatGPT/OpenAI: disabled
 - broker: paper
-- config_version: cfg_2de4f40
+- config_version: cfg_29a2bb2
 
 ## 結果サマリ
 
@@ -24,7 +24,7 @@
 - 損切り回数: 24
 - 最大保有期間売却回数: 30
 - no trade日数: 102
-- selected_count合計: 312
+- selected_count合計: 313
 
 ## 新人ディーラー1号コメント
 

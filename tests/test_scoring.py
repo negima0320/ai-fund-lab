@@ -37,6 +37,12 @@ def test_scores_are_in_range(config_copy: dict) -> None:
     item = result["scores"][0]
     assert 0 <= item["technical_score"] <= 50
     assert 0 <= item["total_score"] <= 100
+    assert item["score_components"]["matches_total_score"] is True
+    assert item["score_components"]["component_total"] == item["total_score"]
+    assert item["ma_score"] == item["trend_score"]
+    assert item["score_components"]["volume_score"] == item["volume_score"]
+    assert item["score_components"]["rsi_score"] == item["rsi_score"]
+    assert item["score_components"]["candlestick_score"] == item["candlestick_score"]
 
 
 def test_regular_selection_follows_config(config_copy: dict) -> None:

@@ -3,8 +3,9 @@ from __future__ import annotations
 from copy import deepcopy
 
 import main
-from db import analyze_operation_data, get_database_path, initialize_database, save_portfolio_snapshot, save_trades
-from main import _profile_compare_row, build_profile_ranking, render_compare_profiles_markdown, write_backtest_summary
+from db import analyze_operation_data, get_database_path, initialize_database, save_portfolio_snapshot, save_scoring_results, save_trades
+from main import _profile_compare_row, build_profile_diff_analysis, build_profile_ranking, render_compare_profiles_markdown, write_backtest_summary
+from profile_loader import load_profile
 
 
 def test_analyze_and_compare_profiles_profit_factor_match(config_copy: dict, tmp_path) -> None:
@@ -377,3 +378,168 @@ def test_analyze_filters_portfolio_and_trades_by_profile(config_copy: dict, tmp_
     assert analysis_a["trade_analysis"]["loss_count"] == 0
     assert analysis_b["trade_analysis"]["win_count"] == 0
     assert analysis_b["trade_analysis"]["loss_count"] == 1
+
+
+def test_profile_diff_analysis_compares_v2_1_and_v2_2(tmp_path) -> None:
+    profile_21 = load_profile("rookie_dealer_02_v2_1")
+    profile_22 = load_profile("rookie_dealer_02_v2_2")
+    db_path = str(tmp_path / "ai_fund_lab.sqlite3")
+    profile_21["database"]["path"] = db_path
+    profile_22["database"]["path"] = db_path
+    initialize_database(profile_21, tmp_path)
+    save_scoring_results(
+        profile_21,
+        tmp_path,
+        {
+            "date": "2026-03-06",
+            "scores": [
+                {
+                    "code": "1001",
+                    "name": "Shared",
+                    "rank": 1,
+                    "total_score": 80,
+                    "selected": True,
+                    "market_regime": "risk_off",
+                },
+                {
+                    "code": "1002",
+                    "name": "Blocked",
+                    "rank": 2,
+                    "total_score": 76,
+                    "selected": False,
+                    "market_regime": "risk_off",
+                    "rejected_reason": "risk_offのため買付抑制",
+                },
+                {
+                    "code": "1003",
+                    "name": "Removed",
+                    "rank": 3,
+                    "total_score": 74,
+                    "selected": True,
+                    "market_regime": "neutral",
+                },
+            ],
+        },
+    )
+    save_scoring_results(
+        profile_22,
+        tmp_path,
+        {
+            "date": "2026-03-06",
+            "scores": [
+                {
+                    "code": "1001",
+                    "name": "Shared",
+                    "rank": 1,
+                    "total_score": 80,
+                    "selected": True,
+                    "market_regime": "risk_off",
+                },
+                {
+                    "code": "1002",
+                    "name": "Newly Selected",
+                    "rank": 2,
+                    "total_score": 76,
+                    "selected": True,
+                    "market_regime": "risk_off",
+                },
+                {
+                    "code": "1003",
+                    "name": "Removed",
+                    "rank": 3,
+                    "total_score": 74,
+                    "selected": False,
+                    "market_regime": "neutral",
+                    "rejected_reason": "上位候補だが最大採用数を超えたため落選",
+                },
+            ],
+        },
+    )
+
+    analysis = build_profile_diff_analysis(
+        [profile_21, profile_22],
+        get_database_path(profile_21, tmp_path),
+        "2026-03-01",
+        "2026-03-31",
+    )
+
+    assert analysis is not None
+    assert analysis["base_profile_id"] == "rookie_dealer_02_v2_1"
+    assert analysis["target_profile_id"] == "rookie_dealer_02_v2_2"
+    assert analysis["base_selected_count"] == 2
+    assert analysis["target_selected_count"] == 2
+    assert analysis["base_risk_off_candidate_count"] == 2
+    assert analysis["target_risk_off_candidate_count"] == 2
+    assert analysis["base_risk_off_rejected_count"] == 1
+    assert analysis["target_risk_off_rejected_count"] == 0
+    assert analysis["newly_selected_count"] == 1
+    assert analysis["removed_count"] == 1
+    assert analysis["newly_selected"][0]["code"] == "1002"
+    assert analysis["removed"][0]["code"] == "1003"
+    assert analysis["no_practical_effect"] is False
+    assert {
+        "key": "market_filter.risk_off_buy_policy",
+        "base": "conservative",
+        "target": "relaxed",
+    } in analysis["effective_config_differences"]
+    markdown = render_compare_profiles_markdown(
+        {
+            "start_date": "2026-03-01",
+            "end_date": "2026-03-31",
+            "profiles": [],
+            "ranking": [],
+            "profile_diff_analysis": analysis,
+        }
+    )
+    assert "## Profile Diff Analysis" in markdown
+    assert "- newly selected by v2.2: 1" in markdown
+    assert "2026-03-06 1002 Newly Selected" in markdown
+
+
+def test_profile_diff_analysis_marks_no_practical_effect(tmp_path) -> None:
+    profile_21 = load_profile("rookie_dealer_02_v2_1")
+    profile_22 = load_profile("rookie_dealer_02_v2_2")
+    db_path = str(tmp_path / "ai_fund_lab.sqlite3")
+    profile_21["database"]["path"] = db_path
+    profile_22["database"]["path"] = db_path
+    initialize_database(profile_21, tmp_path)
+    for profile in [profile_21, profile_22]:
+        save_scoring_results(
+            profile,
+            tmp_path,
+            {
+                "date": "2026-03-06",
+                "scores": [
+                    {
+                        "code": "1001",
+                        "name": "Same",
+                        "rank": 1,
+                        "total_score": 80,
+                        "selected": True,
+                        "market_regime": "risk_off",
+                    }
+                ],
+            },
+        )
+
+    analysis = build_profile_diff_analysis(
+        [profile_21, profile_22],
+        get_database_path(profile_21, tmp_path),
+        "2026-03-01",
+        "2026-03-31",
+    )
+
+    assert analysis is not None
+    assert analysis["newly_selected_count"] == 0
+    assert analysis["removed_count"] == 0
+    assert analysis["no_practical_effect"] is True
+    markdown = render_compare_profiles_markdown(
+        {
+            "start_date": "2026-03-01",
+            "end_date": "2026-03-31",
+            "profiles": [],
+            "ranking": [],
+            "profile_diff_analysis": analysis,
+        }
+    )
+    assert "No practical effect" in markdown

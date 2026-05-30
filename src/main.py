@@ -596,11 +596,13 @@ def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_
 
     rows = [_profile_compare_row(config, db_path, start_date_text, end_date_text) for config in profiles]
     ranking = build_profile_ranking(rows)
+    profile_diff_analysis = build_profile_diff_analysis(profiles, db_path, start_date_text, end_date_text)
     payload = {
         "start_date": start_date_text,
         "end_date": end_date_text,
         "profiles": rows,
         "ranking": ranking,
+        "profile_diff_analysis": profile_diff_analysis,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
     output_dir = ROOT / "reports" / "profile_comparisons"
@@ -625,6 +627,14 @@ def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_
         print("Profile Ranking")
         for item in ranking:
             print(f"{item['rank']}位 {item['profile_id']} score={_format_optional_number(item['score'])}")
+    if profile_diff_analysis:
+        print("Profile Diff Analysis")
+        print(f"base_profile: {profile_diff_analysis['base_profile_id']}")
+        print(f"target_profile: {profile_diff_analysis['target_profile_id']}")
+        print(f"newly selected by target: {profile_diff_analysis['newly_selected_count']}")
+        print(f"removed by target: {profile_diff_analysis['removed_count']}")
+        if profile_diff_analysis.get("no_practical_effect"):
+            print("No practical effect")
     print(f"markdown: {markdown_path.relative_to(ROOT)}")
     print(f"json: {json_path.relative_to(ROOT)}")
 
@@ -703,6 +713,133 @@ def _profile_compare_row(config: dict[str, Any], db_path: Path, start_date_text:
         ),
         "score_detail": score_detail_groups(closed),
     }
+
+
+def build_profile_diff_analysis(
+    configs: list[dict[str, Any]],
+    db_path: Path,
+    start_date_text: str,
+    end_date_text: str,
+) -> dict[str, Any] | None:
+    if len(configs) < 2:
+        return None
+    pair = _profile_diff_pair(configs)
+    if pair is None:
+        return None
+    base_config, target_config = pair
+    base_profile_id = profile_id_from(base_config)
+    target_profile_id = profile_id_from(target_config)
+    base_rows = _load_scoring_rows_for_profile(db_path, base_profile_id, start_date_text, end_date_text)
+    target_rows = _load_scoring_rows_for_profile(db_path, target_profile_id, start_date_text, end_date_text)
+    base_selected = _selected_key_map(base_rows)
+    target_selected = _selected_key_map(target_rows)
+    newly_selected_keys = sorted(set(target_selected) - set(base_selected))
+    removed_keys = sorted(set(base_selected) - set(target_selected))
+    return {
+        "base_profile_id": base_profile_id,
+        "base_profile_name": profile_name_from(base_config),
+        "target_profile_id": target_profile_id,
+        "target_profile_name": profile_name_from(target_config),
+        "base_selected_count": len(base_selected),
+        "target_selected_count": len(target_selected),
+        "base_risk_off_candidate_count": _risk_off_candidate_count(base_rows),
+        "target_risk_off_candidate_count": _risk_off_candidate_count(target_rows),
+        "base_risk_off_rejected_count": _risk_off_rejected_count(base_rows),
+        "target_risk_off_rejected_count": _risk_off_rejected_count(target_rows),
+        "newly_selected_count": len(newly_selected_keys),
+        "removed_count": len(removed_keys),
+        "newly_selected": [_selection_diff_record(target_selected[key]) for key in newly_selected_keys],
+        "removed": [_selection_diff_record(base_selected[key]) for key in removed_keys],
+        "effective_config_differences": _effective_config_differences(base_config, target_config),
+        "no_practical_effect": len(newly_selected_keys) == 0 and len(removed_keys) == 0,
+    }
+
+
+def _profile_diff_pair(configs: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    by_id = {profile_id_from(config): config for config in configs}
+    if "rookie_dealer_02_v2_1" in by_id and "rookie_dealer_02_v2_2" in by_id:
+        return by_id["rookie_dealer_02_v2_1"], by_id["rookie_dealer_02_v2_2"]
+    if len(configs) >= 2:
+        return configs[0], configs[1]
+    return None
+
+
+def _load_scoring_rows_for_profile(db_path: Path, profile_id: str, start_date_text: str, end_date_text: str) -> list[dict[str, Any]]:
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        return [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT *
+                FROM scoring_results
+                WHERE profile_id = ? AND date BETWEEN ? AND ?
+                ORDER BY date, rank, id
+                """,
+                (profile_id, start_date_text, end_date_text),
+            )
+        ]
+
+
+def _selected_key_map(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+    return {
+        (str(row.get("date")), str(row.get("code"))): row
+        for row in rows
+        if bool(row.get("selected"))
+    }
+
+
+def _risk_off_candidate_count(rows: list[dict[str, Any]]) -> int:
+    return sum(1 for row in rows if row.get("market_regime") == "risk_off")
+
+
+def _risk_off_rejected_count(rows: list[dict[str, Any]]) -> int:
+    return sum(
+        1
+        for row in rows
+        if row.get("market_regime") == "risk_off"
+        and not bool(row.get("selected"))
+        and row.get("rejected_reason") == "risk_offのため買付抑制"
+    )
+
+
+def _selection_diff_record(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "date": row.get("date"),
+        "code": row.get("code"),
+        "name": row.get("name"),
+        "rank": row.get("rank"),
+        "total_score": row.get("total_score"),
+        "market_regime": row.get("market_regime"),
+        "rejected_reason": row.get("rejected_reason"),
+        "reason": row.get("reason"),
+    }
+
+
+def _effective_config_differences(base_config: dict[str, Any], target_config: dict[str, Any]) -> list[dict[str, Any]]:
+    keys = [
+        ("market_filter", "risk_off_buy_policy"),
+        ("market_filter", "risk_off_max_buy_orders"),
+        ("market_filter", "risk_off_min_score"),
+        ("market_filter", "risk_off_disable_top_pick"),
+        ("selection", "min_score"),
+        ("selection", "max_rsi_for_new_position"),
+        ("volume_filter", "min_volume_ratio"),
+        ("execution", "stop_loss_execution"),
+    ]
+    differences = []
+    for section, key in keys:
+        base_value = (base_config.get(section) or {}).get(key)
+        target_value = (target_config.get(section) or {}).get(key)
+        if base_value != target_value:
+            differences.append(
+                {
+                    "key": f"{section}.{key}",
+                    "base": base_value,
+                    "target": target_value,
+                }
+            )
+    return differences
 
 
 def build_profile_ranking(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -802,6 +939,9 @@ def render_compare_profiles_markdown(payload: dict[str, Any]) -> str:
                 "",
             ]
         )
+    if payload.get("profile_diff_analysis"):
+        lines.extend(["", "## Profile Diff Analysis", ""])
+        lines.extend(_profile_diff_analysis_lines(payload["profile_diff_analysis"]))
     lines.extend(["", "## Score Detail", ""])
     for row in payload["profiles"]:
         lines.extend(
@@ -824,6 +964,52 @@ def render_compare_profiles_markdown(payload: dict[str, Any]) -> str:
         lines.append("")
     lines.append("")
     return "\n".join(lines)
+
+
+def _profile_diff_analysis_lines(analysis: dict[str, Any]) -> list[str]:
+    lines = [
+        f"- base_profile: {analysis.get('base_profile_id')} {analysis.get('base_profile_name') or ''}",
+        f"- target_profile: {analysis.get('target_profile_id')} {analysis.get('target_profile_name') or ''}",
+        f"- v2.1 selected count: {analysis.get('base_selected_count')}",
+        f"- v2.2 selected count: {analysis.get('target_selected_count')}",
+        f"- v2.1 risk_off candidate count: {analysis.get('base_risk_off_candidate_count')}",
+        f"- v2.2 risk_off candidate count: {analysis.get('target_risk_off_candidate_count')}",
+        f"- v2.1 risk_off rejected count: {analysis.get('base_risk_off_rejected_count')}",
+        f"- v2.2 risk_off rejected count: {analysis.get('target_risk_off_rejected_count')}",
+        f"- newly selected by v2.2: {analysis.get('newly_selected_count')}",
+        f"- removed by v2.2: {analysis.get('removed_count')}",
+    ]
+    if analysis.get("no_practical_effect"):
+        lines.extend(["", "No practical effect"])
+    lines.extend(["", "### Effective Config Differences", ""])
+    differences = analysis.get("effective_config_differences") or []
+    if differences:
+        lines.extend(
+            [
+                f"- {item.get('key')}: {item.get('base')} -> {item.get('target')}"
+                for item in differences
+            ]
+        )
+    else:
+        lines.append("- 差分なし")
+    lines.extend(["", "### Newly Selected by v2.2", ""])
+    lines.extend(_selection_diff_lines(analysis.get("newly_selected", [])))
+    lines.extend(["", "### Removed by v2.2", ""])
+    lines.extend(_selection_diff_lines(analysis.get("removed", [])))
+    return lines
+
+
+def _selection_diff_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- なし"]
+    return [
+        (
+            f"- {item.get('date')} {item.get('code')} {item.get('name')}: "
+            f"rank {item.get('rank')}, score {_format_optional_number(item.get('total_score'))}, "
+            f"market {item.get('market_regime') or 'unknown'}"
+        )
+        for item in items[:50]
+    ]
 
 
 def _average_number(values: list[float]) -> float | None:
@@ -4966,6 +5152,16 @@ def write_trades_csv(path: Path, trades: list[dict[str, Any]]) -> None:
         "technical_score",
         "news_score",
         "financial_score",
+        "ma_score",
+        "rsi_score",
+        "volume_score",
+        "candlestick_score",
+        "market_context_score",
+        "sector_score",
+        "penalty_score",
+        "score_components",
+        "score_components_total",
+        "score_components_match",
         "market_regime",
         "advance_ratio",
         "candlestick_signals",

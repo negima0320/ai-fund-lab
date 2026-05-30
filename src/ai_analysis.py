@@ -226,6 +226,13 @@ def build_decision_record(
             "volume_score": _number(scoring.get("volume_score")),
             "rsi_score": _number(scoring.get("rsi_score")),
             "candlestick_score": _number(scoring.get("candlestick_score")),
+            "ma_score": _number(scoring.get("ma_score") or scoring.get("trend_score")),
+            "market_context_score": _number(scoring.get("market_context_score")),
+            "sector_score": _number(scoring.get("sector_score") or scoring.get("sector_score_adjustment")),
+            "penalty_score": _number(scoring.get("penalty_score")),
+            "score_components": _json_dict(scoring.get("score_components")),
+            "score_components_total": _number(scoring.get("score_components_total")),
+            "score_components_match": _bool_or_none(scoring.get("score_components_match")),
             "news_score": _number(scoring.get("news_score")),
             "financial_score": _number(scoring.get("financial_score")),
             "confidence": _number(scoring.get("confidence")),
@@ -492,6 +499,32 @@ def _json_list(value: Any) -> list[Any]:
             return [value] if value else []
         return parsed if isinstance(parsed, list) else []
     return []
+
+
+def _json_dict(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes"}
+    return bool(value)
 
 
 def _number(value: Any) -> float | None:

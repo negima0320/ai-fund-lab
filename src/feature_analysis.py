@@ -13,6 +13,8 @@ from trade_metrics import is_closed_trade_for_metrics
 
 
 SCORE_DETAIL_BUCKET_ORDER = ["65-69", "70-71", "72-73", "74-75", "76-79", "80+"]
+COMPONENT_SCORE_BUCKET_ORDER = ["0-5", "5-10", "10-15", "15-20", "20-30", "30-40", "40-50", "50+"]
+COMPONENT_DETAIL_BUCKET_ORDER = ["<0", "0", "0-3", "3-5", "5-8", "8-10", "10-15", "15+"]
 
 
 def build_feature_analysis(config: dict[str, Any], root: Path) -> dict[str, Any]:
@@ -46,7 +48,7 @@ def build_feature_analysis(config: dict[str, Any], root: Path) -> dict[str, Any]
         scoring_rows = _rows(
             connection,
             """
-            SELECT total_score, rejected_reason
+            SELECT *
             FROM scoring_results
             WHERE profile_id = ?
             ORDER BY date, rank, id
@@ -57,6 +59,7 @@ def build_feature_analysis(config: dict[str, Any], root: Path) -> dict[str, Any]
     market_by_date = {row.get("date"): row for row in market_rows}
     records = [_feature_record(trade, market_by_date.get(trade.get("entry_date"), {})) for trade in closed]
     rsi_filter = _rsi_filter_rejection_summary(scoring_rows, config)
+    component_validation = _score_component_validation(records, scoring_rows)
 
     return {
         "profile_id": profile_id,
@@ -73,6 +76,20 @@ def build_feature_analysis(config: dict[str, Any], root: Path) -> dict[str, Any]
         "candlestick_signal": _group_by_signals(records),
         "score": _group_by(records, lambda item: _score_bucket(item.get("total_score")), ["60-65", "65-70", "70-75", "75-80", "80+"]),
         "score_detail": score_detail_groups(records),
+        "score_contribution": {
+            "selected_score_averages": _selected_score_averages(records),
+            "technical_score": _group_by(records, lambda item: _component_score_bucket(item.get("technical_score")), COMPONENT_SCORE_BUCKET_ORDER),
+            "financial_score": _group_by(records, lambda item: _component_score_bucket(item.get("financial_score")), COMPONENT_SCORE_BUCKET_ORDER),
+            "news_score": _group_by(records, lambda item: _component_score_bucket(item.get("news_score")), COMPONENT_SCORE_BUCKET_ORDER),
+        },
+        "score_component_analysis": {
+            "score_components_validation": component_validation,
+            "rsi_score": _group_by(records, lambda item: _score_component_bucket(item.get("rsi_score")), COMPONENT_DETAIL_BUCKET_ORDER),
+            "volume_score": _group_by(records, lambda item: _score_component_bucket(item.get("volume_score")), COMPONENT_DETAIL_BUCKET_ORDER),
+            "candlestick_score": _group_by(records, lambda item: _score_component_bucket(item.get("candlestick_score")), COMPONENT_DETAIL_BUCKET_ORDER),
+            "market_context_score": _group_by(records, lambda item: _score_component_bucket(item.get("market_context_score")), COMPONENT_DETAIL_BUCKET_ORDER),
+            "penalty_score": _group_by(records, lambda item: _score_component_bucket(item.get("penalty_score")), COMPONENT_DETAIL_BUCKET_ORDER),
+        },
         "records_used": records,
     }
 
@@ -101,6 +118,14 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "",
         *_group_lines(analysis.get("score_detail", [])),
         "",
+        "## Score Contribution Analysis",
+        "",
+        *_score_contribution_lines(analysis.get("score_contribution", {})),
+        "",
+        "## Score Component Analysis",
+        "",
+        *_score_component_analysis_lines(analysis.get("score_component_analysis", {})),
+        "",
         "## market_regime別勝率",
         "",
         *_group_lines(analysis.get("market_regime", [])),
@@ -122,6 +147,7 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
 
 def _feature_record(trade: dict[str, Any], entry_market: dict[str, Any] | None = None) -> dict[str, Any]:
     entry_market = entry_market or {}
+    score_components = _json_dict(trade.get("score_components"))
     profit = _number(trade.get("net_profit")) or _number(trade.get("profit")) or _number(trade.get("gross_profit")) or 0.0
     profit_rate = _number(trade.get("net_profit_rate")) or _number(trade.get("profit_rate")) or _number(trade.get("gross_profit_rate"))
     advance_ratio = _number(trade.get("advance_ratio"))
@@ -143,6 +169,19 @@ def _feature_record(trade: dict[str, Any], entry_market: dict[str, Any] | None =
         "sector_name": trade.get("sector_name"),
         "candlestick_signals": _json_list(trade.get("candlestick_signals")),
         "total_score": _number(trade.get("total_score") or trade.get("score")),
+        "technical_score": _number(trade.get("technical_score")),
+        "financial_score": _number(trade.get("financial_score")),
+        "news_score": _number(trade.get("news_score")),
+        "score_components": score_components,
+        "ma_score": _component_value(trade, score_components, "ma_score"),
+        "rsi_score": _component_value(trade, score_components, "rsi_score"),
+        "volume_score": _component_value(trade, score_components, "volume_score"),
+        "candlestick_score": _component_value(trade, score_components, "candlestick_score"),
+        "market_context_score": _component_value(trade, score_components, "market_context_score"),
+        "sector_score": _component_value(trade, score_components, "sector_score"),
+        "penalty_score": _component_value(trade, score_components, "penalty_score"),
+        "score_components_total": _number(trade.get("score_components_total")) or _number(score_components.get("component_total")),
+        "score_components_match": _bool_or_none(trade.get("score_components_match"), score_components.get("matches_total_score")),
     }
 
 
@@ -200,7 +239,24 @@ def score_detail_groups(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _missing_feature_counts(records: list[dict[str, Any]]) -> dict[str, int]:
-    keys = ["rsi", "volume_ratio", "market_regime", "advance_ratio", "sector_name", "candlestick_signals", "total_score"]
+    keys = [
+        "rsi",
+        "volume_ratio",
+        "market_regime",
+        "advance_ratio",
+        "sector_name",
+        "candlestick_signals",
+        "total_score",
+        "technical_score",
+        "financial_score",
+        "news_score",
+        "score_components",
+        "rsi_score",
+        "volume_score",
+        "candlestick_score",
+        "market_context_score",
+        "penalty_score",
+    ]
     return {key: sum(1 for record in records if _missing_feature(record.get(key))) for key in keys}
 
 
@@ -208,6 +264,8 @@ def _missing_feature(value: Any) -> bool:
     if value is None or value == "":
         return True
     if isinstance(value, list) and not value:
+        return True
+    if isinstance(value, dict) and not value:
         return True
     return False
 
@@ -224,6 +282,71 @@ def _group_lines(items: list[dict[str, Any]]) -> list[str]:
         )
         for item in items
     ]
+
+
+def _selected_score_averages(records: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "technical_score": _average(_valid_numbers(record.get("technical_score") for record in records)),
+        "financial_score": _average(_valid_numbers(record.get("financial_score") for record in records)),
+        "news_score": _average(_valid_numbers(record.get("news_score") for record in records)),
+    }
+
+
+def _score_contribution_lines(score_contribution: dict[str, Any]) -> list[str]:
+    if not score_contribution:
+        return ["- データなし"]
+    averages = score_contribution.get("selected_score_averages", {})
+    lines = [
+        "### Selected Score Averages",
+        "",
+        f"- technical_score average: {_format_number(averages.get('technical_score'))}",
+        f"- financial_score average: {_format_number(averages.get('financial_score'))}",
+        f"- news_score average: {_format_number(averages.get('news_score'))}",
+        "",
+        "### technical_score帯",
+        "",
+        *_group_lines(score_contribution.get("technical_score", [])),
+        "",
+        "### financial_score帯",
+        "",
+        *_group_lines(score_contribution.get("financial_score", [])),
+        "",
+        "### news_score帯",
+        "",
+        *_group_lines(score_contribution.get("news_score", [])),
+    ]
+    return lines
+
+
+def _score_component_analysis_lines(component_analysis: dict[str, Any]) -> list[str]:
+    if not component_analysis:
+        return ["- データなし"]
+    validation = component_analysis.get("score_components_validation", {})
+    warnings = validation.get("warnings", [])
+    lines = [
+        "### total_score内訳検証",
+        "",
+        f"- closed_trade_count: {validation.get('closed_trade_count', 0)}",
+        f"- scoring_rows_count: {validation.get('scoring_rows_count', 0)}",
+        f"- selected_scoring_rows_count: {validation.get('selected_scoring_rows_count', 0)}",
+        f"- rejected_scoring_rows_count: {validation.get('rejected_scoring_rows_count', 0)}",
+        f"- missing_score_components_count: {validation.get('missing_score_components_count', 0)}",
+        f"- total_score_mismatch_count: {validation.get('total_score_mismatch_count', 0)}",
+    ]
+    if warnings:
+        lines.extend(["", "### warnings", ""])
+        lines.extend(f"- {warning}" for warning in warnings)
+    sections = [
+        ("rsi_score帯別", "rsi_score"),
+        ("volume_score帯別", "volume_score"),
+        ("candlestick_score帯別", "candlestick_score"),
+        ("market_context_score帯別", "market_context_score"),
+        ("penalty_score帯別", "penalty_score"),
+    ]
+    for title, key in sections:
+        lines.extend(["", f"### {title}", ""])
+        lines.extend(_group_lines(component_analysis.get(key, [])))
+    return lines
 
 
 def _rsi_bucket(value: Any) -> str:
@@ -292,6 +415,48 @@ def _score_detail_bucket(value: Any) -> str:
     return "80+"
 
 
+def _component_score_bucket(value: Any) -> str:
+    value = _number(value)
+    if value is None:
+        return "unknown"
+    if value < 5:
+        return "0-5"
+    if value < 10:
+        return "5-10"
+    if value < 15:
+        return "10-15"
+    if value < 20:
+        return "15-20"
+    if value < 30:
+        return "20-30"
+    if value < 40:
+        return "30-40"
+    if value <= 50:
+        return "40-50"
+    return "50+"
+
+
+def _score_component_bucket(value: Any) -> str:
+    value = _number(value)
+    if value is None:
+        return "unknown"
+    if value < 0:
+        return "<0"
+    if value == 0:
+        return "0"
+    if value < 3:
+        return "0-3"
+    if value < 5:
+        return "3-5"
+    if value < 8:
+        return "5-8"
+    if value < 10:
+        return "8-10"
+    if value < 15:
+        return "10-15"
+    return "15+"
+
+
 def _record_profit(item: dict[str, Any]) -> float | None:
     return _number(item.get("net_profit")) or _number(item.get("profit")) or _number(item.get("gross_profit"))
 
@@ -318,6 +483,64 @@ def _json_list(value: Any) -> list[Any]:
     return []
 
 
+def _json_dict(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _component_value(row: dict[str, Any], components: dict[str, Any], key: str) -> float | None:
+    value = _number(row.get(key))
+    if value is not None:
+        return value
+    return _number(components.get(key))
+
+
+def _bool_or_none(value: Any, fallback: Any = None) -> bool | None:
+    if value is None or value == "":
+        value = fallback
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes"}
+    return bool(value)
+
+
+def _score_component_validation(records: list[dict[str, Any]], scoring_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    missing_records = [record for record in records if not record.get("score_components")]
+    mismatch_records = [record for record in records if record.get("score_components_match") is False]
+    scoring_missing = [row for row in scoring_rows if not _json_dict(row.get("score_components"))]
+    scoring_mismatch = [row for row in scoring_rows if _bool_or_none(row.get("score_components_match")) is False]
+    warnings = []
+    if missing_records or scoring_missing:
+        warnings.append("score_components がない古いレコードがあります。再バックテスト後のログで分析してください。")
+    if mismatch_records or scoring_mismatch:
+        warnings.append("total_score と score_components の合計が一致しないレコードがあります。clampや古い保存形式の可能性があります。")
+    return {
+        "closed_trade_count": len(records),
+        "scoring_rows_count": len(scoring_rows),
+        "selected_scoring_rows_count": sum(1 for row in scoring_rows if row.get("selected")),
+        "rejected_scoring_rows_count": sum(1 for row in scoring_rows if not row.get("selected")),
+        "missing_score_components_count": len(missing_records),
+        "missing_scoring_score_components_count": len(scoring_missing),
+        "total_score_mismatch_count": len(mismatch_records),
+        "scoring_total_score_mismatch_count": len(scoring_mismatch),
+        "warnings": warnings,
+    }
+
+
 def _number(value: Any) -> float | None:
     if value is None or value == "":
         return None
@@ -325,6 +548,15 @@ def _number(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _valid_numbers(values: Any) -> list[float]:
+    result = []
+    for value in values:
+        number = _number(value)
+        if number is not None:
+            result.append(number)
+    return result
 
 
 def _average(values: list[float]) -> float | None:

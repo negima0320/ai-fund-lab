@@ -31,6 +31,29 @@ def test_feature_analysis_groups_closed_trade_results(config_copy: dict, tmp_pat
                 "technical_score": 42,
                 "news_score": 10,
                 "financial_score": 10,
+                "ma_score": 12,
+                "rsi_score": 10,
+                "volume_score": 8,
+                "candlestick_score": 12,
+                "market_context_score": 0,
+                "sector_score": 0,
+                "penalty_score": 0,
+                "score_components": {
+                    "ma_score": 12,
+                    "rsi_score": 10,
+                    "volume_score": 8,
+                    "candlestick_score": 12,
+                    "market_context_score": 0,
+                    "sector_score": 0,
+                    "financial_score": 10,
+                    "news_score": 10,
+                    "penalty_score": 0,
+                    "component_total": 82,
+                    "total_score": 82,
+                    "matches_total_score": True,
+                },
+                "score_components_total": 82,
+                "score_components_match": True,
                 "market_regime": "risk_on",
                 "advance_ratio": 0.62,
                 "sector_name": "情報・通信",
@@ -55,6 +78,29 @@ def test_feature_analysis_groups_closed_trade_results(config_copy: dict, tmp_pat
                 "technical_score": 35,
                 "news_score": 8,
                 "financial_score": 10,
+                "ma_score": 10,
+                "rsi_score": 6,
+                "volume_score": 4,
+                "candlestick_score": 15,
+                "market_context_score": 0,
+                "sector_score": 0,
+                "penalty_score": -1,
+                "score_components": {
+                    "ma_score": 10,
+                    "rsi_score": 6,
+                    "volume_score": 4,
+                    "candlestick_score": 15,
+                    "market_context_score": 0,
+                    "sector_score": 0,
+                    "financial_score": 10,
+                    "news_score": 8,
+                    "penalty_score": -1,
+                    "component_total": 68,
+                    "total_score": 68,
+                    "matches_total_score": True,
+                },
+                "score_components_total": 68,
+                "score_components_match": True,
                 "market_regime": "risk_off",
                 "advance_ratio": 0.28,
                 "sector_name": "機械",
@@ -75,6 +121,29 @@ def test_feature_analysis_groups_closed_trade_results(config_copy: dict, tmp_pat
                     "name": "Rejected",
                     "rank": 1,
                     "total_score": 76,
+                    "ma_score": 12,
+                    "rsi_score": 10,
+                    "volume_score": 8,
+                    "candlestick_score": 11,
+                    "market_context_score": 0,
+                    "sector_score": 0,
+                    "penalty_score": 0,
+                    "score_components": {
+                        "ma_score": 12,
+                        "rsi_score": 10,
+                        "volume_score": 8,
+                        "candlestick_score": 11,
+                        "market_context_score": 0,
+                        "sector_score": 0,
+                        "financial_score": 10,
+                        "news_score": 25,
+                        "penalty_score": 0,
+                        "component_total": 76,
+                        "total_score": 76,
+                        "matches_total_score": True,
+                    },
+                    "score_components_total": 76,
+                    "score_components_match": True,
                     "selected": False,
                     "rejected_reason": "RSI過熱のため新規買付見送り",
                 }
@@ -102,6 +171,35 @@ def test_feature_analysis_groups_closed_trade_results(config_copy: dict, tmp_pat
     assert score_detail_by_bucket["65-69"]["win_rate"] == 0.0
     assert score_detail_by_bucket["80+"]["count"] == 1
     assert score_detail_by_bucket["80+"]["win_rate"] == 1.0
+    contribution = analysis["score_contribution"]
+    assert contribution["selected_score_averages"]["technical_score"] == 38.5
+    assert contribution["selected_score_averages"]["financial_score"] == 10.0
+    assert contribution["selected_score_averages"]["news_score"] == 9.0
+    technical_by_bucket = {item["bucket"]: item for item in contribution["technical_score"]}
+    assert technical_by_bucket["30-40"]["count"] == 1
+    assert technical_by_bucket["30-40"]["win_rate"] == 0.0
+    assert technical_by_bucket["40-50"]["count"] == 1
+    assert technical_by_bucket["40-50"]["win_rate"] == 1.0
+    financial_by_bucket = {item["bucket"]: item for item in contribution["financial_score"]}
+    assert financial_by_bucket["10-15"]["count"] == 2
+    assert financial_by_bucket["10-15"]["win_rate"] == 0.5
+    news_by_bucket = {item["bucket"]: item for item in contribution["news_score"]}
+    assert news_by_bucket["5-10"]["count"] == 1
+    assert news_by_bucket["5-10"]["win_rate"] == 0.0
+    assert news_by_bucket["10-15"]["count"] == 1
+    assert news_by_bucket["10-15"]["win_rate"] == 1.0
+    component_analysis = analysis["score_component_analysis"]
+    assert component_analysis["score_components_validation"]["missing_score_components_count"] == 0
+    assert component_analysis["score_components_validation"]["total_score_mismatch_count"] == 0
+    assert component_analysis["score_components_validation"]["selected_scoring_rows_count"] == 0
+    assert component_analysis["score_components_validation"]["rejected_scoring_rows_count"] == 1
+    rsi_score_by_bucket = {item["bucket"]: item for item in component_analysis["rsi_score"]}
+    assert rsi_score_by_bucket["10-15"]["count"] == 1
+    assert rsi_score_by_bucket["5-8"]["count"] == 1
+    volume_score_by_bucket = {item["bucket"]: item for item in component_analysis["volume_score"]}
+    assert volume_score_by_bucket["8-10"]["win_rate"] == 1.0
+    penalty_by_bucket = {item["bucket"]: item for item in component_analysis["penalty_score"]}
+    assert penalty_by_bucket["<0"]["count"] == 1
     market_by_bucket = {item["bucket"]: item for item in analysis["market_regime"]}
     assert list(market_by_bucket) == ["risk_on", "neutral", "risk_off"]
     assert market_by_bucket["risk_on"]["win_rate"] == 1.0
@@ -112,6 +210,9 @@ def test_feature_analysis_groups_closed_trade_results(config_copy: dict, tmp_pat
     }
     assert "RSI別勝率" in render_feature_analysis_markdown(analysis)
     assert "score詳細分析" in render_feature_analysis_markdown(analysis)
+    assert "Score Contribution Analysis" in render_feature_analysis_markdown(analysis)
+    assert "Score Component Analysis" in render_feature_analysis_markdown(analysis)
+    assert "technical_score average: 38.50" in render_feature_analysis_markdown(analysis)
 
 
 def test_sell_trade_inherits_buy_time_features(config_copy: dict) -> None:
@@ -127,6 +228,29 @@ def test_sell_trade_inherits_buy_time_features(config_copy: dict) -> None:
         "technical_score": 44,
         "news_score": 8,
         "financial_score": 10,
+        "ma_score": 12,
+        "rsi_score": 10,
+        "volume_score": 8,
+        "candlestick_score": 14,
+        "market_context_score": 0,
+        "sector_score": 0,
+        "penalty_score": 0,
+        "score_components": {
+            "ma_score": 12,
+            "rsi_score": 10,
+            "volume_score": 8,
+            "candlestick_score": 14,
+            "market_context_score": 0,
+            "sector_score": 0,
+            "financial_score": 10,
+            "news_score": 8,
+            "penalty_score": 0,
+            "component_total": 82,
+            "total_score": 82,
+            "matches_total_score": True,
+        },
+        "score_components_total": 82,
+        "score_components_match": True,
         "confidence": 0.9,
         "reason": "test buy",
         "rsi": 56,
@@ -153,6 +277,10 @@ def test_sell_trade_inherits_buy_time_features(config_copy: dict) -> None:
     assert sell["technical_score"] == 44
     assert sell["news_score"] == 8
     assert sell["financial_score"] == 10
+    assert sell["rsi_score"] == 10
+    assert sell["volume_score"] == 8
+    assert sell["candlestick_score"] == 14
+    assert sell["score_components"]["matches_total_score"] is True
     assert sell["market_regime"] == "risk_on"
     assert sell["advance_ratio"] == 0.62
     assert sell["candlestick_signals"] == ["bullish_candle"]

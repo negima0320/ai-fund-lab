@@ -151,6 +151,14 @@ def score_real_candidates(
         rsi_selection = _rsi_selection_adjustment(candidate.get("rsi"), selection_config)
         volume_selection = _volume_selection_adjustment(candidate.get("volume_ratio"), volume_filter)
         total = max(0, total_before_selection_adjustment - rsi_selection["penalty"])
+        score_components = _score_components(
+            technical_parts=technical_parts,
+            financial_score=financial_score,
+            news_score=news_score,
+            market_context_score=0,
+            penalty_score=-rsi_selection["penalty"],
+            total_score=total,
+        )
         confidence = _real_confidence(candidate, technical)
         score_reason = _real_score_reason(candidate, technical_parts, total)
         if rsi_selection["penalty"]:
@@ -198,8 +206,15 @@ def score_real_candidates(
                 "candlestick_signals": technical_parts["candlestick_signals"],
                 "candlestick_score": technical_parts["candlestick_score"],
                 "trend_score": technical_parts["trend_score"],
+                "ma_score": technical_parts["trend_score"],
                 "volume_score": technical_parts["volume_score"],
                 "rsi_score": technical_parts["rsi_score"],
+                "market_context_score": score_components["market_context_score"],
+                "sector_score": score_components["sector_score"],
+                "penalty_score": score_components["penalty_score"],
+                "score_components": score_components,
+                "score_components_total": score_components["component_total"],
+                "score_components_match": score_components["matches_total_score"],
                 "total_score": total,
                 "rsi_selection_penalty": rsi_selection["penalty"],
                 "rsi_selection_excluded": rsi_selection["excluded"],
@@ -367,6 +382,39 @@ def _optional_float(value: Any) -> float | None:
     if value is None or value == "":
         return None
     return float(value)
+
+
+def _score_components(
+    technical_parts: dict[str, Any],
+    financial_score: float,
+    news_score: float,
+    market_context_score: float,
+    penalty_score: float,
+    total_score: float,
+) -> dict[str, Any]:
+    ma_score = float(technical_parts.get("trend_score") or 0)
+    rsi_score = float(technical_parts.get("rsi_score") or 0)
+    volume_score = float(technical_parts.get("volume_score") or 0)
+    candlestick_score = float(technical_parts.get("candlestick_score") or 0)
+    sector_score = float(technical_parts.get("sector_adjustment") or 0)
+    components = {
+        "ma_score": ma_score,
+        "rsi_score": rsi_score,
+        "volume_score": volume_score,
+        "candlestick_score": candlestick_score,
+        "market_context_score": float(market_context_score or 0),
+        "sector_score": sector_score,
+        "financial_score": float(financial_score or 0),
+        "news_score": float(news_score or 0),
+        "penalty_score": float(penalty_score or 0),
+    }
+    component_total = round(sum(components.values()), 2)
+    components["component_total"] = component_total
+    components["total_score"] = round(float(total_score or 0), 2)
+    components["matches_total_score"] = abs(component_total - components["total_score"]) <= 0.01
+    if not components["matches_total_score"]:
+        components["component_difference"] = round(components["total_score"] - component_total, 2)
+    return components
 
 
 def _score_news(news_payload: dict[str, Any]) -> dict[str, Any]:
