@@ -60,6 +60,7 @@ from real_screening import screen_candidates
 from release_notes import generate_release_notes, render_release_notes_markdown
 from safety import can_trade
 from scoring import build_trade_decisions, score_candidates, score_real_candidates
+from selection_quality import build_selection_quality_analysis, render_selection_quality_markdown
 from screening import generate_screening_log
 from tachibana_auth import load_private_key, load_tachibana_auth_config
 from technical_indicators import TechnicalIndicatorDependencyError
@@ -534,16 +535,24 @@ def run_analyze(config: dict[str, Any]) -> None:
     markdown_path = output_dir / "analysis_latest.md"
     feature_json_path = output_dir / "feature_analysis.json"
     feature_markdown_path = output_dir / "feature_analysis.md"
+    selection_quality_json_path = output_dir / "selection_quality.json"
+    selection_quality_markdown_path = output_dir / "selection_quality.md"
     feature_analysis = build_feature_analysis(config, ROOT)
+    selection_quality_analysis = build_selection_quality_analysis(config, ROOT)
+    analysis["selection_quality_analysis"] = selection_quality_analysis
     write_json(json_path, analysis)
     write_text(markdown_path, render_analysis_markdown(analysis))
     write_json(feature_json_path, feature_analysis)
     write_text(feature_markdown_path, render_feature_analysis_markdown(feature_analysis))
+    write_json(selection_quality_json_path, selection_quality_analysis)
+    write_text(selection_quality_markdown_path, render_selection_quality_markdown(selection_quality_analysis))
 
     portfolio = analysis["portfolio_analysis"]
     trades = analysis["trade_analysis"]
     trades_csv, db_trade_count, csv_trade_count = write_trades_csv_from_db(config)
     print("analysis completed")
+    print(f"profile_id: {analysis.get('current_profile_id')}")
+    print(f"profile_name: {analysis.get('current_profile_name')}")
     print(f"latest_total_assets: {_format_optional_number(portfolio['latest_total_assets'])}")
     print(f"cumulative_profit: {_format_optional_number(portfolio['cumulative_profit'])}")
     print(f"gross_cumulative_profit: {_format_optional_number(portfolio.get('gross_cumulative_profit'))}")
@@ -575,6 +584,8 @@ def run_analyze(config: dict[str, Any]) -> None:
     print(f"json: {json_path.relative_to(ROOT)}")
     print(f"feature_analysis_markdown: {feature_markdown_path.relative_to(ROOT)}")
     print(f"feature_analysis_json: {feature_json_path.relative_to(ROOT)}")
+    print(f"selection_quality_markdown: {selection_quality_markdown_path.relative_to(ROOT)}")
+    print(f"selection_quality_json: {selection_quality_json_path.relative_to(ROOT)}")
 
 
 def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_text: str) -> None:
@@ -4082,6 +4093,7 @@ def render_analysis_markdown(analysis: dict[str, Any]) -> str:
     profile_analysis = analysis.get("profile_analysis", [])
     yearly_performance = analysis.get("yearly_performance", [])
     monthly_performance = analysis.get("monthly_performance", [])
+    selection_quality = analysis.get("selection_quality_analysis", {})
     bands = scores["score_bands"]
     lines = [
         "# 新人ディーラー1号 分析レポート",
@@ -4177,6 +4189,10 @@ def render_analysis_markdown(analysis: dict[str, Any]) -> str:
         "## 業種別勝率",
         "",
         *_sector_win_rate_lines(sector_win_rates),
+        "",
+        "## Selection Quality Analysis",
+        "",
+        *_selection_quality_lines(selection_quality),
         "",
         "## スコア分析",
         "",
@@ -4282,6 +4298,26 @@ def _sector_win_rate_lines(items: list[dict[str, Any]]) -> list[str]:
             f"税引後損益 {_format_optional_yen(item.get('net_profit_total'))}"
         )
         for item in items
+    ]
+
+
+def _selection_quality_lines(analysis: dict[str, Any]) -> list[str]:
+    if not analysis:
+        return ["- selection qualityデータなし"]
+    selected = analysis.get("selected", {})
+    rejected = analysis.get("rejected", {})
+    lift = analysis.get("selection_lift", {})
+    return [
+        f"- screen候補: {analysis.get('screen_candidate_count', 0)}件",
+        f"- score候補: {analysis.get('score_candidate_count', 0)}件",
+        f"- selected銘柄: {analysis.get('selected_count', 0)}件",
+        f"- rejected銘柄: {analysis.get('rejected_count', 0)}件",
+        f"- selected平均5日リターン: {_format_optional_percent(selected.get('average_return_5d'))}",
+        f"- rejected平均5日リターン: {_format_optional_percent(rejected.get('average_return_5d'))}",
+        f"- selected平均10日リターン: {_format_optional_percent(selected.get('average_return_10d'))}",
+        f"- rejected平均10日リターン: {_format_optional_percent(rejected.get('average_return_10d'))}",
+        f"- Selection Lift 5d: {_format_optional_percent(lift.get('return_5d'))}",
+        f"- Selection Lift 10d: {_format_optional_percent(lift.get('return_10d'))}",
     ]
 
 

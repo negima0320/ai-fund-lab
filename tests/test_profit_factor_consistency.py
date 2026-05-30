@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 import main
 from db import analyze_operation_data, get_database_path, initialize_database, save_portfolio_snapshot, save_trades
 from main import _profile_compare_row, build_profile_ranking, render_compare_profiles_markdown, write_backtest_summary
@@ -275,3 +277,103 @@ def test_backtest_summary_uses_closed_trade_metrics(config_copy: dict, tmp_path,
     assert summary["excluded_order_event_count"] == 1
     assert summary["win_rate"] == 0.5
     assert summary["profit_factor"] == 2.5
+
+
+def test_analyze_filters_portfolio_and_trades_by_profile(config_copy: dict, tmp_path) -> None:
+    profile_a = deepcopy(config_copy)
+    profile_b = deepcopy(config_copy)
+    db_path = str(tmp_path / "ai_fund_lab.sqlite3")
+    profile_a["database"]["path"] = db_path
+    profile_b["database"]["path"] = db_path
+    profile_a["profile_id"] = "profile_a"
+    profile_a["profile_name"] = "Profile A"
+    profile_b["profile_id"] = "profile_b"
+    profile_b["profile_name"] = "Profile B"
+    initialize_database(profile_a, tmp_path)
+
+    save_portfolio_snapshot(
+        profile_a,
+        tmp_path,
+        {
+            "date": "2026-03-06",
+            "cash": 1000000,
+            "positions_value": 0,
+            "total_assets": 1010000,
+            "cumulative_profit": 10000,
+            "gross_cumulative_profit": 10000,
+            "net_cumulative_profit": 10000,
+            "total_commission": 0,
+            "estimated_tax_total": 0,
+            "max_drawdown": -0.01,
+        },
+    )
+    save_portfolio_snapshot(
+        profile_b,
+        tmp_path,
+        {
+            "date": "2026-03-06",
+            "cash": 1000000,
+            "positions_value": 0,
+            "total_assets": 1120000,
+            "cumulative_profit": 120000,
+            "gross_cumulative_profit": 120000,
+            "net_cumulative_profit": 120000,
+            "total_commission": 0,
+            "estimated_tax_total": 0,
+            "max_drawdown": -0.02,
+        },
+    )
+    save_trades(
+        profile_a,
+        tmp_path,
+        "2026-03-06",
+        [
+            {
+                "trade_id": "a-win",
+                "action": "SELL",
+                "code": "1001",
+                "name": "A Winner",
+                "entry_date": "2026-03-01",
+                "exit_date": "2026-03-06",
+                "profit": 10000,
+                "profit_rate": 0.1,
+                "gross_profit": 10000,
+                "result": "WIN",
+                "order_status": "FILLED",
+            }
+        ],
+    )
+    save_trades(
+        profile_b,
+        tmp_path,
+        "2026-03-06",
+        [
+            {
+                "trade_id": "b-loss",
+                "action": "SELL",
+                "code": "2001",
+                "name": "B Loser",
+                "entry_date": "2026-03-01",
+                "exit_date": "2026-03-06",
+                "profit": -5000,
+                "profit_rate": -0.05,
+                "gross_profit": -5000,
+                "result": "LOSS",
+                "order_status": "FILLED",
+            }
+        ],
+    )
+
+    analysis_a = analyze_operation_data(profile_a, tmp_path)
+    analysis_b = analyze_operation_data(profile_b, tmp_path)
+
+    assert analysis_a["current_profile_id"] == "profile_a"
+    assert analysis_b["current_profile_id"] == "profile_b"
+    assert analysis_a["portfolio_analysis"]["latest_total_assets"] == 1010000
+    assert analysis_b["portfolio_analysis"]["latest_total_assets"] == 1120000
+    assert analysis_a["trade_analysis"]["total_trades"] == 1
+    assert analysis_b["trade_analysis"]["total_trades"] == 1
+    assert analysis_a["trade_analysis"]["win_count"] == 1
+    assert analysis_a["trade_analysis"]["loss_count"] == 0
+    assert analysis_b["trade_analysis"]["win_count"] == 0
+    assert analysis_b["trade_analysis"]["loss_count"] == 1

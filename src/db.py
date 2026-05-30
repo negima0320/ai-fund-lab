@@ -989,14 +989,39 @@ def analyze_operation_data(config: dict[str, Any], root: Path) -> dict[str, Any]
     if not db_path.exists():
         raise FileNotFoundError(f"SQLite DB not found: {db_path}")
 
+    profile_id = _profile_id(config)
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
         _delete_non_trade_order_rows(connection)
         connection.commit()
-        portfolio_rows = [dict(row) for row in connection.execute("SELECT * FROM portfolio_snapshots ORDER BY date, id")]
-        trade_rows = [dict(row) for row in connection.execute("SELECT * FROM trades ORDER BY entry_date, exit_date, id")]
-        scoring_rows = [dict(row) for row in connection.execute("SELECT * FROM scoring_results ORDER BY date, rank, id")]
-        reflection_rows = [dict(row) for row in connection.execute("SELECT * FROM reflections ORDER BY created_at, id")]
+        portfolio_rows = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM portfolio_snapshots WHERE profile_id = ? ORDER BY date, id",
+                (profile_id,),
+            )
+        ]
+        trade_rows = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM trades WHERE profile_id = ? ORDER BY entry_date, exit_date, id",
+                (profile_id,),
+            )
+        ]
+        scoring_rows = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM scoring_results WHERE profile_id = ? ORDER BY date, rank, id",
+                (profile_id,),
+            )
+        ]
+        reflection_rows = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM reflections WHERE profile_id = ? ORDER BY created_at, id",
+                (profile_id,),
+            )
+        ]
 
     if not portfolio_rows and not trade_rows and not scoring_rows and not reflection_rows:
         raise ValueError("SQLite DB has no operation data.")
