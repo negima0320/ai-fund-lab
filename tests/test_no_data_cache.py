@@ -6,13 +6,16 @@ import main
 
 
 class FakeProvider:
-    def __init__(self, payload=None, error: Exception | None = None) -> None:
+    def __init__(self, payload=None, error: Exception | None = None, errors: list[Exception] | None = None) -> None:
         self.payload = payload if payload is not None else []
         self.error = error
+        self.errors = list(errors or [])
         self.calls: list[date] = []
 
     def get_daily_prices(self, target_date: date) -> list[dict]:
         self.calls.append(target_date)
+        if self.errors:
+            raise self.errors.pop(0)
         if self.error:
             raise self.error
         return self.payload
@@ -64,6 +67,7 @@ def test_prime_rows_zero_saves_no_data_cache(monkeypatch, tmp_path) -> None:
 
 def test_rate_limit_error_is_not_saved_to_no_data_cache(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(main, "ROOT", tmp_path)
+    monkeypatch.setattr(main.time, "sleep", lambda seconds: None)
     target = date(2026, 1, 5)
     provider = FakeProvider(error=RuntimeError("J-Quants rate limit exceeded"))
 
@@ -79,7 +83,60 @@ def test_rate_limit_error_is_not_saved_to_no_data_cache(monkeypatch, tmp_path) -
     )
 
     assert rows == []
-    assert provider.calls == [target]
+    assert provider.calls == [target, target, target, target]
+    assert main.load_no_data_day(target) is None
+
+
+def test_rate_limit_retries_then_succeeds(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(main, "ROOT", tmp_path)
+    sleeps: list[int] = []
+    monkeypatch.setattr(main.time, "sleep", sleeps.append)
+    target = date(2026, 1, 7)
+    provider = FakeProvider(
+        payload=[{"Code": "1001", "Date": "2026-01-07", "Close": 1000}],
+        errors=[
+            RuntimeError("J-Quants rate limit exceeded"),
+            RuntimeError("J-Quants API rate limit exceeded. Wait a while and retry."),
+        ],
+    )
+
+    rows = main.fetch_price_history(
+        provider,
+        target,
+        {"1001"},
+        lookback_business_days=1,
+        rate_limit_per_minute=60,
+        fetch_dates=[target],
+        verbose=True,
+    )
+
+    assert len(rows) == 1
+    assert provider.calls == [target, target, target]
+    assert sleeps == [12, 24]
+    assert main.load_no_data_day(target) is None
+
+
+def test_rate_limit_retries_are_exhausted(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(main, "ROOT", tmp_path)
+    sleeps: list[int] = []
+    monkeypatch.setattr(main.time, "sleep", sleeps.append)
+    target = date(2026, 1, 8)
+    provider = FakeProvider(error=RuntimeError("J-Quants rate limit exceeded"))
+
+    rows = main.fetch_price_history(
+        provider,
+        target,
+        {"1001"},
+        lookback_business_days=1,
+        rate_limit_per_minute=60,
+        fetch_dates=[target],
+        continue_on_error=True,
+        verbose=True,
+    )
+
+    assert rows == []
+    assert provider.calls == [target, target, target, target]
+    assert sleeps == [12, 24, 48]
     assert main.load_no_data_day(target) is None
 
 

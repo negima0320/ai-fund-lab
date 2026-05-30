@@ -4435,7 +4435,7 @@ def fetch_price_history(
                 f"{fetch_date.isoformat()} fetching J-Quants API"
             )
         try:
-            daily_prices = provider.get_daily_prices(fetch_date)
+            daily_prices = fetch_daily_prices_with_rate_limit_retry(provider, fetch_date, verbose=verbose)
         except KeyboardInterrupt:
             if verbose:
                 print(f"fetch-period-prices {fetch_date.isoformat()} interrupted by Ctrl+C")
@@ -4466,6 +4466,34 @@ def fetch_price_history(
                 print(f"fetch-period-prices {fetch_date.isoformat()} no prime rows; saved no-data cache")
         api_requests += 1
     return rows
+
+
+def fetch_daily_prices_with_rate_limit_retry(
+    provider: JQuantsDataProvider,
+    fetch_date: date,
+    verbose: bool = False,
+) -> list[dict[str, Any]]:
+    retry_waits = [12, 24, 48]
+    attempt = 0
+    while True:
+        try:
+            return provider.get_daily_prices(fetch_date)
+        except RuntimeError as exc:
+            if not is_rate_limit_error(exc) or attempt >= len(retry_waits):
+                raise
+            wait_seconds = retry_waits[attempt]
+            attempt += 1
+            if verbose:
+                print(
+                    f"fetch-period-prices {fetch_date.isoformat()} "
+                    f"rate limit exceeded; retry {attempt}/{len(retry_waits)} "
+                    f"after {wait_seconds}s"
+                )
+            time.sleep(wait_seconds)
+
+
+def is_rate_limit_error(exc: Exception) -> bool:
+    return "rate limit" in str(exc).lower()
 
 
 def load_cached_prime_prices(fetch_date: date) -> Any:

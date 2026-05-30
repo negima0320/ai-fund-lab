@@ -1059,6 +1059,8 @@ python src/main.py --mode calculate-indicators --provider jquants --date 2026-03
 
 価格データは `data/raw/prices_YYYY-MM-DD.json` が存在する場合はローカルキャッシュを優先します。不足している日付だけJ-Quantsから取得して同じ形式で保存します。J-Quantsで一度問い合わせた結果、APIレスポンスは正常だが東証プライム銘柄の行が0件だった日は `data/raw/no_data_days_jquants.json` に no-data cache として保存します。次回以降はその日付のAPI呼び出しをスキップし、`fetch-period-prices skip no-data cache: YYYY-MM-DD reason=no_prime_rows` と表示します。これは休場日やデータ未提供日に同じAPIを繰り返し呼ばないための、Freeプランのレート制限対策です。rate limit、timeout、5xx、通信エラーなど一時的な失敗は no-data cache に保存しません。
 
+J-Quants APIが `rate limit exceeded` を返した場合は、すぐにスキップせず、同じ日付に対して 12秒、24秒、48秒の順に最大3回リトライします。リトライ後に成功した場合は通常どおり価格キャッシュを保存して処理を続行します。3回リトライしても失敗する場合は `temporary API error` として扱い、no-data cache には保存しません。
+
 現在はJ-Quants freeプランを前提に、`config/rookie_dealer.yaml` で `rate_limit_per_minute: 5` としています。Lightプランへ移行した場合は、`rate_limit_per_minute: 60` に変更する想定です。
 
 計算済み指標から候補50銘柄を抽出する場合は以下を実行します。
