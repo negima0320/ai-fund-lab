@@ -32,6 +32,17 @@ def test_rookie_dealer_02_profile_uses_intraday_stop() -> None:
     assert profile["profile_id"] == "rookie_dealer_02"
     assert profile["profile_name"] == "新人ディーラー2号"
     assert profile["execution"]["stop_loss_execution"] == "intraday_stop"
+    assert "max_rsi_for_new_position" not in profile["selection"]
+
+
+def test_rookie_dealer_02_v2_profile_uses_rsi_filter() -> None:
+    profile = load_profile("rookie_dealer_02_v2")
+
+    assert profile["profile_id"] == "rookie_dealer_02_v2"
+    assert profile["profile_name"] == "新人ディーラー2号 v2"
+    assert profile["execution"]["stop_loss_execution"] == "intraday_stop"
+    assert profile["selection"]["max_rsi_for_new_position"] == 65
+    assert profile["selection"]["reject_overheated_rsi"] is True
 
 
 def test_rookie_dealer_03_profile_uses_fast_take_profit() -> None:

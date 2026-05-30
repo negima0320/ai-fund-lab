@@ -145,9 +145,15 @@ def score_real_candidates(
         technical_parts["sector_adjustment"] = sector_adjustment
         news = _score_news(news_by_code.get(candidate["code"], {}))
         news_score = news["news_score"]
-        total = technical + news_score + financial_score
+        total_before_selection_adjustment = technical + news_score + financial_score
+        rsi_selection = _rsi_selection_adjustment(candidate.get("rsi"), selection_config)
+        total = max(0, total_before_selection_adjustment - rsi_selection["penalty"])
         confidence = _real_confidence(candidate, technical)
         score_reason = _real_score_reason(candidate, technical_parts, total)
+        if rsi_selection["penalty"]:
+            score_reason = f"{score_reason}、RSIが{selection_config['max_rsi_for_new_position']:.0f}を超えたため減点{rsi_selection['penalty']:.0f}点"
+        if rsi_selection["excluded"]:
+            score_reason = f"{score_reason}、RSI過熱のため新規買付見送り"
         scored.append(
             {
                 "code": candidate["code"],
@@ -190,6 +196,9 @@ def score_real_candidates(
                 "volume_score": technical_parts["volume_score"],
                 "rsi_score": technical_parts["rsi_score"],
                 "total_score": total,
+                "rsi_selection_penalty": rsi_selection["penalty"],
+                "rsi_selection_excluded": rsi_selection["excluded"],
+                "rsi_filter_threshold": rsi_selection["threshold"],
                 "technical_score": technical,
                 "news_score": news_score,
                 "news_reason": news["news_reason"],
@@ -235,6 +244,8 @@ def score_real_candidates(
             "min_total_score_for_selection": selection_config["min_score"],
             "min_confidence_for_selection": selection_config["min_confidence"],
             "max_selected": selection_config["max_selected"],
+            "max_rsi_for_new_position": selection_config["max_rsi_for_new_position"],
+            "reject_overheated_rsi": selection_config["reject_overheated_rsi"],
         },
         "selection_config": selection_config,
         "market_context": market_context or {},
@@ -310,6 +321,7 @@ def _apply_selection_rules(
 
 def _selection_config(config: dict[str, Any]) -> dict[str, Any]:
     selection = config.get("selection", {})
+    max_rsi = _optional_float(selection.get("max_rsi_for_new_position"))
     return {
         "min_score": float(selection.get("min_score", 70)),
         "fallback_min_score": float(selection.get("fallback_min_score", 65)),
@@ -317,6 +329,8 @@ def _selection_config(config: dict[str, Any]) -> dict[str, Any]:
         "allow_top_pick_when_no_selection": bool(selection.get("allow_top_pick_when_no_selection", True)),
         "top_pick_min_score": float(selection.get("top_pick_min_score", 65)),
         "max_selected": int(selection.get("max_selected", config["portfolio"].get("max_positions", 5))),
+        "max_rsi_for_new_position": max_rsi,
+        "reject_overheated_rsi": bool(selection.get("reject_overheated_rsi", False)),
     }
 
 
@@ -329,6 +343,12 @@ def _market_filter_config(config: dict[str, Any]) -> dict[str, Any]:
         "risk_off_min_score": float(market_filter.get("risk_off_min_score", 75)),
         "risk_off_disable_top_pick": bool(market_filter.get("risk_off_disable_top_pick", True)),
     }
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value)
 
 
 def _score_news(news_payload: dict[str, Any]) -> dict[str, Any]:
@@ -398,11 +418,33 @@ def _neutral_news_score(reason: str, limitation: str = "", provider: str = "") -
 
 
 def _meets_regular_selection(item: dict[str, Any], selection_config: dict[str, Any]) -> bool:
+    if item.get("rsi_selection_excluded"):
+        return False
     return item["total_score"] >= selection_config["min_score"] and item["confidence"] >= selection_config["min_confidence"]
 
 
 def _meets_top_pick_selection(item: dict[str, Any], selection_config: dict[str, Any]) -> bool:
+    if item.get("rsi_selection_excluded"):
+        return False
     return item["total_score"] >= selection_config["top_pick_min_score"] and item["confidence"] >= selection_config["min_confidence"]
+
+
+def _rsi_selection_adjustment(rsi_value: Any, selection_config: dict[str, Any]) -> dict[str, Any]:
+    max_rsi = selection_config.get("max_rsi_for_new_position")
+    if max_rsi is None:
+        return {"penalty": 0.0, "excluded": False, "threshold": None}
+    try:
+        rsi = float(rsi_value)
+    except (TypeError, ValueError):
+        return {"penalty": 0.0, "excluded": False, "threshold": max_rsi}
+    penalty = 0.0
+    if rsi > max_rsi and not selection_config.get("reject_overheated_rsi"):
+        penalty = min((rsi - max_rsi) * 2, 10)
+    return {
+        "penalty": round(penalty, 2),
+        "excluded": bool(selection_config.get("reject_overheated_rsi")) and rsi > max_rsi,
+        "threshold": max_rsi,
+    }
 
 
 def _real_technical_score_parts(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -536,6 +578,8 @@ def _real_rejected_reason(
     selected_count: int,
     selection_config: dict[str, Any],
 ) -> str:
+    if item.get("rsi_selection_excluded"):
+        return "RSI過熱のため新規買付見送り"
     if item["confidence"] < selection_config["min_confidence"]:
         return "信頼度基準を満たさないため落選"
     if item["total_score"] < selection_config["top_pick_min_score"]:

@@ -123,3 +123,45 @@ def test_neutral_keeps_existing_top_pick_behavior(config_copy: dict) -> None:
 
     assert len(result["selected"]) == 1
     assert result["selected"][0]["market_filter_applied"] is False
+
+
+def test_existing_profile_keeps_rsi_filter_disabled(config_copy: dict) -> None:
+    result = score_real_candidates(
+        [candidate("1001", volume_ratio=3.0, turnover_value=2_500_000_000, rsi=71, volatility=0.02)],
+        "2026-03-06",
+        config_copy,
+        "test",
+    )
+
+    assert result["scores"][0]["rsi_selection_excluded"] is False
+    assert result["scores"][0]["rsi_selection_penalty"] == 0
+    assert len(result["selected"]) == 1
+
+
+def test_rsi_above_configured_max_is_excluded_from_new_position(config_copy: dict) -> None:
+    config_copy["selection"]["max_rsi_for_new_position"] = 65
+    config_copy["selection"]["reject_overheated_rsi"] = True
+    result = score_real_candidates(
+        [candidate("1001", volume_ratio=3.0, turnover_value=2_500_000_000, rsi=65.1, volatility=0.02)],
+        "2026-03-06",
+        config_copy,
+        "test",
+    )
+
+    assert len(result["selected"]) == 0
+    assert result["scores"][0]["rsi_selection_excluded"] is True
+    assert result["scores"][0]["rejected_reason"] == "RSI過熱のため新規買付見送り"
+
+
+def test_rsi_at_configured_max_is_evaluated_normally(config_copy: dict) -> None:
+    config_copy["selection"]["max_rsi_for_new_position"] = 65
+    config_copy["selection"]["reject_overheated_rsi"] = True
+    result = score_real_candidates(
+        [candidate("1001", volume_ratio=3.0, turnover_value=2_500_000_000, rsi=65, volatility=0.02)],
+        "2026-03-06",
+        config_copy,
+        "test",
+    )
+
+    assert result["scores"][0]["rsi_selection_excluded"] is False
+    assert len(result["selected"]) == 1

@@ -30,13 +30,27 @@ def build_feature_analysis(config: dict[str, Any], root: Path) -> dict[str, Any]
             """,
             (profile_id,),
         )
+        scoring_rows = _rows(
+            connection,
+            """
+            SELECT total_score, rejected_reason
+            FROM scoring_results
+            WHERE profile_id = ?
+            ORDER BY date, rank, id
+            """,
+            (profile_id,),
+        )
     closed = [row for row in trade_rows if is_closed_trade_for_metrics(row)]
     records = [_feature_record(trade) for trade in closed]
+    rsi_filter = _rsi_filter_rejection_summary(scoring_rows, config)
 
     return {
         "profile_id": profile_id,
         "profile_name": _profile_name(config),
         "closed_trade_count": len(records),
+        "rsi_filter_rejected_count": rsi_filter["count"],
+        "rsi_filter_rejected_avg_score": rsi_filter["average_score"],
+        "rsi_filter_threshold": rsi_filter["threshold"],
         "rsi": _group_by(records, lambda item: _rsi_bucket(item.get("rsi")), ["0-30", "30-40", "40-50", "50-60", "60-70", "70+"]),
         "volume_ratio": _group_by(records, lambda item: _volume_bucket(item.get("volume_ratio")), ["<1", "1-2", "2-3", "3+"]),
         "market_regime": _group_by(records, lambda item: item.get("market_regime") or "unknown", ["risk_on", "neutral", "risk_off"]),
@@ -54,6 +68,9 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         f"- profile_id: {analysis.get('profile_id')}",
         f"- profile_name: {analysis.get('profile_name')}",
         f"- closed_trade_count: {analysis.get('closed_trade_count')}",
+        f"- rsi_filter_rejected_count: {analysis.get('rsi_filter_rejected_count')}",
+        f"- rsi_filter_rejected_avg_score: {_format_number(analysis.get('rsi_filter_rejected_avg_score'))}",
+        f"- rsi_filter_threshold: {_format_number(analysis.get('rsi_filter_threshold'))}",
         "",
         "## RSI別勝率・平均利益",
         "",
@@ -100,6 +117,17 @@ def _feature_record(trade: dict[str, Any]) -> dict[str, Any]:
         "sector_name": trade.get("sector_name"),
         "candlestick_signals": _json_list(trade.get("candlestick_signals")),
         "total_score": _number(trade.get("total_score") or trade.get("score")),
+    }
+
+
+def _rsi_filter_rejection_summary(rows: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, Any]:
+    rejected = [row for row in rows if row.get("rejected_reason") == "RSI過熱のため新規買付見送り"]
+    scores = [_number(row.get("total_score")) for row in rejected]
+    scores = [score for score in scores if score is not None]
+    return {
+        "count": len(rejected),
+        "average_score": _average(scores),
+        "threshold": _number(config.get("selection", {}).get("max_rsi_for_new_position")),
     }
 
 
@@ -237,6 +265,10 @@ def _format_percent(value: Any) -> str:
 
 def _format_yen(value: Any) -> str:
     return "N/A" if value is None else f"{float(value):,.0f}円"
+
+
+def _format_number(value: Any) -> str:
+    return "N/A" if value is None else f"{float(value):.2f}"
 
 
 def _profile_id(config: dict[str, Any]) -> str:

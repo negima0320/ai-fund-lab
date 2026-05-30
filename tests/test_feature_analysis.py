@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from db import initialize_database, save_trades
+from db import initialize_database, save_scoring_results, save_trades
 from feature_analysis import build_feature_analysis, render_feature_analysis_markdown
 from paper_trade import execute_real_data_paper_trade, initial_live_paper_state
 
@@ -61,10 +61,31 @@ def test_feature_analysis_groups_closed_trade_results(config_copy: dict, tmp_pat
             },
         ],
     )
+    config_copy["selection"]["max_rsi_for_new_position"] = 65
+    save_scoring_results(
+        config_copy,
+        tmp_path,
+        {
+            "date": "2026-03-01",
+            "scores": [
+                {
+                    "code": "1003",
+                    "name": "Rejected",
+                    "rank": 1,
+                    "total_score": 76,
+                    "selected": False,
+                    "rejected_reason": "RSI過熱のため新規買付見送り",
+                }
+            ],
+        },
+    )
 
     analysis = build_feature_analysis(config_copy, tmp_path)
 
     assert analysis["closed_trade_count"] == 2
+    assert analysis["rsi_filter_rejected_count"] == 1
+    assert analysis["rsi_filter_rejected_avg_score"] == 76
+    assert analysis["rsi_filter_threshold"] == 65
     rsi_by_bucket = {item["bucket"]: item for item in analysis["rsi"]}
     assert list(rsi_by_bucket) == ["0-30", "30-40", "40-50", "50-60", "60-70", "70+"]
     assert rsi_by_bucket["50-60"]["win_rate"] == 1.0
