@@ -37,13 +37,17 @@ def profit_factor_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     realized_profit_total = round(sum(gross_profits), 2)
     gross_win_total = round(sum(value for value in gross_profits if value > 0), 2)
     gross_loss_total = round(sum(value for value in gross_profits if value < 0), 2)
+    closed_trade_count = len(closed)
+    win_count = len(wins)
     return {
         "closed_trades": closed,
         "wins": wins,
         "losses": losses,
-        "closed_trade_count": len(closed),
-        "win_count": len(wins),
+        "total_trades": closed_trade_count,
+        "closed_trade_count": closed_trade_count,
+        "win_count": win_count,
         "loss_count": len(losses),
+        "win_rate": round(win_count / closed_trade_count, 4) if closed_trade_count else None,
         "excluded_order_event_count": sum(1 for row in rows if is_excluded_order_event(row)),
         "realized_profit_total": realized_profit_total,
         "gross_profit_total": gross_win_total,

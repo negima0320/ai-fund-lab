@@ -1009,6 +1009,8 @@ def analyze_operation_data(config: dict[str, Any], root: Path) -> dict[str, Any]
         "config_version_analysis": _config_version_analysis(trade_rows),
         "sector_win_rate_analysis": _sector_win_rate_analysis(trade_rows),
         "profile_analysis": _profile_analysis(portfolio_rows, trade_rows),
+        "yearly_performance": _yearly_performance_analysis(portfolio_rows, trade_rows),
+        "monthly_performance": _monthly_performance_analysis(trade_rows),
         "current_profile_id": _profile_id(config),
         "current_profile_name": _profile_name(config),
         "current_config_version": config_version_from(config),
@@ -1143,7 +1145,7 @@ def _trade_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> dict[
     average_loss_profit_rate = _average(loss_rates)
     win_count = pf_metrics["win_count"]
     loss_count = pf_metrics["loss_count"]
-    win_rate = round(win_count / len(closed), 4) if closed else None
+    win_rate = pf_metrics["win_rate"]
     expectancy = None
     if win_rate is not None:
         expectancy = round((win_rate * (average_win_profit_rate or 0.0)) + ((1 - win_rate) * (average_loss_profit_rate or 0.0)), 4)
@@ -1155,7 +1157,7 @@ def _trade_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> dict[
     best_trade = max(closed, key=lambda row: float(row.get("gross_profit") or row.get("profit") or 0), default=None)
     worst_trade = min(closed, key=lambda row: float(row.get("gross_profit") or row.get("profit") or 0), default=None)
     return {
-        "total_trades": len([row for row in filled_rows if row.get("action") in {"BUY", "SELL"}]),
+        "total_trades": pf_metrics["total_trades"],
         "closed_trades": pf_metrics["closed_trade_count"],
         "closed_trade_count": pf_metrics["closed_trade_count"],
         "winning_trades": win_count,
@@ -1215,6 +1217,78 @@ def _exit_reason_analysis(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     return summaries
+
+
+def _yearly_performance_analysis(portfolio_rows: list[dict[str, Any]], trade_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    closed = profit_factor_metrics(trade_rows)["closed_trades"]
+    years = sorted(
+        {
+            key
+            for key in [_year_key(row.get("exit_date") or row.get("entry_date") or row.get("date")) for row in closed]
+            if key
+        }
+        | {
+            key
+            for key in [_year_key(row.get("date")) for row in portfolio_rows]
+            if key
+        }
+    )
+    result = []
+    for year in years:
+        year_trades = [row for row in closed if _year_key(row.get("exit_date") or row.get("entry_date") or row.get("date")) == year]
+        metrics = profit_factor_metrics(year_trades)
+        win_rate = round(metrics["win_count"] / metrics["closed_trade_count"], 4) if metrics["closed_trade_count"] else None
+        drawdowns = [
+            float(row.get("max_drawdown") or 0)
+            for row in portfolio_rows
+            if _year_key(row.get("date")) == year and row.get("max_drawdown") is not None
+        ]
+        result.append(
+            {
+                "year": year,
+                "profit": metrics["realized_profit_total"],
+                "win_rate": win_rate,
+                "profit_factor": metrics["profit_factor"],
+                "max_drawdown": min(drawdowns) if drawdowns else None,
+                "trades": metrics["closed_trade_count"],
+            }
+        )
+    return result
+
+
+def _monthly_performance_analysis(trade_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    closed = profit_factor_metrics(trade_rows)["closed_trades"]
+    months = sorted(
+        {
+            key
+            for key in [_month_key(row.get("exit_date") or row.get("entry_date") or row.get("date")) for row in closed]
+            if key
+        }
+    )
+    result = []
+    for month in months:
+        month_trades = [row for row in closed if _month_key(row.get("exit_date") or row.get("entry_date") or row.get("date")) == month]
+        metrics = profit_factor_metrics(month_trades)
+        win_rate = round(metrics["win_count"] / metrics["closed_trade_count"], 4) if metrics["closed_trade_count"] else None
+        result.append(
+            {
+                "month": month,
+                "profit": metrics["realized_profit_total"],
+                "trades": metrics["closed_trade_count"],
+                "win_rate": win_rate,
+            }
+        )
+    return result
+
+
+def _year_key(value: Any) -> str | None:
+    text = str(value or "")
+    return text[:4] if len(text) >= 4 else None
+
+
+def _month_key(value: Any) -> str | None:
+    text = str(value or "")
+    return text[:7] if len(text) >= 7 else None
 
 
 def _trade_summary(row: dict[str, Any] | None) -> dict[str, Any] | None:

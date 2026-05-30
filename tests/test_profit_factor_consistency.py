@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import main
 from db import analyze_operation_data, get_database_path, initialize_database, save_portfolio_snapshot, save_trades
-from main import _profile_compare_row, build_profile_ranking, render_compare_profiles_markdown
+from main import _profile_compare_row, build_profile_ranking, render_compare_profiles_markdown, write_backtest_summary
 
 
 def test_analyze_and_compare_profiles_profit_factor_match(config_copy: dict, tmp_path) -> None:
@@ -77,25 +78,50 @@ def test_analyze_and_compare_profiles_profit_factor_match(config_copy: dict, tmp
                 "result": "WIN",
                 "order_status": "PENDING",
             },
+            {
+                "trade_id": "buy",
+                "action": "BUY",
+                "code": "1004",
+                "name": "Buy Only",
+                "entry_date": "2026-03-06",
+                "profit": 0,
+                "profit_rate": 0,
+                "gross_profit": 0,
+                "result": "",
+                "order_status": "FILLED",
+            },
+            {
+                "trade_id": "skip",
+                "action": "SKIP_BUY",
+                "code": "1005",
+                "name": "Skip",
+                "entry_date": "2026-03-06",
+                "profit": 0,
+                "profit_rate": 0,
+                "gross_profit": 0,
+                "result": "",
+                "order_status": "REJECTED",
+            },
         ],
     )
 
-    analyze_pf = analyze_operation_data(config_copy, tmp_path)["trade_analysis"]["profit_factor"]
-    compare_pf = _profile_compare_row(
-        config_copy,
-        get_database_path(config_copy, tmp_path),
-        "2026-03-01",
-        "2026-03-06",
-    )["profit_factor"]
-
-    assert analyze_pf == compare_pf == 2.5
-
+    analyze_trades = analyze_operation_data(config_copy, tmp_path)["trade_analysis"]
     compare_row = _profile_compare_row(
         config_copy,
         get_database_path(config_copy, tmp_path),
         "2026-03-01",
         "2026-03-06",
     )
+    compare_pf = compare_row["profit_factor"]
+
+    assert analyze_trades["profit_factor"] == compare_pf == 2.5
+    assert analyze_trades["total_trades"] == compare_row["total_trades"] == 2
+    assert analyze_trades["closed_trade_count"] == compare_row["closed_trade_count"] == 2
+    assert analyze_trades["win_count"] == compare_row["win_count"] == 1
+    assert analyze_trades["loss_count"] == compare_row["loss_count"] == 1
+    assert analyze_trades["win_rate"] == compare_row["win_rate"] == 0.5
+    assert analyze_trades["excluded_order_event_count"] == compare_row["excluded_order_event_count"] == 0
+
     assert compare_row["average_win_profit_rate"] == 0.1
     assert compare_row["average_loss_profit_rate"] == -0.04
     assert compare_row["average_holding_days"] == 3.0
@@ -152,3 +178,100 @@ def test_profile_ranking_uses_profit_factor_drawdown_profit_and_expectancy() -> 
     ]
     assert ranking[0]["rank"] == 1
     assert ranking[0]["score"] > ranking[1]["score"] > ranking[2]["score"]
+
+
+def test_backtest_summary_uses_closed_trade_metrics(config_copy: dict, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main, "ROOT", tmp_path)
+    backtest_dir = tmp_path / "logs" / "backtests" / "test"
+    backtest_dir.mkdir(parents=True)
+    closed_trades = [
+        {
+            "trade_id": "win",
+            "action": "SELL",
+            "code": "1001",
+            "name": "Winner",
+            "entry_date": "2026-03-01",
+            "exit_date": "2026-03-06",
+            "profit": 10000,
+            "profit_rate": 0.1,
+            "gross_profit": 10000,
+            "result": "WIN",
+            "order_status": "FILLED",
+            "exit_reason": "利確",
+        },
+        {
+            "trade_id": "loss",
+            "action": "SELL",
+            "code": "1002",
+            "name": "Loser",
+            "entry_date": "2026-03-01",
+            "exit_date": "2026-03-06",
+            "profit": -4000,
+            "profit_rate": -0.04,
+            "gross_profit": -4000,
+            "result": "LOSS",
+            "order_status": "FILLED",
+            "exit_reason": "損切り",
+        },
+    ]
+    all_trades = [
+        *closed_trades,
+        {
+            "trade_id": "buy",
+            "action": "BUY",
+            "code": "1003",
+            "name": "Buy",
+            "entry_date": "2026-03-06",
+            "profit": 0,
+            "gross_profit": 0,
+            "result": "",
+            "order_status": "FILLED",
+        },
+        {
+            "trade_id": "pending",
+            "action": "SELL",
+            "code": "1004",
+            "name": "Pending",
+            "entry_date": "2026-03-01",
+            "exit_date": "2026-03-06",
+            "profit": 999999,
+            "gross_profit": 999999,
+            "result": "WIN",
+            "order_status": "PENDING",
+        },
+    ]
+    state = {"total_assets": 1006000, "closed_trades": closed_trades}
+
+    summary = write_backtest_summary(
+        "2026-03-01_to_2026-03-06",
+        "2026-03-01",
+        "2026-03-06",
+        config_copy,
+        state,
+        [
+            {
+                "date": "2026-03-06",
+                "day": 1,
+                "cash": 1006000,
+                "positions_value": 0,
+                "total_assets": 1006000,
+                "daily_profit": 6000,
+                "cumulative_profit": 6000,
+                "cumulative_profit_rate": 0.006,
+                "win_rate": 0.5,
+                "max_drawdown": 0,
+                "open_positions_count": 0,
+                "closed_trades_count": 2,
+            }
+        ],
+        all_trades,
+        backtest_dir,
+    )
+
+    assert summary["total_trades"] == 2
+    assert summary["closed_trade_count"] == 2
+    assert summary["win_count"] == 1
+    assert summary["loss_count"] == 1
+    assert summary["excluded_order_event_count"] == 1
+    assert summary["win_rate"] == 0.5
+    assert summary["profit_factor"] == 2.5

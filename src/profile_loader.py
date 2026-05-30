@@ -13,10 +13,14 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE_CONFIG_PATH = ROOT / "config" / "rookie_dealer.yaml"
 PROFILES_DIR = ROOT / "config" / "profiles"
 DEFAULT_PROFILE_ID = "rookie_dealer_01"
+PROFILE_ALIASES = {
+    "rookie_dealer_02_v2.1": "rookie_dealer_02_v2_1",
+}
 
 
 def load_profile(profile_id: str | None = None) -> dict[str, Any]:
     profile_id = profile_id or DEFAULT_PROFILE_ID
+    profile_id = PROFILE_ALIASES.get(profile_id, profile_id)
     base = load_yaml_config(BASE_CONFIG_PATH) if BASE_CONFIG_PATH.exists() else {}
     path = get_profile_path(profile_id)
     if path.exists():

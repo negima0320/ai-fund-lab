@@ -196,6 +196,27 @@ def test_volume_filter_allows_candidate_at_threshold(config_copy: dict) -> None:
     assert len(result["selected"]) == 1
 
 
+def test_volume_filter_can_use_two_times_threshold(config_copy: dict) -> None:
+    config_copy["volume_filter"] = {"enabled": True, "min_volume_ratio": 2.0}
+    below = score_real_candidates(
+        [candidate("1001", volume_ratio=1.99, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02)],
+        "2026-03-06",
+        config_copy,
+        "test",
+    )
+    at_threshold = score_real_candidates(
+        [candidate("1001", volume_ratio=2.0, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02)],
+        "2026-03-06",
+        config_copy,
+        "test",
+    )
+
+    assert below["scores"][0]["volume_filter_excluded"] is True
+    assert len(below["selected"]) == 0
+    assert at_threshold["scores"][0]["volume_filter_excluded"] is False
+    assert len(at_threshold["selected"]) == 1
+
+
 def test_existing_profile_keeps_volume_filter_disabled(config_copy: dict) -> None:
     result = score_real_candidates(
         [candidate("1001", volume_ratio=2.0, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02)],

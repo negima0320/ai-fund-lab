@@ -641,8 +641,6 @@ def _profile_compare_row(config: dict[str, Any], db_path: Path, start_date_text:
                 SELECT *
                 FROM trades
                 WHERE profile_id = ?
-                  AND order_status = 'FILLED'
-                  AND action IN ('BUY', 'SELL')
                   AND COALESCE(exit_date, entry_date) BETWEEN ? AND ?
                 ORDER BY entry_date, exit_date, id
                 """,
@@ -660,7 +658,7 @@ def _profile_compare_row(config: dict[str, Any], db_path: Path, start_date_text:
     holding_days = [float(row["holding_days"]) for row in closed if row.get("holding_days") is not None]
     average_win_profit_rate = _average_number(win_rates)
     average_loss_profit_rate = _average_number(loss_rates)
-    win_rate = round(len(wins) / len(closed), 4) if closed else None
+    win_rate = pf_metrics["win_rate"]
     expectancy = (
         round((win_rate * (average_win_profit_rate or 0.0)) + ((1 - win_rate) * (average_loss_profit_rate or 0.0)), 4)
         if win_rate is not None
@@ -680,7 +678,7 @@ def _profile_compare_row(config: dict[str, Any], db_path: Path, start_date_text:
         "expectancy": expectancy,
         "max_drawdown": max_drawdown,
         "average_holding_days": _average_number(holding_days),
-        "total_trades": len(trade_rows),
+        "total_trades": pf_metrics["total_trades"],
         "closed_trade_count": pf_metrics["closed_trade_count"],
         "win_count": pf_metrics["win_count"],
         "loss_count": pf_metrics["loss_count"],
@@ -3863,19 +3861,13 @@ def write_backtest_summary(
     initial_capital = float(config["portfolio"]["initial_cash"])
     final_assets = float(state.get("total_assets", initial_capital))
     closed_trades = state.get("closed_trades", [])
-    executed_trade_actions = [
-        trade
-        for trade in all_trades
-        if trade.get("action") in {"BUY", "SELL"} and str(trade.get("order_status") or trade.get("status") or "").upper() == "FILLED"
-    ]
     period_profit = calculate_period_profit_summary(closed_trades, config)
     pf_metrics = profit_factor_metrics(all_trades)
     gross_profit_total = pf_metrics["gross_profit_total"]
     gross_win_total = pf_metrics["gross_win_total"]
     gross_loss_total = pf_metrics["gross_loss_total"]
     net_cumulative_profit = period_profit["net_cumulative_profit"]
-    wins = pf_metrics["win_count"]
-    win_rate = round(wins / pf_metrics["closed_trade_count"], 4) if pf_metrics["closed_trade_count"] else None
+    win_rate = pf_metrics["win_rate"]
     take_profit_count = sum(1 for trade in closed_trades if trade.get("exit_reason") == "利確")
     stop_loss_count = sum(1 for trade in closed_trades if trade.get("exit_reason") == "損切り")
     max_holding_exit_count = sum(1 for trade in closed_trades if trade.get("exit_reason") == "最大保有期間到達")
@@ -3927,7 +3919,7 @@ def write_backtest_summary(
         "win_count": pf_metrics["win_count"],
         "loss_count": pf_metrics["loss_count"],
         "excluded_order_event_count": pf_metrics["excluded_order_event_count"],
-        "total_trades": len(executed_trade_actions),
+        "total_trades": pf_metrics["total_trades"],
         "closed_trades_count": len(closed_trades),
         "take_profit_count": take_profit_count,
         "stop_loss_count": stop_loss_count,
@@ -4088,6 +4080,8 @@ def render_analysis_markdown(analysis: dict[str, Any]) -> str:
     config_versions = analysis.get("config_version_analysis", [])
     sector_win_rates = analysis.get("sector_win_rate_analysis", [])
     profile_analysis = analysis.get("profile_analysis", [])
+    yearly_performance = analysis.get("yearly_performance", [])
+    monthly_performance = analysis.get("monthly_performance", [])
     bands = scores["score_bands"]
     lines = [
         "# 新人ディーラー1号 分析レポート",
@@ -4167,6 +4161,14 @@ def render_analysis_markdown(analysis: dict[str, Any]) -> str:
         "### exit_reason別集計",
         "",
         *_exit_reason_analysis_lines(trades.get("exit_reason_analysis", [])),
+        "",
+        "## Yearly Performance",
+        "",
+        *_yearly_performance_lines(yearly_performance),
+        "",
+        "## Monthly Performance",
+        "",
+        *_monthly_performance_lines(monthly_performance),
         "",
         "## config_version別集計",
         "",
@@ -4296,6 +4298,43 @@ def _profile_analysis_lines(items: list[dict[str, Any]]) -> list[str]:
         )
         for item in items
     ]
+
+
+def _yearly_performance_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- 年別パフォーマンスデータなし"]
+    lines = []
+    for item in items:
+        lines.extend(
+            [
+                f"### {item['year']}",
+                "",
+                f"- profit: {_format_optional_yen(item.get('profit'))}",
+                f"- win_rate: {_format_optional_percent(item.get('win_rate'))}",
+                f"- profit_factor: {_format_optional_number(item.get('profit_factor'))}",
+                f"- max_drawdown: {_format_optional_percent(item.get('max_drawdown'))}",
+                "",
+            ]
+        )
+    return lines
+
+
+def _monthly_performance_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- 月別パフォーマンスデータなし"]
+    lines = []
+    for item in items:
+        lines.extend(
+            [
+                f"### {item['month']}",
+                "",
+                f"- profit: {_format_optional_yen(item.get('profit'))}",
+                f"- trades: {item.get('trades')}",
+                f"- win_rate: {_format_optional_percent(item.get('win_rate'))}",
+                "",
+            ]
+        )
+    return lines
 
 
 def _exit_reason_analysis_lines(items: list[dict[str, Any]]) -> list[str]:
