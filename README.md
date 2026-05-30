@@ -1055,7 +1055,7 @@ python src/main.py --mode calculate-indicators --provider jquants --date 2026-03
 
 `pandas-ta` が利用できない場合は、`pip install -r requirements.txt` を促すエラーを表示して停止します。移動平均線やRSIは従来の自前計算から `pandas-ta` 計算へ移行したため、丸め、初期期間、RSIの平滑化方法などにより過去ログと差分が出る可能性があります。特定ライブラリの計算結果は投資助言ではなく、AI Fund Lab内の実験用判断材料として扱います。
 
-価格データは `data/raw/prices_YYYY-MM-DD.json` が存在する場合はローカルキャッシュを優先します。不足している日付だけJ-Quantsから取得して同じ形式で保存します。J-Quantsのレート制限に配慮するため、複数日の未取得データをまとめて取得する場合は時間がかかることがあります。
+価格データは `data/raw/prices_YYYY-MM-DD.json` が存在する場合はローカルキャッシュを優先します。不足している日付だけJ-Quantsから取得して同じ形式で保存します。J-Quantsで一度問い合わせた結果、APIレスポンスは正常だが東証プライム銘柄の行が0件だった日は `data/raw/no_data_days_jquants.json` に no-data cache として保存します。次回以降はその日付のAPI呼び出しをスキップし、`fetch-period-prices skip no-data cache: YYYY-MM-DD reason=no_prime_rows` と表示します。これは休場日やデータ未提供日に同じAPIを繰り返し呼ばないための、Freeプランのレート制限対策です。rate limit、timeout、5xx、通信エラーなど一時的な失敗は no-data cache に保存しません。
 
 現在はJ-Quants freeプランを前提に、`config/rookie_dealer.yaml` で `rate_limit_per_minute: 5` としています。Lightプランへ移行した場合は、`rate_limit_per_minute: 60` に変更する想定です。
 

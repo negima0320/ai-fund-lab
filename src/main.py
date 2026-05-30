@@ -3697,14 +3697,27 @@ def ensure_price_history_for_backtest(provider_name: str, start_date: date, end_
     lookback_start = previous_business_dates(start_date, 30)[0]
     fetch_dates = business_dates_between(lookback_start, end_date)
     cached_dates = [fetch_date for fetch_date in fetch_dates if load_cached_prime_prices(fetch_date) is not None]
-    missing_dates = [fetch_date for fetch_date in fetch_dates if load_cached_prime_prices(fetch_date) is None]
+    no_data_cache = load_no_data_days_cache()
+    no_data_dates = [
+        fetch_date
+        for fetch_date in fetch_dates
+        if load_cached_prime_prices(fetch_date) is None and no_data_cache_entry(fetch_date, no_data_cache) is not None
+    ]
+    missing_dates = [
+        fetch_date
+        for fetch_date in fetch_dates
+        if load_cached_prime_prices(fetch_date) is None and no_data_cache_entry(fetch_date, no_data_cache) is None
+    ]
     print(
         "fetch-period-prices price cache: "
-        f"cached={len(cached_dates)} missing={len(missing_dates)} total={len(fetch_dates)} "
+        f"cached={len(cached_dates)} no_data={len(no_data_dates)} missing={len(missing_dates)} total={len(fetch_dates)} "
         f"lookback_start={lookback_start.isoformat()}"
     )
     for fetch_date in cached_dates:
         print(f"fetch-period-prices cache hit: {fetch_date.isoformat()}")
+    for fetch_date in no_data_dates:
+        entry = no_data_cache_entry(fetch_date, no_data_cache) or {}
+        print(f"fetch-period-prices skip no-data cache: {fetch_date.isoformat()} reason={entry.get('reason', 'unknown')}")
     if fetch_dates and not missing_dates:
         print("backtest price history: using cached price files")
         return
@@ -4360,6 +4373,18 @@ def fetch_price_history(
                 )
             rows.extend(cached_rows)
             continue
+        no_data_entry = load_no_data_day(fetch_date)
+        if no_data_entry is not None:
+            if verbose:
+                print(
+                    f"fetch-period-prices [{index}/{total_dates}] "
+                    f"{fetch_date.isoformat()} no-data cache hit reason={no_data_entry.get('reason', 'unknown')}"
+                )
+                print(
+                    f"fetch-period-prices skip no-data cache: "
+                    f"{fetch_date.isoformat()} reason={no_data_entry.get('reason', 'unknown')}"
+                )
+            continue
 
         if api_requests > 0:
             if verbose:
@@ -4378,7 +4403,7 @@ def fetch_price_history(
             raise
         except RuntimeError as exc:
             if verbose:
-                print(f"fetch-period-prices {fetch_date.isoformat()} failed: {exc}")
+                print(f"fetch-period-prices {fetch_date.isoformat()} temporary API error; not cached: {exc}")
             if continue_on_error:
                 api_requests += 1
                 continue
@@ -4396,8 +4421,10 @@ def fetch_price_history(
                     f"fetch-period-prices {fetch_date.isoformat()} saved "
                     f"{len(prime_prices)} prime rows from {len(daily_prices)} rows"
                 )
-        elif verbose:
-            print(f"fetch-period-prices {fetch_date.isoformat()} no prime rows; not cached")
+        else:
+            save_no_data_day(fetch_date, reason="no_prime_rows", source="fetch-period-prices")
+            if verbose:
+                print(f"fetch-period-prices {fetch_date.isoformat()} no prime rows; saved no-data cache")
         api_requests += 1
     return rows
 
@@ -4408,6 +4435,39 @@ def load_cached_prime_prices(fetch_date: date) -> Any:
         return None
     payload = read_json(path)
     return payload.get("prices", [])
+
+
+def no_data_days_cache_path() -> Path:
+    return ROOT / "data" / "raw" / "no_data_days_jquants.json"
+
+
+def load_no_data_days_cache() -> dict[str, Any]:
+    path = no_data_days_cache_path()
+    if not path.exists():
+        return {}
+    payload = read_json(path)
+    return payload if isinstance(payload, dict) else {}
+
+
+def no_data_cache_entry(fetch_date: date, cache: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    cache = cache if cache is not None else load_no_data_days_cache()
+    entry = cache.get(fetch_date.isoformat())
+    return entry if isinstance(entry, dict) else None
+
+
+def load_no_data_day(fetch_date: date) -> dict[str, Any] | None:
+    return no_data_cache_entry(fetch_date)
+
+
+def save_no_data_day(fetch_date: date, reason: str, source: str) -> None:
+    cache = load_no_data_days_cache()
+    cache[fetch_date.isoformat()] = {
+        "provider": "jquants",
+        "reason": reason,
+        "checked_at": datetime.now().isoformat(timespec="seconds"),
+        "source": source,
+    }
+    write_json(no_data_days_cache_path(), cache)
 
 
 def load_cached_price_history(fetch_dates: list[date]) -> list[dict[str, Any]]:

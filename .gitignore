@@ -10,6 +10,7 @@ logs/
 analysis_logs/
 
 # Raw and processed data
+data/raw/no_data_days_jquants.json
 data/raw/
 data/processed/
 
