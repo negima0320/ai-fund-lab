@@ -535,6 +535,7 @@ def _technical_snapshot(item: dict[str, Any]) -> dict[str, Any]:
         "atr": item.get("atr"),
         "market_filter_applied": item.get("market_filter_applied", False),
         "market_regime": item.get("market_regime"),
+        "advance_ratio": item.get("advance_ratio"),
         "market_filter_reason": item.get("market_filter_reason", ""),
     }
 
@@ -566,6 +567,7 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "atr",
         "market_filter_applied",
         "market_regime",
+        "advance_ratio",
         "market_filter_reason",
     ]
     return {key: position.get(key) for key in keys if key in position}

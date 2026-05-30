@@ -88,6 +88,7 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
                 news_score REAL,
                 financial_score REAL,
                 market_regime TEXT,
+                advance_ratio REAL,
                 candlestick_signals TEXT,
                 selected_reason TEXT,
                 reason TEXT,
@@ -388,6 +389,7 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
         _add_column_if_missing(connection, "trades", "news_score", "REAL")
         _add_column_if_missing(connection, "trades", "financial_score", "REAL")
         _add_column_if_missing(connection, "trades", "market_regime", "TEXT")
+        _add_column_if_missing(connection, "trades", "advance_ratio", "REAL")
         _add_column_if_missing(connection, "trades", "candlestick_signals", "TEXT")
         _add_column_if_missing(connection, "trades", "selected_reason", "TEXT")
         _add_column_if_missing(connection, "trades", "broker_provider", "TEXT")
@@ -661,6 +663,7 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                     trade.get("news_score"),
                     trade.get("financial_score"),
                     trade.get("market_regime"),
+                    trade.get("advance_ratio"),
                     _json(trade.get("candlestick_signals", [])),
                     trade.get("selected_reason") or trade.get("reason") or trade.get("buy_reason"),
                     trade.get("reason") or trade.get("buy_reason"),
@@ -703,7 +706,7 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                 entry_price, exit_price, shares, amount, profit, profit_rate,
                 exit_reason, result, score, rsi, volume_ratio, total_score,
                 technical_score, news_score, financial_score, market_regime,
-                candlestick_signals, selected_reason, reason, round_lot_size,
+                advance_ratio, candlestick_signals, selected_reason, reason, round_lot_size,
                 use_round_lot, skipped_reason, intended_price, executed_price,
                 slippage_amount, slippage_rate, stop_loss_rate,
                 stop_loss_trigger_price, stop_loss_triggered_date,
@@ -713,7 +716,7 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                 estimated_tax, net_profit, net_profit_rate, dealer_comment,
                 broker_provider, order_status, live_trading, safety_checked,
                 config_version, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )

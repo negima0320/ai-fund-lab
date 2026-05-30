@@ -82,12 +82,13 @@ def test_risk_off_blocks_low_score_candidate(config_copy: dict) -> None:
         "2026-03-06",
         config_copy,
         "test",
-        market_context={"market_regime": "risk_off"},
+        market_context={"market_regime": "risk_off", "advance_ratio": 0.28},
     )
 
     assert len(result["selected"]) == 0
     assert result["scores"][0]["market_filter_applied"] is True
     assert result["scores"][0]["market_regime"] == "risk_off"
+    assert result["scores"][0]["advance_ratio"] == 0.28
     assert result["scores"][0]["rejected_reason"] == "risk_offのため買付抑制"
 
 

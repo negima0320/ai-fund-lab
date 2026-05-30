@@ -48,6 +48,7 @@ def build_feature_analysis(config: dict[str, Any], root: Path) -> dict[str, Any]
         "profile_id": profile_id,
         "profile_name": _profile_name(config),
         "closed_trade_count": len(records),
+        "missing_feature_counts": _missing_feature_counts(records),
         "rsi_filter_rejected_count": rsi_filter["count"],
         "rsi_filter_rejected_avg_score": rsi_filter["average_score"],
         "rsi_filter_threshold": rsi_filter["threshold"],
@@ -68,6 +69,7 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         f"- profile_id: {analysis.get('profile_id')}",
         f"- profile_name: {analysis.get('profile_name')}",
         f"- closed_trade_count: {analysis.get('closed_trade_count')}",
+        f"- missing_feature_counts: {json.dumps(analysis.get('missing_feature_counts', {}), ensure_ascii=False)}",
         f"- rsi_filter_rejected_count: {analysis.get('rsi_filter_rejected_count')}",
         f"- rsi_filter_rejected_avg_score: {_format_number(analysis.get('rsi_filter_rejected_avg_score'))}",
         f"- rsi_filter_threshold: {_format_number(analysis.get('rsi_filter_threshold'))}",
@@ -76,13 +78,17 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "",
         *_group_lines(analysis.get("rsi", [])),
         "",
-        "## volume_ratio別勝率",
+        "## score帯別勝率",
         "",
-        *_group_lines(analysis.get("volume_ratio", [])),
+        *_group_lines(analysis.get("score", [])),
         "",
         "## market_regime別勝率",
         "",
         *_group_lines(analysis.get("market_regime", [])),
+        "",
+        "## volume_ratio別勝率",
+        "",
+        *_group_lines(analysis.get("volume_ratio", [])),
         "",
         "## sector別勝率",
         "",
@@ -91,10 +97,6 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "## candlestick_signal別勝率",
         "",
         *_group_lines(analysis.get("candlestick_signal", [])),
-        "",
-        "## score帯別勝率",
-        "",
-        *_group_lines(analysis.get("score", [])),
     ]
     return "\n".join(lines)
 
@@ -114,6 +116,7 @@ def _feature_record(trade: dict[str, Any]) -> dict[str, Any]:
         "rsi": _number(trade.get("rsi")),
         "volume_ratio": _number(trade.get("volume_ratio")),
         "market_regime": trade.get("market_regime"),
+        "advance_ratio": _number(trade.get("advance_ratio")),
         "sector_name": trade.get("sector_name"),
         "candlestick_signals": _json_list(trade.get("candlestick_signals")),
         "total_score": _number(trade.get("total_score") or trade.get("score")),
@@ -136,7 +139,10 @@ def _group_by(records: list[dict[str, Any]], bucket_fn: Any, bucket_order: list[
     for record in records:
         groups[str(bucket_fn(record))].append(record)
     if bucket_order:
-        return [_group_stats(name, groups.get(name, [])) for name in bucket_order]
+        ordered = [_group_stats(name, groups.get(name, [])) for name in bucket_order]
+        extra_names = sorted(name for name in groups if name not in set(bucket_order))
+        ordered.extend(_group_stats(name, groups[name]) for name in extra_names)
+        return ordered
     return sorted((_group_stats(name, items) for name, items in groups.items()), key=lambda item: item["bucket"])
 
 
@@ -163,6 +169,19 @@ def _group_stats(name: str, items: list[dict[str, Any]]) -> dict[str, Any]:
         "average_profit_rate": _average(profit_rates),
         "total_profit": round(sum(profit_values), 2),
     }
+
+
+def _missing_feature_counts(records: list[dict[str, Any]]) -> dict[str, int]:
+    keys = ["rsi", "volume_ratio", "market_regime", "advance_ratio", "sector_name", "candlestick_signals", "total_score"]
+    return {key: sum(1 for record in records if _missing_feature(record.get(key))) for key in keys}
+
+
+def _missing_feature(value: Any) -> bool:
+    if value is None or value == "":
+        return True
+    if isinstance(value, list) and not value:
+        return True
+    return False
 
 
 def _group_lines(items: list[dict[str, Any]]) -> list[str]:

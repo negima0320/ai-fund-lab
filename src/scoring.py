@@ -135,6 +135,7 @@ def score_real_candidates(
     selection_config = _selection_config(config)
     market_filter = _market_filter_config(config)
     market_regime = str((market_context or {}).get("market_regime") or "neutral")
+    advance_ratio = _optional_float((market_context or {}).get("advance_ratio"))
     news_by_code = news_by_code or {}
 
     for candidate in candidates:
@@ -218,6 +219,7 @@ def score_real_candidates(
                 "rejected_reason": "",
                 "market_filter_applied": False,
                 "market_regime": market_regime,
+                "advance_ratio": advance_ratio,
                 "market_filter_reason": "",
                 "source_provider": source_provider,
                 "fallback": candidate.get("fallback", False),

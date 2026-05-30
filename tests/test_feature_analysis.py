@@ -32,6 +32,7 @@ def test_feature_analysis_groups_closed_trade_results(config_copy: dict, tmp_pat
                 "news_score": 10,
                 "financial_score": 10,
                 "market_regime": "risk_on",
+                "advance_ratio": 0.62,
                 "sector_name": "情報・通信",
                 "candlestick_signals": ["bullish_candle"],
                 "selected_reason": "強い形状",
@@ -55,6 +56,7 @@ def test_feature_analysis_groups_closed_trade_results(config_copy: dict, tmp_pat
                 "news_score": 8,
                 "financial_score": 10,
                 "market_regime": "risk_off",
+                "advance_ratio": 0.28,
                 "sector_name": "機械",
                 "candlestick_signals": ["long_upper_shadow_warning"],
                 "selected_reason": "警戒あり",
@@ -83,6 +85,8 @@ def test_feature_analysis_groups_closed_trade_results(config_copy: dict, tmp_pat
     analysis = build_feature_analysis(config_copy, tmp_path)
 
     assert analysis["closed_trade_count"] == 2
+    assert analysis["missing_feature_counts"]["market_regime"] == 0
+    assert analysis["missing_feature_counts"]["advance_ratio"] == 0
     assert analysis["rsi_filter_rejected_count"] == 1
     assert analysis["rsi_filter_rejected_avg_score"] == 76
     assert analysis["rsi_filter_threshold"] == 65
@@ -121,6 +125,7 @@ def test_sell_trade_inherits_buy_time_features(config_copy: dict) -> None:
         "rsi": 56,
         "volume_ratio": 2.4,
         "market_regime": "risk_on",
+        "advance_ratio": 0.62,
         "candlestick_signals": ["bullish_candle"],
     }
     state, _summary, trades = execute_real_data_paper_trade([day1_candidate], state, config_copy, "2026-03-02")
@@ -142,5 +147,6 @@ def test_sell_trade_inherits_buy_time_features(config_copy: dict) -> None:
     assert sell["news_score"] == 8
     assert sell["financial_score"] == 10
     assert sell["market_regime"] == "risk_on"
+    assert sell["advance_ratio"] == 0.62
     assert sell["candlestick_signals"] == ["bullish_candle"]
     assert sell["selected_reason"] == "test buy"

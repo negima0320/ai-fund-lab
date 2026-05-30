@@ -4683,6 +4683,7 @@ def write_trades_csv(path: Path, trades: list[dict[str, Any]]) -> None:
         "news_score",
         "financial_score",
         "market_regime",
+        "advance_ratio",
         "candlestick_signals",
         "selected_reason",
         "reason",
