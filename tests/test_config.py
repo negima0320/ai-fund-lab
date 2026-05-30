@@ -2,7 +2,8 @@ from __future__ import annotations
 
 
 def test_rookie_dealer_config_loads(config: dict) -> None:
-    assert config["dealer"]["id"] == "rookie_dealer_001"
+    assert config["dealer"]["id"] == "rookie_dealer_01"
+    assert config["profile_id"] == "rookie_dealer_01"
 
 
 def test_required_config_keys_exist(config: dict) -> None:

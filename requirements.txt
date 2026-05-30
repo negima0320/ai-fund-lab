@@ -3,4 +3,4 @@ jquants-api-client
 python-dotenv
 openai
 pytest
-pandas-ta
+pandas-ta; python_version >= "3.12"
