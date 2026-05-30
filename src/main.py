@@ -68,6 +68,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config" / "rookie_dealer.yaml"
 ACTIVE_PROFILE_ID = DEFAULT_PROFILE_ID
 BACKTEST_MODE_ACTIVE = False
+BACKTEST_DAY_LOG_PREFIX = ""
 
 
 def main() -> None:
@@ -1591,61 +1592,105 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
         raise SystemExit("Prime stock list is empty. Re-run list-stocks and check the result.")
 
     config = load_config(CONFIG_PATH)
-    fetch_dates = previous_business_dates(target_date, 60)
-    try:
-        provider = JQuantsDataProvider(
-            ROOT / ".env",
-            timeout_seconds=int(config.get("jquants", {}).get("request_timeout_seconds", 20)),
-        )
-        price_rows = fetch_price_history(
-            provider,
-            target_date,
-            prime_codes,
-            lookback_business_days=60,
-            rate_limit_per_minute=int(config.get("jquants", {}).get("rate_limit_per_minute", 5)),
-            fetch_dates=fetch_dates,
-            continue_on_error=True,
-            verbose=False,
-        )
-    except RuntimeError as exc:
+    indicator_mode = _backtest_indicator_mode(config) if BACKTEST_MODE_ACTIVE else "full"
+    output_path = ROOT / "data" / "processed" / f"indicators_{target_date_text}.json"
+    profile_output_path = processed_profile_path(config, f"indicators_{target_date_text}.json")
+    if BACKTEST_MODE_ACTIVE and profile_output_path.exists():
+        cached_payload = read_json(profile_output_path)
+        if cached_payload.get("indicator_mode") == indicator_mode:
+            write_json(output_path, cached_payload)
+            print(f"{BACKTEST_DAY_LOG_PREFIX} indicators cache hit: {profile_output_path.relative_to(ROOT)}")
+            return
+
+    lookback_days = 60 if indicator_mode == "full" else 35
+    fetch_dates = previous_business_dates(target_date, lookback_days)
+    if BACKTEST_MODE_ACTIVE:
         price_rows = load_cached_price_history(fetch_dates)
-        if price_rows:
-            print(f"J-Quants indicator source fetch failed; using cached price history. reason={exc}")
-        else:
-            print(f"J-Quants indicator source fetch failed: {exc}")
-            raise SystemExit(1) from exc
+        if not price_rows:
+            raise SystemExit(f"No cached price history found for {target_date_text}. Run fetch-period-prices first.")
+    else:
+        try:
+            provider = JQuantsDataProvider(
+                ROOT / ".env",
+                timeout_seconds=int(config.get("jquants", {}).get("request_timeout_seconds", 20)),
+            )
+            price_rows = fetch_price_history(
+                provider,
+                target_date,
+                prime_codes,
+                lookback_business_days=60,
+                rate_limit_per_minute=int(config.get("jquants", {}).get("rate_limit_per_minute", 5)),
+                fetch_dates=fetch_dates,
+                continue_on_error=True,
+                verbose=False,
+            )
+        except RuntimeError as exc:
+            price_rows = load_cached_price_history(fetch_dates)
+            if price_rows:
+                print(f"J-Quants indicator source fetch failed; using cached price history. reason={exc}")
+            else:
+                print(f"J-Quants indicator source fetch failed: {exc}")
+                raise SystemExit(1) from exc
 
     if not price_rows:
         raise SystemExit(f"No price history found for {target_date_text}. The date may be weekend, holiday, or not updated yet.")
 
+    input_days = len({row.get("date") for row in price_rows if row.get("date")})
+    target_stocks = len({row.get("code") for row in price_rows if row.get("date") == target_date_text})
+    if BACKTEST_MODE_ACTIVE:
+        print(f"{BACKTEST_DAY_LOG_PREFIX} indicators mode: {indicator_mode}")
+        print(f"{BACKTEST_DAY_LOG_PREFIX} indicators input days: {input_days}")
+        print(f"{BACKTEST_DAY_LOG_PREFIX} indicators input rows: {len(price_rows)}")
+        print(f"{BACKTEST_DAY_LOG_PREFIX} indicators target stocks: {target_stocks}")
+
+    def progress_callback(index: int, total: int, code: str) -> None:
+        if BACKTEST_MODE_ACTIVE:
+            print(f"{BACKTEST_DAY_LOG_PREFIX} indicators progress: {index}/{total} code={code}")
+
     try:
-        indicators, insufficient_history_count = calculate_indicators(price_rows, stock_names, target_date_text, stock_sectors)
+        indicators, insufficient_history_count = calculate_indicators(
+            price_rows,
+            stock_names,
+            target_date_text,
+            stock_sectors,
+            indicator_mode=indicator_mode,
+            progress_callback=progress_callback if BACKTEST_MODE_ACTIVE else None,
+        )
     except TechnicalIndicatorDependencyError as exc:
+        raise SystemExit(str(exc)) from exc
+    except RuntimeError as exc:
         raise SystemExit(str(exc)) from exc
     excluded_count = len(prime_codes) - len(indicators)
     if not indicators:
         raise SystemExit(f"No indicators calculated for {target_date_text}. Price history may be insufficient or target date may have no data.")
 
-    output_path = ROOT / "data" / "processed" / f"indicators_{target_date_text}.json"
-    write_json(
-        output_path,
-        {
-            "provider": "jquants",
-            "date": target_date_text,
-            "lookback_business_days": 60,
-            "input_rows": len(price_rows),
-            "calculated_count": len(indicators),
-            "excluded_count": excluded_count,
-            "insufficient_history_count": insufficient_history_count,
-            "indicators": indicators,
-        },
-    )
+    payload = {
+        "provider": "jquants",
+        "date": target_date_text,
+        "indicator_mode": indicator_mode,
+        "lookback_business_days": lookback_days,
+        "input_days": input_days,
+        "input_rows": len(price_rows),
+        "target_stocks": target_stocks,
+        "calculated_count": len(indicators),
+        "excluded_count": excluded_count,
+        "insufficient_history_count": insufficient_history_count,
+        "indicators": indicators,
+    }
+    write_json(output_path, payload)
+    if BACKTEST_MODE_ACTIVE:
+        write_json(profile_output_path, payload)
 
     print(f"date: {target_date_text}")
+    print(f"indicator mode: {indicator_mode}")
     print(f"price rows: {len(price_rows)}")
+    print(f"input days: {input_days}")
+    print(f"target stocks: {target_stocks}")
     print(f"calculated indicators: {len(indicators)}")
     print(f"excluded insufficient data: {excluded_count}")
     print(f"saved: {output_path.relative_to(ROOT)}")
+    if BACKTEST_MODE_ACTIVE:
+        print(f"profile cache saved: {profile_output_path.relative_to(ROOT)}")
 
 
 def run_screen(provider_name: str, target_date_text: str) -> None:
@@ -2504,8 +2549,11 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
         print(f"backtest trading_days: {len(trading_dates)}")
         print(f"backtest news fetch: {'disabled' if _backtest_disable_news(config) else 'enabled'}")
         print(f"backtest OpenAI: {'disabled' if _backtest_disable_openai(config) else 'configured by profile'}")
+        print(f"backtest indicator_mode: {_backtest_indicator_mode(config)}")
         for index, trading_date in enumerate(trading_dates, start=1):
             target_date_text = trading_date.isoformat()
+            global BACKTEST_DAY_LOG_PREFIX
+            BACKTEST_DAY_LOG_PREFIX = f"[day {index}/{len(trading_dates)}] {target_date_text}"
             print(f"[day {index}/{len(trading_dates)}] {target_date_text} start")
             _run_backtest_day_step(index, len(trading_dates), target_date_text, "calculate-indicators", lambda: ensure_indicators(provider_name, target_date_text), lambda: _backtest_indicator_metrics(target_date_text))
             _run_backtest_day_step(index, len(trading_dates), target_date_text, "market-context", lambda: ensure_market_context(provider_name, target_date_text), lambda: _backtest_market_context_metrics(target_date_text))
@@ -2678,7 +2726,10 @@ def _backtest_indicator_metrics(target_date_text: str) -> list[str]:
         return ["indicators file: missing"]
     payload = read_json(path)
     return [
+        f"indicators mode: {payload.get('indicator_mode', 'full')}",
+        f"indicators input days: {payload.get('input_days', 'N/A')}",
         f"indicators input rows: {payload.get('input_rows', 'N/A')}",
+        f"indicators target stocks: {payload.get('target_stocks', 'N/A')}",
         f"indicators calculated: {payload.get('calculated_count', len(payload.get('indicators', [])))}",
         f"indicators excluded: {payload.get('excluded_count', 'N/A')}",
     ]
@@ -2770,6 +2821,11 @@ def _backtest_disable_openai(config: dict[str, Any]) -> bool:
     return bool(config.get("backtest", {}).get("disable_openai", True))
 
 
+def _backtest_indicator_mode(config: dict[str, Any]) -> str:
+    mode = str(config.get("backtest", {}).get("indicator_mode", "fast"))
+    return mode if mode in {"full", "fast", "minimal"} else "fast"
+
+
 def ensure_prices(provider_name: str, target_date_text: str) -> None:
     price_path = ROOT / "data" / "raw" / f"prices_{target_date_text}.json"
     if price_path.exists():
@@ -2778,8 +2834,17 @@ def ensure_prices(provider_name: str, target_date_text: str) -> None:
 
 
 def ensure_indicators(provider_name: str, target_date_text: str) -> None:
+    config = load_config(CONFIG_PATH)
     path = ROOT / "data" / "processed" / f"indicators_{target_date_text}.json"
-    if path.exists():
+    profile_path = processed_profile_path(config, f"indicators_{target_date_text}.json")
+    indicator_mode = _backtest_indicator_mode(config) if BACKTEST_MODE_ACTIVE else "full"
+    if BACKTEST_MODE_ACTIVE and profile_path.exists():
+        payload = read_json(profile_path)
+        if payload.get("indicator_mode") == indicator_mode:
+            write_json(path, payload)
+            print(f"{BACKTEST_DAY_LOG_PREFIX} indicators cache hit: {profile_path.relative_to(ROOT)}")
+            return
+    if path.exists() and (not BACKTEST_MODE_ACTIVE or read_json(path).get("indicator_mode") == indicator_mode):
         return
     run_calculate_indicators(provider_name, target_date_text)
 

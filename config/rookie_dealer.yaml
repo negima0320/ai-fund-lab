@@ -45,6 +45,7 @@ jquants:
 backtest:
   disable_news_fetch: true
   disable_openai: true
+  indicator_mode: fast
 
 database:
   path: storage/ai_fund_lab.sqlite3

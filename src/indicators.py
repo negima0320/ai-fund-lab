@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
+from candlestick import calculate_candlestick_indicators, detect_candlestick_signals
 from technical_indicators import TechnicalIndicatorDependencyError, calculate_indicators_with_pandas_ta
 
 
@@ -12,7 +13,10 @@ def calculate_indicators(
     stock_names: dict[str, str],
     target_date: str,
     stock_sectors: dict[str, str] | None = None,
+    indicator_mode: str = "full",
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
+    indicator_mode = indicator_mode if indicator_mode in {"full", "fast", "minimal"} else "full"
     stock_sectors = stock_sectors or {}
     by_code: dict[str, list[dict[str, Any]]] = {}
     for row in price_rows:
@@ -22,20 +26,31 @@ def calculate_indicators(
 
     indicators = []
     excluded_count = 0
-    for code, rows in by_code.items():
+    total_codes = len(by_code)
+    for index, (code, rows) in enumerate(by_code.items(), start=1):
+        if progress_callback and (index == 1 or index % 100 == 0 or index == total_codes):
+            progress_callback(index, total_codes, code)
         rows.sort(key=lambda item: item["date"])
         target_index = _find_target_index(rows, target_date)
         if target_index is None:
             continue
 
         history = rows[: target_index + 1]
-        if len(history) < 35:
+        required_history = _required_history_length(indicator_mode)
+        if len(history) < required_history:
             excluded_count += 1
             continue
 
-        calculated = calculate_indicators_with_pandas_ta(_to_dataframe(history))
-        target = calculated.iloc[-1].to_dict()
-        previous = calculated.iloc[-2].to_dict()
+        try:
+            if indicator_mode == "full":
+                calculated = calculate_indicators_with_pandas_ta(_to_dataframe(history))
+                target = calculated.iloc[-1].to_dict()
+                previous = calculated.iloc[-2].to_dict()
+            else:
+                target, previous = _calculate_lightweight_target(history, indicator_mode)
+        except Exception as exc:
+            raise RuntimeError(f"Indicator calculation failed for code={code}") from exc
+
         base = {
             "code": code,
             "name": stock_names.get(code, ""),
@@ -83,6 +98,14 @@ def calculate_indicators(
     return indicators, excluded_count
 
 
+def _required_history_length(indicator_mode: str) -> int:
+    if indicator_mode == "minimal":
+        return 25
+    if indicator_mode == "fast":
+        return 25
+    return 35
+
+
 def _find_target_index(rows: list[dict[str, Any]], target_date: str) -> Optional[int]:
     for index, row in enumerate(rows):
         if row["date"] == target_date:
@@ -103,6 +126,109 @@ def _to_dataframe(rows: list[dict[str, Any]]) -> Any:
     for column in ["open", "high", "low", "close", "volume"]:
         df[column] = pd.to_numeric(df[column], errors="coerce")
     return df
+
+
+def _calculate_lightweight_target(history: list[dict[str, Any]], indicator_mode: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    rows = [_normalize_numeric_row(row) for row in history]
+    enriched = []
+    for index, row in enumerate(rows):
+        previous = enriched[index - 1] if index > 0 else None
+        closes = [item["close"] for item in rows[: index + 1]]
+        volumes = [item["volume"] for item in rows[: index + 1]]
+        ma5 = _sma(closes, 5)
+        ma25 = _sma(closes, 25)
+        result = {
+            **row,
+            "ma5": ma5,
+            "ma25": ma25,
+            "rsi": _rsi(closes, 14),
+            "volume_ratio": (volumes[-1] / volumes[-2]) if len(volumes) >= 2 and volumes[-2] else None,
+            "macd": None,
+            "macd_signal": None,
+            "macd_hist": None,
+            "bb_upper": None,
+            "bb_middle": None,
+            "bb_lower": None,
+            "bb_position": None,
+            "atr": None,
+            "five_day_volatility": None,
+            "five_day_change_rate": None,
+        }
+        if indicator_mode == "fast":
+            result["five_day_volatility"] = _five_day_volatility(closes)
+            result["five_day_change_rate"] = _five_day_change_rate(closes)
+            candle = calculate_candlestick_indicators(row, previous)
+            result.update(candle)
+            result["candlestick_signals"] = detect_candlestick_signals(result)
+        else:
+            result.update(
+                {
+                    "candle_type": None,
+                    "candle_body_rate": None,
+                    "upper_shadow_rate": None,
+                    "lower_shadow_rate": None,
+                    "close_position_in_range": None,
+                    "gap_rate": None,
+                    "candlestick_signals": [],
+                }
+            )
+        enriched.append(result)
+    return enriched[-1], enriched[-2]
+
+
+def _normalize_numeric_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **row,
+        "open": _float_or_none(row.get("open")),
+        "high": _float_or_none(row.get("high")),
+        "low": _float_or_none(row.get("low")),
+        "close": _float_or_none(row.get("close")),
+        "volume": _float_or_none(row.get("volume")),
+    }
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sma(values: list[float | None], length: int) -> float | None:
+    valid = [value for value in values[-length:] if value is not None]
+    if len(valid) < length:
+        return None
+    return sum(valid) / length
+
+
+def _rsi(values: list[float | None], length: int = 14) -> float | None:
+    valid = [value for value in values if value is not None]
+    if len(valid) <= length:
+        return None
+    changes = [valid[index] - valid[index - 1] for index in range(1, len(valid))]
+    recent = changes[-length:]
+    gains = [change for change in recent if change > 0]
+    losses = [-change for change in recent if change < 0]
+    average_gain = sum(gains) / length
+    average_loss = sum(losses) / length
+    if average_loss == 0:
+        return 100.0
+    rs = average_gain / average_loss
+    return 100 - (100 / (1 + rs))
+
+
+def _five_day_volatility(values: list[float | None]) -> float | None:
+    valid = [value for value in values[-5:] if value is not None]
+    latest = values[-1]
+    if len(valid) < 5 or not latest:
+        return None
+    return (max(valid) - min(valid)) / latest
+
+
+def _five_day_change_rate(values: list[float | None]) -> float | None:
+    if len(values) < 5 or values[-5] in {None, 0} or values[-1] is None:
+        return None
+    return (values[-1] - values[-5]) / values[-5]
 
 
 def _round_optional(value: Any, digits: int) -> Any:
