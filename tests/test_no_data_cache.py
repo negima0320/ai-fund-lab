@@ -85,6 +85,7 @@ def test_rate_limit_error_is_not_saved_to_no_data_cache(monkeypatch, tmp_path) -
     assert rows == []
     assert provider.calls == [target, target, target, target]
     assert main.load_no_data_day(target) is None
+    assert main.load_unsupported_day(target) is None
 
 
 def test_rate_limit_retries_then_succeeds(monkeypatch, tmp_path) -> None:
@@ -138,6 +139,57 @@ def test_rate_limit_retries_are_exhausted(monkeypatch, tmp_path) -> None:
     assert provider.calls == [target, target, target, target]
     assert sleeps == [12, 24, 48]
     assert main.load_no_data_day(target) is None
+    assert main.load_unsupported_day(target) is None
+
+
+def test_http_400_is_saved_to_unsupported_cache(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(main, "ROOT", tmp_path)
+    target = date(2023, 11, 21)
+    provider = FakeProvider(error=RuntimeError("J-Quants API request failed with HTTP 400."))
+
+    rows = main.fetch_price_history(
+        provider,
+        target,
+        {"1001"},
+        lookback_business_days=1,
+        rate_limit_per_minute=60,
+        fetch_dates=[target],
+        continue_on_error=True,
+        verbose=True,
+    )
+
+    assert rows == []
+    assert provider.calls == [target]
+    assert main.load_no_data_day(target) is None
+    entry = main.load_unsupported_day(target)
+    assert entry is not None
+    assert entry["provider"] == "jquants"
+    assert entry["reason"] == "http_400_bad_request_or_out_of_range"
+    assert entry["source"] == "fetch-period-prices"
+
+
+def test_unsupported_cache_hit_skips_api(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(main, "ROOT", tmp_path)
+    target = date(2023, 11, 22)
+    main.save_unsupported_day(
+        target,
+        reason="http_400_bad_request_or_out_of_range",
+        source="test",
+    )
+    provider = FakeProvider(payload=[{"Code": "1001", "Date": "2023-11-22", "Close": 1000}])
+
+    rows = main.fetch_price_history(
+        provider,
+        target,
+        {"1001"},
+        lookback_business_days=1,
+        rate_limit_per_minute=60,
+        fetch_dates=[target],
+        verbose=True,
+    )
+
+    assert rows == []
+    assert provider.calls == []
 
 
 def test_saved_no_data_cache_is_used_on_next_fetch(monkeypatch, tmp_path) -> None:

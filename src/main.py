@@ -3707,19 +3707,34 @@ def ensure_price_history_for_backtest(provider_name: str, start_date: date, end_
     fetch_dates = business_dates_between(lookback_start, end_date)
     cached_dates = [fetch_date for fetch_date in fetch_dates if load_cached_prime_prices(fetch_date) is not None]
     no_data_cache = load_no_data_days_cache()
+    unsupported_cache = load_unsupported_days_cache()
     no_data_dates = [
         fetch_date
         for fetch_date in fetch_dates
         if load_cached_prime_prices(fetch_date) is None and no_data_cache_entry(fetch_date, no_data_cache) is not None
     ]
+    unsupported_dates = [
+        fetch_date
+        for fetch_date in fetch_dates
+        if (
+            load_cached_prime_prices(fetch_date) is None
+            and no_data_cache_entry(fetch_date, no_data_cache) is None
+            and unsupported_cache_entry(fetch_date, unsupported_cache) is not None
+        )
+    ]
     missing_dates = [
         fetch_date
         for fetch_date in fetch_dates
-        if load_cached_prime_prices(fetch_date) is None and no_data_cache_entry(fetch_date, no_data_cache) is None
+        if (
+            load_cached_prime_prices(fetch_date) is None
+            and no_data_cache_entry(fetch_date, no_data_cache) is None
+            and unsupported_cache_entry(fetch_date, unsupported_cache) is None
+        )
     ]
     print(
         "fetch-period-prices price cache: "
-        f"cached={len(cached_dates)} no_data={len(no_data_dates)} missing={len(missing_dates)} total={len(fetch_dates)} "
+        f"cached={len(cached_dates)} no_data={len(no_data_dates)} "
+        f"unsupported={len(unsupported_dates)} missing={len(missing_dates)} total={len(fetch_dates)} "
         f"lookback_start={lookback_start.isoformat()}"
     )
     for fetch_date in cached_dates:
@@ -3727,6 +3742,9 @@ def ensure_price_history_for_backtest(provider_name: str, start_date: date, end_
     for fetch_date in no_data_dates:
         entry = no_data_cache_entry(fetch_date, no_data_cache) or {}
         print(f"fetch-period-prices skip no-data cache: {fetch_date.isoformat()} reason={entry.get('reason', 'unknown')}")
+    for fetch_date in unsupported_dates:
+        entry = unsupported_cache_entry(fetch_date, unsupported_cache) or {}
+        print(f"fetch-period-prices skip unsupported cache: {fetch_date.isoformat()} reason={entry.get('reason', 'unknown')}")
     if fetch_dates and not missing_dates:
         print("backtest price history: using cached price files")
         return
@@ -4460,6 +4478,18 @@ def fetch_price_history(
                     f"{fetch_date.isoformat()} reason={no_data_entry.get('reason', 'unknown')}"
                 )
             continue
+        unsupported_entry = load_unsupported_day(fetch_date)
+        if unsupported_entry is not None:
+            if verbose:
+                print(
+                    f"fetch-period-prices [{index}/{total_dates}] "
+                    f"{fetch_date.isoformat()} unsupported cache hit reason={unsupported_entry.get('reason', 'unknown')}"
+                )
+                print(
+                    f"fetch-period-prices skip unsupported cache: "
+                    f"{fetch_date.isoformat()} reason={unsupported_entry.get('reason', 'unknown')}"
+                )
+            continue
 
         if api_requests > 0:
             if verbose:
@@ -4477,6 +4507,19 @@ def fetch_price_history(
                 print(f"fetch-period-prices {fetch_date.isoformat()} interrupted by Ctrl+C")
             raise
         except RuntimeError as exc:
+            if is_bad_request_or_out_of_range_error(exc):
+                save_unsupported_day(
+                    fetch_date,
+                    reason="http_400_bad_request_or_out_of_range",
+                    source="fetch-period-prices",
+                )
+                if verbose:
+                    print(
+                        f"fetch-period-prices {fetch_date.isoformat()} "
+                        "HTTP 400 bad_request_or_out_of_range; saved unsupported cache"
+                    )
+                api_requests += 1
+                continue
             if verbose:
                 print(f"fetch-period-prices {fetch_date.isoformat()} temporary API error; not cached: {exc}")
             if continue_on_error:
@@ -4515,21 +4558,45 @@ def fetch_daily_prices_with_rate_limit_retry(
         try:
             return provider.get_daily_prices(fetch_date)
         except RuntimeError as exc:
-            if not is_rate_limit_error(exc) or attempt >= len(retry_waits):
+            if is_bad_request_or_out_of_range_error(exc) or not is_retryable_jquants_error(exc) or attempt >= len(retry_waits):
                 raise
             wait_seconds = retry_waits[attempt]
             attempt += 1
             if verbose:
                 print(
                     f"fetch-period-prices {fetch_date.isoformat()} "
-                    f"rate limit exceeded; retry {attempt}/{len(retry_waits)} "
+                    f"{jquants_error_category(exc)}; retry {attempt}/{len(retry_waits)} "
                     f"after {wait_seconds}s"
                 )
             time.sleep(wait_seconds)
 
 
+def is_retryable_jquants_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        is_rate_limit_error(exc)
+        or "network error" in message
+        or "timed out" in message
+        or "timeout" in message
+        or any(f"http {code}" in message for code in range(500, 600))
+    )
+
+
 def is_rate_limit_error(exc: Exception) -> bool:
-    return "rate limit" in str(exc).lower()
+    message = str(exc).lower()
+    return "rate limit" in message or "http 429" in message
+
+
+def is_bad_request_or_out_of_range_error(exc: Exception) -> bool:
+    return "http 400" in str(exc).lower()
+
+
+def jquants_error_category(exc: Exception) -> str:
+    if is_rate_limit_error(exc):
+        return "rate limit exceeded"
+    if is_bad_request_or_out_of_range_error(exc):
+        return "bad_request_or_out_of_range"
+    return "temporary API error"
 
 
 def load_cached_prime_prices(fetch_date: date) -> Any:
@@ -4544,8 +4611,20 @@ def no_data_days_cache_path() -> Path:
     return ROOT / "data" / "raw" / "no_data_days_jquants.json"
 
 
+def unsupported_days_cache_path() -> Path:
+    return ROOT / "data" / "raw" / "unsupported_days_jquants.json"
+
+
 def load_no_data_days_cache() -> dict[str, Any]:
     path = no_data_days_cache_path()
+    if not path.exists():
+        return {}
+    payload = read_json(path)
+    return payload if isinstance(payload, dict) else {}
+
+
+def load_unsupported_days_cache() -> dict[str, Any]:
+    path = unsupported_days_cache_path()
     if not path.exists():
         return {}
     payload = read_json(path)
@@ -4558,8 +4637,18 @@ def no_data_cache_entry(fetch_date: date, cache: dict[str, Any] | None = None) -
     return entry if isinstance(entry, dict) else None
 
 
+def unsupported_cache_entry(fetch_date: date, cache: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    cache = cache if cache is not None else load_unsupported_days_cache()
+    entry = cache.get(fetch_date.isoformat())
+    return entry if isinstance(entry, dict) else None
+
+
 def load_no_data_day(fetch_date: date) -> dict[str, Any] | None:
     return no_data_cache_entry(fetch_date)
+
+
+def load_unsupported_day(fetch_date: date) -> dict[str, Any] | None:
+    return unsupported_cache_entry(fetch_date)
 
 
 def save_no_data_day(fetch_date: date, reason: str, source: str) -> None:
@@ -4571,6 +4660,17 @@ def save_no_data_day(fetch_date: date, reason: str, source: str) -> None:
         "source": source,
     }
     write_json(no_data_days_cache_path(), cache)
+
+
+def save_unsupported_day(fetch_date: date, reason: str, source: str) -> None:
+    cache = load_unsupported_days_cache()
+    cache[fetch_date.isoformat()] = {
+        "provider": "jquants",
+        "reason": reason,
+        "checked_at": datetime.now().isoformat(timespec="seconds"),
+        "source": source,
+    }
+    write_json(unsupported_days_cache_path(), cache)
 
 
 def load_cached_price_history(fetch_dates: list[date]) -> list[dict[str, Any]]:

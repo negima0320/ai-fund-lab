@@ -68,6 +68,8 @@ def build_selection_quality_analysis(config: dict[str, Any], root: Path) -> dict
             "return_5d": _lift(selected_records, rejected_records, "return_5d"),
             "return_10d": _lift(selected_records, rejected_records, "return_10d"),
         },
+        "rejected_reason_analysis": _rejected_reason_analysis(selected_records, rejected_records),
+        "missed_opportunity_by_reason": _missed_opportunity_by_reason(rejected_records),
         "top_missed_opportunities": _top_records(
             rejected_records,
             key="return_10d",
@@ -109,6 +111,18 @@ def render_selection_quality_markdown(analysis: dict[str, Any]) -> str:
         "## Stage Comparison",
         "",
         *_stage_lines(analysis),
+        "",
+        "## Rejected Reason Analysis",
+        "",
+        *_rejected_reason_lines(analysis.get("rejected_reason_analysis", [])),
+        "",
+        "## Missed Opportunity by Reason",
+        "",
+        *_missed_opportunity_lines(analysis.get("missed_opportunity_by_reason", [])),
+        "",
+        "## False Rejection Check",
+        "",
+        *_false_rejection_lines(analysis.get("rejected_reason_analysis", [])),
         "",
         "## Top Missed Opportunities",
         "",
@@ -169,6 +183,63 @@ def _lift(selected: list[dict[str, Any]], rejected: list[dict[str, Any]], key: s
     return round(selected_average - rejected_average, 6)
 
 
+def _rejected_reason_analysis(selected_records: list[dict[str, Any]], rejected_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    selected_average_10d = _average(_valid_numbers(record.get("return_10d") for record in selected_records))
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in rejected_records:
+        groups[_reason(record)].append(record)
+    result = []
+    for reason, records in groups.items():
+        returns_5d = _valid_numbers(record.get("return_5d") for record in records)
+        returns_10d = _valid_numbers(record.get("return_10d") for record in records)
+        average_10d = _average(returns_10d)
+        result.append(
+            {
+                "rejected_reason": reason,
+                "count": len(records),
+                "avg_future_return_5d": _average(returns_5d),
+                "avg_future_return_10d": average_10d,
+                "median_future_return_5d": _median(returns_5d),
+                "median_future_return_10d": _median(returns_10d),
+                "top_10d_return": max(returns_10d) if returns_10d else None,
+                "bottom_10d_return": min(returns_10d) if returns_10d else None,
+                "positive_rate_5d": _positive_rate(returns_5d),
+                "positive_rate_10d": _positive_rate(returns_10d),
+                "selected_avg_future_return_10d": selected_average_10d,
+                "filter_effectiveness": _filter_effectiveness(average_10d, selected_average_10d),
+            }
+        )
+    return sorted(result, key=lambda item: (-int(item["count"]), str(item["rejected_reason"])))
+
+
+def _missed_opportunity_by_reason(rejected_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in rejected_records:
+        return_10d = _number(record.get("return_10d"))
+        if return_10d is not None and return_10d >= 0.2:
+            groups[_reason(record)].append(record)
+    result = [
+        {
+            "rejected_reason": reason,
+            "count": len(records),
+            "top_10d_return": max(_valid_numbers(record.get("return_10d") for record in records)),
+        }
+        for reason, records in groups.items()
+    ]
+    return sorted(result, key=lambda item: (-int(item["count"]), str(item["rejected_reason"])))
+
+
+def _filter_effectiveness(rejected_average_10d: float | None, selected_average_10d: float | None) -> str:
+    if rejected_average_10d is None or selected_average_10d is None:
+        return "unknown"
+    diff = rejected_average_10d - selected_average_10d
+    if diff > 0.005:
+        return "harmful"
+    if diff >= -0.005:
+        return "questionable"
+    return "effective"
+
+
 def _top_records(records: list[dict[str, Any]], key: str, reverse: bool, limit: int) -> list[dict[str, Any]]:
     ranked = [record for record in records if _number(record.get(key)) is not None]
     ranked.sort(key=lambda record: float(record.get(key) or 0.0), reverse=reverse)
@@ -185,6 +256,10 @@ def _top_records(records: list[dict[str, Any]], key: str, reverse: bool, limit: 
         }
         for record in ranked[:limit]
     ]
+
+
+def _reason(record: dict[str, Any]) -> str:
+    return str(record.get("rejected_reason") or "unknown")
 
 
 def _load_price_history(root: Path) -> dict[str, list[dict[str, Any]]]:
@@ -263,6 +338,51 @@ def _record_lines(records: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+def _rejected_reason_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- データなし"]
+    return [
+        (
+            f"- {item.get('rejected_reason')}: count {item.get('count')}, "
+            f"avg5d {_format_percent(item.get('avg_future_return_5d'))}, "
+            f"avg10d {_format_percent(item.get('avg_future_return_10d'))}, "
+            f"median5d {_format_percent(item.get('median_future_return_5d'))}, "
+            f"median10d {_format_percent(item.get('median_future_return_10d'))}, "
+            f"top10d {_format_percent(item.get('top_10d_return'))}, "
+            f"bottom10d {_format_percent(item.get('bottom_10d_return'))}, "
+            f"positive5d {_format_percent(item.get('positive_rate_5d'))}, "
+            f"positive10d {_format_percent(item.get('positive_rate_10d'))}, "
+            f"effectiveness {item.get('filter_effectiveness')}"
+        )
+        for item in items
+    ]
+
+
+def _missed_opportunity_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- データなし"]
+    return [
+        (
+            f"- {item.get('rejected_reason')}: {item.get('count')}件, "
+            f"top10d {_format_percent(item.get('top_10d_return'))}"
+        )
+        for item in items
+    ]
+
+
+def _false_rejection_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- データなし"]
+    return [
+        (
+            f"- {item.get('rejected_reason')}: {item.get('filter_effectiveness')} "
+            f"(rejected avg10d {_format_percent(item.get('avg_future_return_10d'))}, "
+            f"selected avg10d {_format_percent(item.get('selected_avg_future_return_10d'))})"
+        )
+        for item in items
+    ]
+
+
 def _rows(connection: sqlite3.Connection, query: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
     return [dict(row) for row in connection.execute(query, params)]
 
@@ -298,6 +418,22 @@ def _average(values: list[float]) -> float | None:
     if not values:
         return None
     return round(sum(values) / len(values), 6)
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return round(ordered[midpoint], 6)
+    return round((ordered[midpoint - 1] + ordered[midpoint]) / 2, 6)
+
+
+def _positive_rate(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return round(sum(1 for value in values if value > 0) / len(values), 6)
 
 
 def _format_percent(value: Any) -> str:

@@ -68,6 +68,32 @@ def test_rookie_dealer_02_v2_dot_1_alias_loads() -> None:
     assert profile["volume_filter"]["min_volume_ratio"] == 2.0
 
 
+def test_rookie_dealer_02_v2_2_profile_relaxes_risk_off_filter() -> None:
+    profile = load_profile("rookie_dealer_02_v2_2")
+
+    assert profile["profile_id"] == "rookie_dealer_02_v2_2"
+    assert profile["profile_name"] == "新人ディーラー2号 v2.2"
+    assert profile["execution"]["stop_loss_execution"] == "intraday_stop"
+    assert profile["selection"]["min_score"] == 70
+    assert profile["selection"]["max_rsi_for_new_position"] == 65
+    assert profile["selection"]["reject_overheated_rsi"] is True
+    assert profile["volume_filter"]["enabled"] is True
+    assert profile["volume_filter"]["min_volume_ratio"] == 2.0
+    assert profile["market_filter"]["risk_off_buy_policy"] == "relaxed"
+    assert profile["market_filter"]["risk_off_max_buy_orders"] == 2
+    assert profile["market_filter"]["risk_off_min_score"] == 75
+    assert profile["broker"]["provider"] == "paper"
+    assert profile["broker"]["live_trading_enabled"] is False
+
+
+def test_rookie_dealer_02_v2_dot_2_alias_loads() -> None:
+    profile = load_profile("rookie_dealer_02_v2.2")
+
+    assert profile["profile_id"] == "rookie_dealer_02_v2_2"
+    assert profile["market_filter"]["risk_off_buy_policy"] == "relaxed"
+    assert profile["market_filter"]["risk_off_max_buy_orders"] == 2
+
+
 def test_rookie_dealer_02_v3_profile_uses_score_and_volume_filters() -> None:
     profile = load_profile("rookie_dealer_02_v3")
 
