@@ -1025,12 +1025,22 @@ def _portfolio_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> d
             "total_commission": 0.0,
             "estimated_tax_total": 0.0,
             "net_total_assets": None,
+            "cash": None,
+            "positions_value": None,
+            "open_positions_count": 0,
+            "closed_trades_count": 0,
+            "realized_profit": 0.0,
+            "unrealized_profit": 0.0,
+            "reconciliation_difference": None,
+            "reconciliation_ok": False,
         }
 
     latest = rows[-1]
     max_drawdown = min((float(row.get("max_drawdown") or 0) for row in rows), default=0.0)
     latest_assets = float(latest.get("total_assets") or initial_capital)
     cumulative_profit = latest_assets - initial_capital
+    cash = float(latest.get("cash") or 0.0)
+    positions_value = float(latest.get("positions_value") or 0.0)
     gross_cumulative_profit = latest.get("gross_cumulative_profit")
     total_commission = float(latest.get("total_commission") or 0.0)
     if gross_cumulative_profit is not None:
@@ -1042,9 +1052,15 @@ def _portfolio_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> d
         estimated_tax_total = float(latest.get("estimated_tax_total") or 0.0)
         net_cumulative_profit = latest.get("net_cumulative_profit")
         net_total_assets = latest.get("net_total_assets")
+    realized_profit = float(net_cumulative_profit or 0.0)
+    unrealized_profit = round(cumulative_profit - realized_profit, 2)
+    reconciled_assets = round(initial_capital + realized_profit + unrealized_profit, 2)
+    reconciliation_difference = round(reconciled_assets - latest_assets, 2)
     return {
         "initial_capital": initial_capital,
         "latest_total_assets": latest_assets,
+        "cash": cash,
+        "positions_value": positions_value,
         "cumulative_profit": round(cumulative_profit, 2),
         "cumulative_profit_rate": round(cumulative_profit / initial_capital, 4),
         "max_drawdown": max_drawdown,
@@ -1054,6 +1070,13 @@ def _portfolio_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> d
         "total_commission": total_commission,
         "estimated_tax_total": estimated_tax_total,
         "net_total_assets": net_total_assets,
+        "open_positions_count": latest.get("open_positions_count") or 0,
+        "closed_trades_count": latest.get("closed_trades_count") or 0,
+        "realized_profit": round(realized_profit, 2),
+        "unrealized_profit": unrealized_profit,
+        "reconciled_assets": reconciled_assets,
+        "reconciliation_difference": reconciliation_difference,
+        "reconciliation_ok": abs(reconciliation_difference) < 0.01,
     }
 
 

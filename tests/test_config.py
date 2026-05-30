@@ -32,3 +32,17 @@ def test_rookie_dealer_02_profile_uses_intraday_stop() -> None:
     assert profile["profile_id"] == "rookie_dealer_02"
     assert profile["profile_name"] == "新人ディーラー2号"
     assert profile["execution"]["stop_loss_execution"] == "intraday_stop"
+
+
+def test_rookie_dealer_03_profile_uses_fast_take_profit() -> None:
+    profile = load_profile("rookie_dealer_03")
+
+    assert profile["profile_id"] == "rookie_dealer_03"
+    assert profile["profile_name"] == "新人ディーラー3号"
+    assert profile["execution"]["stop_loss_execution"] == "intraday_stop"
+    assert profile["trading"]["take_profit_rate"] == 0.03
+    assert profile["risk"]["take_profit_pct"] == 0.03
+    assert profile["trading"]["max_holding_days"] == 3
+    assert profile["risk"]["max_holding_business_days"] == 3
+    assert profile["broker"]["provider"] == "paper"
+    assert profile["broker"]["live_trading_enabled"] is False

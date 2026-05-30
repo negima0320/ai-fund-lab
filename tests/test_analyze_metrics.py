@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from db import _trade_analysis
+from db import _portfolio_analysis, _trade_analysis
 
 
 def test_trade_analysis_includes_extended_metrics(config_copy: dict) -> None:
@@ -72,3 +72,31 @@ def test_trade_analysis_includes_extended_metrics(config_copy: dict) -> None:
         {"exit_reason": "利確", "count": 1, "average_profit_rate": 0.1},
         {"exit_reason": "損切り", "count": 1, "average_profit_rate": -0.04},
     ]
+
+
+def test_portfolio_analysis_reconciles_realized_and_unrealized_profit(config_copy: dict) -> None:
+    rows = [
+        {
+            "date": "2026-03-05",
+            "cash": 500000,
+            "positions_value": 533337,
+            "total_assets": 1033337,
+            "max_drawdown": 0,
+            "gross_cumulative_profit": -3976,
+            "net_cumulative_profit": -3976,
+            "total_commission": 0,
+            "estimated_tax_total": 0,
+            "open_positions_count": 3,
+            "closed_trades_count": 8,
+        }
+    ]
+
+    analysis = _portfolio_analysis(config_copy, rows)
+
+    assert analysis["initial_capital"] == 1000000
+    assert analysis["latest_total_assets"] == 1033337
+    assert analysis["realized_profit"] == -3976
+    assert analysis["unrealized_profit"] == 37313
+    assert analysis["reconciled_assets"] == 1033337
+    assert analysis["reconciliation_difference"] == 0
+    assert analysis["reconciliation_ok"] is True

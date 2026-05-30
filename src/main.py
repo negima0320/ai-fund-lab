@@ -541,6 +541,12 @@ def run_analyze(config: dict[str, Any]) -> None:
     print(f"cumulative_profit: {_format_optional_number(portfolio['cumulative_profit'])}")
     print(f"gross_cumulative_profit: {_format_optional_number(portfolio.get('gross_cumulative_profit'))}")
     print(f"net_cumulative_profit: {_format_optional_number(portfolio.get('net_cumulative_profit'))}")
+    print(f"realized_profit: {_format_optional_number(portfolio.get('realized_profit'))}")
+    print(f"unrealized_profit: {_format_optional_number(portfolio.get('unrealized_profit'))}")
+    print(f"cash: {_format_optional_number(portfolio.get('cash'))}")
+    print(f"positions_value: {_format_optional_number(portfolio.get('positions_value'))}")
+    print(f"reconciliation_difference: {_format_optional_number(portfolio.get('reconciliation_difference'))}")
+    print(f"reconciliation_ok: {portfolio.get('reconciliation_ok')}")
     print(f"estimated_tax_total: {_format_optional_number(portfolio.get('estimated_tax_total'))}")
     print(f"total_commission: {_format_optional_number(portfolio.get('total_commission'))}")
     print(f"win_rate: {_format_optional_percent(trades['win_rate'])}")
@@ -3952,6 +3958,22 @@ def render_analysis_markdown(analysis: dict[str, Any]) -> str:
         f"- 手数料合計: {_format_optional_yen(portfolio.get('total_commission'))}",
         f"- 最大ドローダウン: {_format_optional_percent(portfolio['max_drawdown'])}",
         f"- 運用日数: {portfolio['operation_days']}",
+        "",
+        "## Reconciliation Report",
+        "",
+        f"- initial_capital: {_format_optional_yen(portfolio.get('initial_capital'))}",
+        f"- realized_profit: {_format_optional_yen(portfolio.get('realized_profit'))}",
+        f"- unrealized_profit: {_format_optional_yen(portfolio.get('unrealized_profit'))}",
+        f"- gross_profit_total: {_format_optional_yen(trades.get('gross_profit_total'))}",
+        f"- gross_loss_total: {_format_optional_yen(trades.get('gross_loss_total'))}",
+        f"- cash: {_format_optional_yen(portfolio.get('cash'))}",
+        f"- positions_value: {_format_optional_yen(portfolio.get('positions_value'))}",
+        f"- final_assets: {_format_optional_yen(portfolio.get('latest_total_assets'))}",
+        f"- formula: initial_capital + realized_profit + unrealized_profit = {_format_optional_yen(portfolio.get('reconciled_assets'))}",
+        f"- reconciliation_difference: {_format_optional_yen(portfolio.get('reconciliation_difference'))}",
+        f"- reconciliation_ok: {portfolio.get('reconciliation_ok')}",
+        f"- open_positions_count: {portfolio.get('open_positions_count')}",
+        f"- closed_trades_count: {portfolio.get('closed_trades_count')}",
         "",
         "## Profile別集計",
         "",
