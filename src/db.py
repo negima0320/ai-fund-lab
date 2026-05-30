@@ -1092,6 +1092,8 @@ def _trade_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> dict[
     profit_ratio = None
     if average_win_profit_rate is not None and average_loss_profit_rate not in (None, 0):
         profit_ratio = round(average_win_profit_rate / abs(average_loss_profit_rate), 4)
+    largest_win = max((value for value in gross_profits if value > 0), default=None)
+    largest_loss = min((value for value in gross_profits if value < 0), default=None)
     best_trade = max(closed, key=lambda row: float(row.get("gross_profit") or row.get("profit") or 0), default=None)
     worst_trade = min(closed, key=lambda row: float(row.get("gross_profit") or row.get("profit") or 0), default=None)
     return {
@@ -1127,7 +1129,9 @@ def _trade_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> dict[
         "gross_profit_total": gross_profit_total,
         "gross_win_total": gross_win_total,
         "gross_loss_total": gross_loss_total,
-        "profit_factor": round(gross_win_total / abs(gross_loss_total), 4) if gross_loss_total < 0 else None,
+        "profit_factor": round(gross_profit_total / abs(gross_loss_total), 4) if gross_loss_total < 0 else None,
+        "largest_win": round(largest_win, 2) if largest_win is not None else None,
+        "largest_loss": round(largest_loss, 2) if largest_loss is not None else None,
         "net_profit_total": net_profit_total,
         "average_slippage": _average(slippages),
         "max_slippage": max(slippages, key=abs) if slippages else None,

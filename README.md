@@ -926,7 +926,7 @@ python src/main.py --mode analyze
 - `reports/backtests/analysis_latest.md`
 - `reports/backtests/analysis_latest.json`
 
-分析レポートには、最新総資産、累計損益、最大ドローダウン、勝率、勝ち取引数、負け取引数、平均勝ち利益率、平均負け損失率、最大負け損失率、`profit_ratio`、`profit_factor`、期待値、best/worst trade、exit_reason別集計、損切り乖離平均、損切り乖離最大、設定損切り超過件数、設定損切り超過率、業種別勝率、スコア帯別件数、AI振り返りの頻出項目などを含みます。`profit_ratio` は `average_win_profit_rate / abs(average_loss_profit_rate)` で、1回の勝ちの大きさが1回の負けに対してどの程度あるかを見る簡易指標です。exit_reason別集計では、損切り、利確、最大保有期間到達などの件数と平均損益率を確認できます。`trades` テーブルは約定済みの `FILLED` 売買だけを保存し、`PENDING`、`REJECTED`、`CANCELLED`、`PREVIEW` は分析対象から除外します。そのため `total_trades`、`win_rate`、`profit_factor`、`expectancy` は約定済み取引のみで集計します。`reports/backtests/` はGit管理対象です。
+分析レポートには、最新総資産、累計損益、最大ドローダウン、勝率、勝ち取引数、負け取引数、`gross_profit_total`、`gross_loss_total`、平均勝ち利益率、平均負け損失率、平均保有日数、`largest_win`、`largest_loss`、最大負け損失率、`profit_ratio`、`profit_factor`、期待値、best/worst trade、exit_reason別集計、損切り乖離平均、損切り乖離最大、設定損切り超過件数、設定損切り超過率、業種別勝率、スコア帯別件数、AI振り返りの頻出項目などを含みます。`profit_factor` は `gross_profit_total / abs(gross_loss_total)`、`profit_ratio` は `average_win_profit_rate / abs(average_loss_profit_rate)` で計算します。exit_reason別集計では、損切り、利確、最大保有期間到達などの件数と平均損益率を確認できます。`trades` テーブルは約定済みの `FILLED` 売買だけを保存し、`PENDING`、`REJECTED`、`CANCELLED`、`PREVIEW` は分析対象から除外します。そのため `total_trades`、`win_rate`、`profit_factor`、`expectancy` は約定済み取引のみで集計します。`reports/backtests/` はGit管理対象です。
 
 Gitのコミット履歴から、週次・期間単位の開発ノートを生成できます。
 

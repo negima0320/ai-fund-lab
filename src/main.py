@@ -544,6 +544,8 @@ def run_analyze(config: dict[str, Any]) -> None:
     print(f"estimated_tax_total: {_format_optional_number(portfolio.get('estimated_tax_total'))}")
     print(f"total_commission: {_format_optional_number(portfolio.get('total_commission'))}")
     print(f"win_rate: {_format_optional_percent(trades['win_rate'])}")
+    print(f"gross_profit_total: {_format_optional_number(trades.get('gross_profit_total'))}")
+    print(f"gross_loss_total: {_format_optional_number(trades.get('gross_loss_total'))}")
     print(f"profit_factor: {_format_optional_number(trades.get('profit_factor'))}")
     print(f"profit_ratio: {_format_optional_number(trades.get('profit_ratio'))}")
     print(f"expectancy: {_format_optional_percent(trades.get('expectancy'))}")
@@ -3961,15 +3963,19 @@ def render_analysis_markdown(analysis: dict[str, Any]) -> str:
         f"- 勝ち取引数: {trades.get('win_count', trades['winning_trades'])}",
         f"- 負け取引数: {trades.get('loss_count', trades['losing_trades'])}",
         f"- 勝率: {_format_optional_percent(trades['win_rate'])}",
+        f"- gross_profit_total: {_format_optional_yen(trades.get('gross_profit_total'))}",
+        f"- gross_loss_total: {_format_optional_yen(trades.get('gross_loss_total'))}",
         f"- profit factor: {_format_optional_number(trades.get('profit_factor'))}",
         f"- profit ratio: {_format_optional_number(trades.get('profit_ratio'))}",
         f"- 期待値: {_format_optional_percent(trades.get('expectancy'))}",
         f"- 平均勝ち利益率: {_format_optional_percent(trades.get('average_win_profit_rate', trades['average_profit_rate']))}",
         f"- 平均負け損失率: {_format_optional_percent(trades.get('average_loss_profit_rate', trades['average_loss_rate']))}",
+        f"- 平均保有日数: {_format_optional_number(trades['average_holding_days'])}",
+        f"- largest_win: {_format_optional_yen(trades.get('largest_win'))}",
+        f"- largest_loss: {_format_optional_yen(trades.get('largest_loss'))}",
         f"- 最大負け損失率: {_format_optional_percent(trades.get('worst_loss_profit_rate'))}",
         f"- best_trade: {_format_trade_summary_inline(trades.get('best_trade'))}",
         f"- worst_trade: {_format_trade_summary_inline(trades.get('worst_trade'))}",
-        f"- 平均保有日数: {_format_optional_number(trades['average_holding_days'])}",
         f"- 利確回数: {trades['take_profit_count']}",
         f"- 損切り回数: {trades['stop_loss_count']}",
         f"- 損切り乖離平均: {_format_optional_percent(trades.get('stop_loss_slippage_average'))}",
