@@ -928,7 +928,9 @@ python src/main.py --mode analyze
 - `reports/backtests/analysis_latest.md`
 - `reports/backtests/analysis_latest.json`
 
-分析レポートには、最新総資産、累計損益、最大ドローダウン、勝率、勝ち取引数、負け取引数、`gross_profit_total`、`gross_loss_total`、平均勝ち利益率、平均負け損失率、平均保有日数、`largest_win`、`largest_loss`、最大負け損失率、`profit_ratio`、`profit_factor`、期待値、best/worst trade、exit_reason別集計、損切り乖離平均、損切り乖離最大、設定損切り超過件数、設定損切り超過率、業種別勝率、スコア帯別件数、AI振り返りの頻出項目などを含みます。`profit_factor` は `gross_profit_total / abs(gross_loss_total)`、`profit_ratio` は `average_win_profit_rate / abs(average_loss_profit_rate)` で計算します。exit_reason別集計では、損切り、利確、最大保有期間到達などの件数と平均損益率を確認できます。`trades` テーブルは約定済みの `FILLED` 売買だけを保存し、`PENDING`、`REJECTED`、`CANCELLED`、`PREVIEW` は分析対象から除外します。そのため `total_trades`、`win_rate`、`profit_factor`、`expectancy` は約定済み取引のみで集計します。`reports/backtests/` はGit管理対象です。
+分析レポートには、最新総資産、累計損益、最大ドローダウン、勝率、勝ち取引数、負け取引数、`closed_trade_count`、`excluded_order_event_count`、`gross_profit_total`、`gross_loss_total`、平均勝ち利益率、平均負け損失率、平均保有日数、`largest_win`、`largest_loss`、最大負け損失率、`profit_ratio`、`profit_factor`、期待値、best/worst trade、exit_reason別集計、損切り乖離平均、損切り乖離最大、設定損切り超過件数、設定損切り超過率、業種別勝率、スコア帯別件数、AI振り返りの頻出項目などを含みます。`profit_factor` は共通関数で `CLOSED trades only / action=SELL / result in WIN,LOSS / order_status=FILLED` に絞り、`gross_profit_total / abs(gross_loss_total)` で計算します。`profit_ratio` は `average_win_profit_rate / abs(average_loss_profit_rate)` で計算します。exit_reason別集計では、損切り、利確、最大保有期間到達などの件数と平均損益率を確認できます。`trades` テーブルは約定済みの `FILLED` 売買だけを保存し、`PENDING`、`REJECTED`、`CANCELLED`、`PREVIEW` は分析対象から除外します。そのため `total_trades`、`win_rate`、`profit_factor`、`expectancy` は約定済み取引のみで集計します。`reports/backtests/` はGit管理対象です。
+
+`analyze` では特徴量分析も出力します。`reports/<profile_id>/backtests/feature_analysis.md` と `feature_analysis.json` に、closed tradeのentry時点の特徴量と損益結果を紐づけて、RSI別勝率・平均利益、volume_ratio別勝率、market_regime別勝率、sector別勝率、candlestick_signal別勝率、score帯別勝率を保存します。これは「どの指標が利益に貢献しているか」を見るための分析で、投資助言ではなく実験用の検証材料です。
 
 Gitのコミット履歴から、週次・期間単位の開発ノートを生成できます。
 
@@ -1221,7 +1223,7 @@ profile間の比較は以下で実行できます。
 python src/main.py --mode compare-profiles --profiles rookie_dealer_01 rookie_dealer_02 --start-date YYYY-MM-DD --end-date YYYY-MM-DD
 ```
 
-`compare-profiles` は `final_assets`、`net_cumulative_profit`、`win_rate`、`profit_factor`、`average_win_profit_rate`、`average_loss_profit_rate`、`max_drawdown`、`total_trades`、`loss_over_stop_count` を横並びで出力します。
+`compare-profiles` は `final_assets`、`net_cumulative_profit`、`win_rate`、`profit_factor`、`average_win_profit_rate`、`average_loss_profit_rate`、`expectancy`、`max_drawdown`、`average_holding_days`、`closed_trade_count`、`win_count`、`loss_count`、`excluded_order_event_count`、`total_trades`、`loss_over_stop_count` を横並びで出力します。あわせて `net_cumulative_profit`、`profit_factor`、`max_drawdown`、`expectancy` を正規化して総合評価し、Profile Ranking を出力します。
 
 `analyze` には reconciliation report も含めます。これは `initial_capital + realized_profit + unrealized_profit = final_assets` になるかを確認する監査用の集計です。`realized_profit` は売却済み取引の期間損益通算後の税引後損益、`unrealized_profit` は現在保有中ポジションの含み損益として扱います。`gross_profit_total` と `gross_loss_total` は売却済み取引だけの実現損益なので、open positions の評価損益が大きい場合は `final_assets` と見た目が一致しないことがあります。
 

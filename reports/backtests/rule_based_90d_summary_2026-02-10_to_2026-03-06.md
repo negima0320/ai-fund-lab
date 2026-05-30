@@ -3,26 +3,26 @@
 ## 実行条件
 
 - 期間: 2026-02-10 〜 2026-03-06
-- profile: rookie_dealer_02 新人ディーラー2号
+- profile: rookie_dealer_03 新人ディーラー3号
 - provider: jquants
 - ChatGPT/OpenAI: disabled
 - broker: paper
-- config_version: cfg_c2f0c8d
+- config_version: cfg_0fdca20
 
 ## 結果サマリ
 
 - 初期資金: 1,000,000円
-- 最終資産: 1,005,089円
-- 税引前損益: 5,089円
-- 税引後損益: 4,055円
-- 税引後損益率: 0.41%
+- 最終資産: 1,007,389円
+- 税引前損益: 7,389円
+- 税引後損益: 5,888円
+- 税引後損益率: 0.59%
 - 勝率: 60.00%
-- profit factor: 1.57
-- 最大ドローダウン: -0.94%
+- profit factor: 1.82
+- 最大ドローダウン: -0.93%
 - 総取引数: 11
-- 利確回数: 1
+- 利確回数: 2
 - 損切り回数: 2
-- 最大保有期間売却回数: 2
+- 最大保有期間売却回数: 1
 - no trade日数: 5
 - selected_count合計: 24
 

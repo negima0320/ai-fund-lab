@@ -50,10 +50,13 @@ def test_trade_analysis_includes_extended_metrics(config_copy: dict) -> None:
 
     assert analysis["win_count"] == 1
     assert analysis["loss_count"] == 1
+    assert analysis["closed_trade_count"] == 2
+    assert analysis["excluded_order_event_count"] == 1
     assert analysis["total_trades"] == 2
-    assert analysis["gross_profit_total"] == 6000
+    assert analysis["gross_profit_total"] == 10000
+    assert analysis["realized_profit_total"] == 6000
     assert analysis["gross_loss_total"] == -4000
-    assert analysis["profit_factor"] == 1.5
+    assert analysis["profit_factor"] == 2.5
     assert analysis["average_win_profit_rate"] == 0.1
     assert analysis["average_loss_profit_rate"] == -0.04
     assert analysis["average_holding_days"] is None

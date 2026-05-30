@@ -47,6 +47,7 @@ from db import (
     save_screening_results,
     save_trades,
 )
+from feature_analysis import build_feature_analysis, render_feature_analysis_markdown
 from indicators import calculate_indicators
 from market_context import build_market_context, neutral_market_context
 from news_provider import build_news_provider
@@ -63,6 +64,7 @@ from screening import generate_screening_log
 from tachibana_auth import load_private_key, load_tachibana_auth_config
 from technical_indicators import TechnicalIndicatorDependencyError
 from tax import calculate_period_profit_summary
+from trade_metrics import profit_factor_metrics
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -530,8 +532,13 @@ def run_analyze(config: dict[str, Any]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path = output_dir / "analysis_latest.json"
     markdown_path = output_dir / "analysis_latest.md"
+    feature_json_path = output_dir / "feature_analysis.json"
+    feature_markdown_path = output_dir / "feature_analysis.md"
+    feature_analysis = build_feature_analysis(config, ROOT)
     write_json(json_path, analysis)
     write_text(markdown_path, render_analysis_markdown(analysis))
+    write_json(feature_json_path, feature_analysis)
+    write_text(feature_markdown_path, render_feature_analysis_markdown(feature_analysis))
 
     portfolio = analysis["portfolio_analysis"]
     trades = analysis["trade_analysis"]
@@ -553,6 +560,10 @@ def run_analyze(config: dict[str, Any]) -> None:
     print(f"gross_profit_total: {_format_optional_number(trades.get('gross_profit_total'))}")
     print(f"gross_loss_total: {_format_optional_number(trades.get('gross_loss_total'))}")
     print(f"profit_factor: {_format_optional_number(trades.get('profit_factor'))}")
+    print(f"closed_trade_count: {trades.get('closed_trade_count')}")
+    print(f"win_count: {trades.get('win_count')}")
+    print(f"loss_count: {trades.get('loss_count')}")
+    print(f"excluded_order_event_count: {trades.get('excluded_order_event_count')}")
     print(f"profit_ratio: {_format_optional_number(trades.get('profit_ratio'))}")
     print(f"expectancy: {_format_optional_percent(trades.get('expectancy'))}")
     print(f"worst_loss_profit_rate: {_format_optional_percent(trades.get('worst_loss_profit_rate'))}")
@@ -562,6 +573,8 @@ def run_analyze(config: dict[str, Any]) -> None:
     print(f"trades_csv: {trades_csv.relative_to(ROOT)} ({csv_trade_count}/{db_trade_count} rows)")
     print(f"markdown: {markdown_path.relative_to(ROOT)}")
     print(f"json: {json_path.relative_to(ROOT)}")
+    print(f"feature_analysis_markdown: {feature_markdown_path.relative_to(ROOT)}")
+    print(f"feature_analysis_json: {feature_json_path.relative_to(ROOT)}")
 
 
 def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_text: str) -> None:
@@ -571,10 +584,12 @@ def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_
         raise SystemExit(f"SQLite DB not found: {db_path}")
 
     rows = [_profile_compare_row(config, db_path, start_date_text, end_date_text) for config in profiles]
+    ranking = build_profile_ranking(rows)
     payload = {
         "start_date": start_date_text,
         "end_date": end_date_text,
         "profiles": rows,
+        "ranking": ranking,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
     output_dir = ROOT / "reports" / "profile_comparisons"
@@ -592,8 +607,13 @@ def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_
             f"net_cumulative_profit={_format_optional_number(row.get('net_cumulative_profit'))}, "
             f"win_rate={_format_optional_percent(row.get('win_rate'))}, "
             f"profit_factor={_format_optional_number(row.get('profit_factor'))}, "
+            f"expectancy={_format_optional_percent(row.get('expectancy'))}, "
             f"total_trades={row.get('total_trades')}"
         )
+    if ranking:
+        print("Profile Ranking")
+        for item in ranking:
+            print(f"{item['rank']}位 {item['profile_id']} score={_format_optional_number(item['score'])}")
     print(f"markdown: {markdown_path.relative_to(ROOT)}")
     print(f"json: {json_path.relative_to(ROOT)}")
 
@@ -631,14 +651,21 @@ def _profile_compare_row(config: dict[str, Any], db_path: Path, start_date_text:
         ]
 
     latest = portfolio_rows[-1] if portfolio_rows else {}
-    closed = [row for row in trade_rows if row.get("action") == "SELL" or row.get("exit_date")]
-    wins = [row for row in closed if row.get("result") == "WIN"]
-    gross_profits = [float(row.get("gross_profit") or row.get("profit") or 0) for row in closed]
-    gross_win_total = sum(value for value in gross_profits if value > 0)
-    gross_loss_total = sum(value for value in gross_profits if value < 0)
+    pf_metrics = profit_factor_metrics(trade_rows)
+    closed = pf_metrics["closed_trades"]
+    wins = pf_metrics["wins"]
     win_rates = [float(row["profit_rate"]) for row in wins if row.get("profit_rate") is not None]
-    loss_rows = [row for row in closed if row.get("result") == "LOSS"]
+    loss_rows = pf_metrics["losses"]
     loss_rates = [float(row["profit_rate"]) for row in loss_rows if row.get("profit_rate") is not None]
+    holding_days = [float(row["holding_days"]) for row in closed if row.get("holding_days") is not None]
+    average_win_profit_rate = _average_number(win_rates)
+    average_loss_profit_rate = _average_number(loss_rates)
+    win_rate = round(len(wins) / len(closed), 4) if closed else None
+    expectancy = (
+        round((win_rate * (average_win_profit_rate or 0.0)) + ((1 - win_rate) * (average_loss_profit_rate or 0.0)), 4)
+        if win_rate is not None
+        else None
+    )
     max_drawdown = min((float(row.get("max_drawdown") or 0) for row in portfolio_rows), default=None) if portfolio_rows else None
     return {
         "profile_id": profile_id,
@@ -646,12 +673,18 @@ def _profile_compare_row(config: dict[str, Any], db_path: Path, start_date_text:
         "stop_loss_execution": config.get("execution", {}).get("stop_loss_execution", "next_day_open"),
         "final_assets": latest.get("total_assets"),
         "net_cumulative_profit": latest.get("net_cumulative_profit"),
-        "win_rate": round(len(wins) / len(closed), 4) if closed else None,
-        "profit_factor": round(gross_win_total / abs(gross_loss_total), 4) if gross_loss_total < 0 else None,
-        "average_win_profit_rate": _average_number(win_rates),
-        "average_loss_profit_rate": _average_number(loss_rates),
+        "win_rate": win_rate,
+        "profit_factor": pf_metrics["profit_factor"],
+        "average_win_profit_rate": average_win_profit_rate,
+        "average_loss_profit_rate": average_loss_profit_rate,
+        "expectancy": expectancy,
         "max_drawdown": max_drawdown,
+        "average_holding_days": _average_number(holding_days),
         "total_trades": len(trade_rows),
+        "closed_trade_count": pf_metrics["closed_trade_count"],
+        "win_count": pf_metrics["win_count"],
+        "loss_count": pf_metrics["loss_count"],
+        "excluded_order_event_count": pf_metrics["excluded_order_event_count"],
         "loss_over_stop_count": len(
             [
                 row
@@ -662,12 +695,65 @@ def _profile_compare_row(config: dict[str, Any], db_path: Path, start_date_text:
     }
 
 
+def build_profile_ranking(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    weights = {
+        "net_cumulative_profit": 0.35,
+        "profit_factor": 0.30,
+        "max_drawdown": 0.20,
+        "expectancy": 0.15,
+    }
+    scored = []
+    for row in rows:
+        components = {
+            "net_cumulative_profit": _normalized_score(row.get("net_cumulative_profit"), rows, "net_cumulative_profit"),
+            "profit_factor": _normalized_score(row.get("profit_factor"), rows, "profit_factor"),
+            "max_drawdown": _normalized_score(row.get("max_drawdown"), rows, "max_drawdown"),
+            "expectancy": _normalized_score(row.get("expectancy"), rows, "expectancy"),
+        }
+        score = round(sum(components[key] * weight for key, weight in weights.items()), 4)
+        scored.append(
+            {
+                "profile_id": row["profile_id"],
+                "profile_name": row.get("profile_name"),
+                "score": score,
+                "components": components,
+                "weights": weights,
+            }
+        )
+    scored.sort(key=lambda item: (-item["score"], item["profile_id"]))
+    for index, item in enumerate(scored, start=1):
+        item["rank"] = index
+    return scored
+
+
+def _normalized_score(value: Any, rows: list[dict[str, Any]], key: str) -> float:
+    numeric_values = [_to_float(row.get(key)) for row in rows]
+    numeric_values = [item for item in numeric_values if item is not None]
+    numeric_value = _to_float(value)
+    if numeric_value is None or not numeric_values:
+        return 0.0
+    minimum = min(numeric_values)
+    maximum = max(numeric_values)
+    if maximum == minimum:
+        return 1.0
+    return round((numeric_value - minimum) / (maximum - minimum), 4)
+
+
+def _to_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def render_compare_profiles_markdown(payload: dict[str, Any]) -> str:
     lines = [
         f"# Profile比較 {payload['start_date']} to {payload['end_date']}",
         "",
-        "| profile | stop_loss_execution | final_assets | net_cumulative_profit | win_rate | profit_factor | avg_win | avg_loss | max_drawdown | total_trades | loss_over_stop_count |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| profile | stop_loss_execution | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | avg_holding_days | closed | wins | losses | excluded | avg_win | avg_loss | total_trades | loss_over_stop_count |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in payload["profiles"]:
         lines.append(
@@ -678,11 +764,33 @@ def render_compare_profiles_markdown(payload: dict[str, Any]) -> str:
             f"{_format_optional_yen(row.get('net_cumulative_profit'))} | "
             f"{_format_optional_percent(row.get('win_rate'))} | "
             f"{_format_optional_number(row.get('profit_factor'))} | "
+            f"{_format_optional_percent(row.get('expectancy'))} | "
+            f"{_format_optional_percent(row.get('max_drawdown'))} | "
+            f"{_format_optional_number(row.get('average_holding_days'))} | "
+            f"{row.get('closed_trade_count')} | "
+            f"{row.get('win_count')} | "
+            f"{row.get('loss_count')} | "
+            f"{row.get('excluded_order_event_count')} | "
             f"{_format_optional_percent(row.get('average_win_profit_rate'))} | "
             f"{_format_optional_percent(row.get('average_loss_profit_rate'))} | "
-            f"{_format_optional_percent(row.get('max_drawdown'))} | "
             f"{row.get('total_trades')} | "
             f"{row.get('loss_over_stop_count')} |"
+        )
+    if payload.get("ranking"):
+        lines.extend(["", "## Profile Ranking", ""])
+        for item in payload["ranking"]:
+            lines.extend(
+                [
+                    f"{item['rank']}位 {item['profile_id']} {item.get('profile_name') or ''}".strip(),
+                    f"score: {_format_optional_number(item.get('score'))}",
+                    "",
+                ]
+            )
+        lines.extend(
+            [
+                "ranking score = net_cumulative_profit 35% + profit_factor 30% + max_drawdown 20% + expectancy 15%",
+                "",
+            ]
         )
     lines.append("")
     return "\n".join(lines)
@@ -3727,13 +3835,13 @@ def write_backtest_summary(
         if trade.get("action") in {"BUY", "SELL"} and str(trade.get("order_status") or trade.get("status") or "").upper() == "FILLED"
     ]
     period_profit = calculate_period_profit_summary(closed_trades, config)
-    gross_profits = [float(trade.get("gross_profit", trade.get("profit", 0)) or 0) for trade in closed_trades]
-    gross_profit_total = period_profit["gross_cumulative_profit"]
-    gross_win_total = round(sum(value for value in gross_profits if value > 0), 2)
-    gross_loss_total = round(sum(value for value in gross_profits if value < 0), 2)
+    pf_metrics = profit_factor_metrics(all_trades)
+    gross_profit_total = pf_metrics["gross_profit_total"]
+    gross_win_total = pf_metrics["gross_win_total"]
+    gross_loss_total = pf_metrics["gross_loss_total"]
     net_cumulative_profit = period_profit["net_cumulative_profit"]
-    wins = sum(1 for trade in closed_trades if trade.get("result") == "WIN")
-    win_rate = round(wins / len(closed_trades), 4) if closed_trades else None
+    wins = pf_metrics["win_count"]
+    win_rate = round(wins / pf_metrics["closed_trade_count"], 4) if pf_metrics["closed_trade_count"] else None
     take_profit_count = sum(1 for trade in closed_trades if trade.get("exit_reason") == "利確")
     stop_loss_count = sum(1 for trade in closed_trades if trade.get("exit_reason") == "損切り")
     max_holding_exit_count = sum(1 for trade in closed_trades if trade.get("exit_reason") == "最大保有期間到達")
@@ -3771,16 +3879,20 @@ def write_backtest_summary(
         "final_assets": round(final_assets, 2),
         "cumulative_profit": round(final_assets - initial_capital, 2),
         "cumulative_profit_rate": round((final_assets - initial_capital) / initial_capital, 4),
-        "gross_cumulative_profit": gross_profit_total,
+        "gross_cumulative_profit": period_profit["gross_cumulative_profit"],
         "net_cumulative_profit": net_cumulative_profit,
         "net_cumulative_profit_rate": net_cumulative_profit_rate,
         "total_commission": period_profit["total_commission"],
         "estimated_tax_total": period_profit["estimated_tax_total"],
-        "profit_factor": round(gross_win_total / abs(gross_loss_total), 4) if gross_loss_total < 0 else None,
+        "profit_factor": pf_metrics["profit_factor"],
         "gross_profit_total": gross_profit_total,
         "gross_win_total": gross_win_total,
         "gross_loss_total": gross_loss_total,
         "win_rate": win_rate,
+        "closed_trade_count": pf_metrics["closed_trade_count"],
+        "win_count": pf_metrics["win_count"],
+        "loss_count": pf_metrics["loss_count"],
+        "excluded_order_event_count": pf_metrics["excluded_order_event_count"],
         "total_trades": len(executed_trade_actions),
         "closed_trades_count": len(closed_trades),
         "take_profit_count": take_profit_count,
@@ -3849,6 +3961,10 @@ def render_backtest_summary_markdown(summary: dict[str, Any], config: dict[str, 
         f"- 税引後損益率: {_format_optional_percent(summary.get('net_cumulative_profit_rate'))}",
         f"- 勝率: {_format_optional_rate(summary['win_rate'])}",
         f"- profit factor: {_format_optional_number(summary.get('profit_factor'))}",
+        f"- closed_trade_count: {summary.get('closed_trade_count')}",
+        f"- win_count: {summary.get('win_count')}",
+        f"- loss_count: {summary.get('loss_count')}",
+        f"- excluded_order_event_count: {summary.get('excluded_order_event_count')}",
         f"- 総取引数: {summary['total_trades']}",
         f"- 利確回数: {summary['take_profit_count']}",
         f"- 損切り回数: {summary['stop_loss_count']}",
@@ -3988,6 +4104,10 @@ def render_analysis_markdown(analysis: dict[str, Any]) -> str:
         f"- gross_profit_total: {_format_optional_yen(trades.get('gross_profit_total'))}",
         f"- gross_loss_total: {_format_optional_yen(trades.get('gross_loss_total'))}",
         f"- profit factor: {_format_optional_number(trades.get('profit_factor'))}",
+        f"- closed_trade_count: {trades.get('closed_trade_count')}",
+        f"- win_count: {trades.get('win_count')}",
+        f"- loss_count: {trades.get('loss_count')}",
+        f"- excluded_order_event_count: {trades.get('excluded_order_event_count')}",
         f"- profit ratio: {_format_optional_number(trades.get('profit_ratio'))}",
         f"- 期待値: {_format_optional_percent(trades.get('expectancy'))}",
         f"- 平均勝ち利益率: {_format_optional_percent(trades.get('average_win_profit_rate', trades['average_profit_rate']))}",

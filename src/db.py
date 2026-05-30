@@ -10,6 +10,7 @@ from typing import Any
 
 from config_version import config_version_from
 from tax import calculate_period_estimated_tax
+from trade_metrics import is_filled_trade, profit_factor_metrics
 
 
 def get_database_path(config: dict[str, Any], root: Path) -> Path:
@@ -612,7 +613,7 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
         connection.execute("DELETE FROM trades WHERE profile_id = ? AND (entry_date = ? OR exit_date = ?)", (profile_id, trade_date, trade_date))
         rows = []
         for trade in trades:
-            if not _is_filled_trade(trade):
+            if not is_filled_trade(trade):
                 continue
             rows.append(
                 (
@@ -1081,14 +1082,16 @@ def _portfolio_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> d
 
 
 def _trade_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
-    filled_rows = [row for row in rows if _is_filled_trade(row)]
-    closed = [row for row in filled_rows if row.get("action") == "SELL" or row.get("exit_date")]
-    wins = [row for row in closed if row.get("result") == "WIN"]
-    losses = [row for row in closed if row.get("result") == "LOSS"]
+    filled_rows = [row for row in rows if is_filled_trade(row)]
+    pf_metrics = profit_factor_metrics(rows)
+    closed = pf_metrics["closed_trades"]
+    wins = pf_metrics["wins"]
+    losses = pf_metrics["losses"]
     gross_profits = [float(row.get("gross_profit") or row.get("profit") or 0) for row in closed]
-    gross_profit_total = round(sum(gross_profits), 2)
-    gross_win_total = round(sum(value for value in gross_profits if value > 0), 2)
-    gross_loss_total = round(sum(value for value in gross_profits if value < 0), 2)
+    realized_profit_total = pf_metrics["realized_profit_total"]
+    gross_profit_total = pf_metrics["gross_profit_total"]
+    gross_win_total = pf_metrics["gross_win_total"]
+    gross_loss_total = pf_metrics["gross_loss_total"]
     profit_rates = [float(row["profit_rate"]) for row in closed if row.get("profit_rate") is not None]
     win_rates = [float(row["profit_rate"]) for row in wins if row.get("profit_rate") is not None]
     loss_rates = [float(row["profit_rate"]) for row in losses if row.get("profit_rate") is not None]
@@ -1102,12 +1105,12 @@ def _trade_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> dict[
     slippages = [float(row["slippage_rate"]) for row in filled_rows if row.get("slippage_rate") is not None]
     total_commission = round(sum(float(row.get("total_commission") or 0) for row in closed), 2)
     trade_estimated_tax_total = round(sum(float(row.get("estimated_tax") or 0) for row in closed), 2)
-    estimated_tax_total = calculate_period_estimated_tax(gross_profit_total, total_commission, config)
-    net_profit_total = round(gross_profit_total - estimated_tax_total - total_commission, 2)
+    estimated_tax_total = calculate_period_estimated_tax(realized_profit_total, total_commission, config)
+    net_profit_total = round(realized_profit_total - estimated_tax_total - total_commission, 2)
     average_win_profit_rate = _average(win_rates)
     average_loss_profit_rate = _average(loss_rates)
-    win_count = len(wins)
-    loss_count = len(losses)
+    win_count = pf_metrics["win_count"]
+    loss_count = pf_metrics["loss_count"]
     win_rate = round(win_count / len(closed), 4) if closed else None
     expectancy = None
     if win_rate is not None:
@@ -1121,11 +1124,13 @@ def _trade_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> dict[
     worst_trade = min(closed, key=lambda row: float(row.get("gross_profit") or row.get("profit") or 0), default=None)
     return {
         "total_trades": len([row for row in filled_rows if row.get("action") in {"BUY", "SELL"}]),
-        "closed_trades": len(closed),
+        "closed_trades": pf_metrics["closed_trade_count"],
+        "closed_trade_count": pf_metrics["closed_trade_count"],
         "winning_trades": win_count,
         "losing_trades": loss_count,
         "win_count": win_count,
         "loss_count": loss_count,
+        "excluded_order_event_count": pf_metrics["excluded_order_event_count"],
         "win_rate": win_rate,
         "average_profit_rate": average_win_profit_rate,
         "average_loss_rate": average_loss_profit_rate,
@@ -1152,7 +1157,8 @@ def _trade_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> dict[
         "gross_profit_total": gross_profit_total,
         "gross_win_total": gross_win_total,
         "gross_loss_total": gross_loss_total,
-        "profit_factor": round(gross_profit_total / abs(gross_loss_total), 4) if gross_loss_total < 0 else None,
+        "realized_profit_total": realized_profit_total,
+        "profit_factor": pf_metrics["profit_factor"],
         "largest_win": round(largest_win, 2) if largest_win is not None else None,
         "largest_loss": round(largest_loss, 2) if largest_loss is not None else None,
         "net_profit_total": net_profit_total,
@@ -1241,7 +1247,7 @@ def _reflection_analysis(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _config_version_analysis(trade_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
-    for row in [item for item in trade_rows if _is_filled_trade(item)]:
+    for row in [item for item in trade_rows if is_filled_trade(item)]:
         version = row.get("config_version") or "unknown"
         grouped.setdefault(version, []).append(row)
 
@@ -1264,7 +1270,7 @@ def _config_version_analysis(trade_rows: list[dict[str, Any]]) -> list[dict[str,
 
 def _sector_win_rate_analysis(trade_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
-    for row in [item for item in trade_rows if _is_filled_trade(item)]:
+    for row in [item for item in trade_rows if is_filled_trade(item)]:
         if not (row.get("action") == "SELL" or row.get("exit_date")):
             continue
         sector = row.get("sector_name") or "未分類"
@@ -1289,7 +1295,7 @@ def _sector_win_rate_analysis(trade_rows: list[dict[str, Any]]) -> list[dict[str
 
 
 def _profile_analysis(portfolio_rows: list[dict[str, Any]], trade_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    filled_trade_rows = [row for row in trade_rows if _is_filled_trade(row)]
+    filled_trade_rows = [row for row in trade_rows if is_filled_trade(row)]
     profile_ids = sorted(
         {
             row.get("profile_id") or "unknown"
@@ -1315,12 +1321,6 @@ def _profile_analysis(portfolio_rows: list[dict[str, Any]], trade_rows: list[dic
             }
         )
     return summaries
-
-
-def _is_filled_trade(row: dict[str, Any]) -> bool:
-    if row.get("action") not in {"BUY", "SELL"}:
-        return False
-    return str(row.get("order_status") or row.get("status") or "").upper() == "FILLED"
 
 
 def _delete_non_trade_order_rows(connection: sqlite3.Connection) -> None:
