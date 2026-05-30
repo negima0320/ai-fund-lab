@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from config_version import config_version_from
+from tax import calculate_period_estimated_tax
 
 
 def get_database_path(config: dict[str, Any], root: Path) -> Path:
@@ -87,6 +88,13 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
                 executed_price REAL,
                 slippage_amount REAL,
                 slippage_rate REAL,
+                stop_loss_rate REAL,
+                stop_loss_trigger_price REAL,
+                stop_loss_triggered_date TEXT,
+                intended_exit_price REAL,
+                actual_exit_price REAL,
+                gap_slippage_rate REAL,
+                stop_loss_slippage_rate REAL,
                 gross_profit REAL,
                 gross_profit_rate REAL,
                 buy_commission REAL,
@@ -345,6 +353,13 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
         _add_column_if_missing(connection, "trades", "executed_price", "REAL")
         _add_column_if_missing(connection, "trades", "slippage_amount", "REAL")
         _add_column_if_missing(connection, "trades", "slippage_rate", "REAL")
+        _add_column_if_missing(connection, "trades", "stop_loss_rate", "REAL")
+        _add_column_if_missing(connection, "trades", "stop_loss_trigger_price", "REAL")
+        _add_column_if_missing(connection, "trades", "stop_loss_triggered_date", "TEXT")
+        _add_column_if_missing(connection, "trades", "intended_exit_price", "REAL")
+        _add_column_if_missing(connection, "trades", "actual_exit_price", "REAL")
+        _add_column_if_missing(connection, "trades", "gap_slippage_rate", "REAL")
+        _add_column_if_missing(connection, "trades", "stop_loss_slippage_rate", "REAL")
         _add_column_if_missing(connection, "trades", "gross_profit", "REAL")
         _add_column_if_missing(connection, "trades", "gross_profit_rate", "REAL")
         _add_column_if_missing(connection, "trades", "buy_commission", "REAL")
@@ -625,6 +640,13 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                     trade.get("executed_price"),
                     trade.get("slippage_amount"),
                     trade.get("slippage_rate"),
+                    trade.get("stop_loss_rate"),
+                    trade.get("stop_loss_trigger_price"),
+                    trade.get("stop_loss_triggered_date"),
+                    trade.get("intended_exit_price"),
+                    trade.get("actual_exit_price"),
+                    trade.get("gap_slippage_rate"),
+                    trade.get("stop_loss_slippage_rate"),
                     trade.get("gross_profit"),
                     trade.get("gross_profit_rate"),
                     trade.get("buy_commission"),
@@ -650,12 +672,15 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                 entry_price, exit_price, shares, amount, profit, profit_rate,
                 exit_reason, result, score, reason, round_lot_size,
                 use_round_lot, skipped_reason, intended_price, executed_price,
-                slippage_amount, slippage_rate, gross_profit, gross_profit_rate,
+                slippage_amount, slippage_rate, stop_loss_rate,
+                stop_loss_trigger_price, stop_loss_triggered_date,
+                intended_exit_price, actual_exit_price, gap_slippage_rate,
+                stop_loss_slippage_rate, gross_profit, gross_profit_rate,
                 buy_commission, sell_commission, total_commission, taxable_profit,
                 estimated_tax, net_profit, net_profit_rate, dealer_comment,
                 broker_provider, order_status, live_trading, safety_checked,
                 config_version, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -940,7 +965,7 @@ def analyze_operation_data(config: dict[str, Any], root: Path) -> dict[str, Any]
 
     return {
         "portfolio_analysis": _portfolio_analysis(config, portfolio_rows),
-        "trade_analysis": _trade_analysis(trade_rows),
+        "trade_analysis": _trade_analysis(config, trade_rows),
         "score_analysis": _score_analysis(scoring_rows),
         "reflection_analysis": _reflection_analysis(reflection_rows),
         "config_version_analysis": _config_version_analysis(trade_rows),
@@ -1001,6 +1026,17 @@ def _portfolio_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> d
     max_drawdown = min((float(row.get("max_drawdown") or 0) for row in rows), default=0.0)
     latest_assets = float(latest.get("total_assets") or initial_capital)
     cumulative_profit = latest_assets - initial_capital
+    gross_cumulative_profit = latest.get("gross_cumulative_profit")
+    total_commission = float(latest.get("total_commission") or 0.0)
+    if gross_cumulative_profit is not None:
+        gross_cumulative_profit = round(float(gross_cumulative_profit), 2)
+        estimated_tax_total = calculate_period_estimated_tax(gross_cumulative_profit, total_commission, config)
+        net_cumulative_profit = round(gross_cumulative_profit - estimated_tax_total - total_commission, 2)
+        net_total_assets = round(initial_capital + net_cumulative_profit, 2)
+    else:
+        estimated_tax_total = float(latest.get("estimated_tax_total") or 0.0)
+        net_cumulative_profit = latest.get("net_cumulative_profit")
+        net_total_assets = latest.get("net_total_assets")
     return {
         "initial_capital": initial_capital,
         "latest_total_assets": latest_assets,
@@ -1008,15 +1044,15 @@ def _portfolio_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> d
         "cumulative_profit_rate": round(cumulative_profit / initial_capital, 4),
         "max_drawdown": max_drawdown,
         "operation_days": len({row["date"] for row in rows if row.get("date")}),
-        "gross_cumulative_profit": latest.get("gross_cumulative_profit"),
-        "net_cumulative_profit": latest.get("net_cumulative_profit"),
-        "total_commission": latest.get("total_commission") or 0.0,
-        "estimated_tax_total": latest.get("estimated_tax_total") or 0.0,
-        "net_total_assets": latest.get("net_total_assets"),
+        "gross_cumulative_profit": gross_cumulative_profit,
+        "net_cumulative_profit": net_cumulative_profit,
+        "total_commission": total_commission,
+        "estimated_tax_total": estimated_tax_total,
+        "net_total_assets": net_total_assets,
     }
 
 
-def _trade_analysis(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _trade_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
     closed = [row for row in rows if row.get("action") == "SELL" or row.get("exit_date")]
     wins = [row for row in closed if row.get("result") == "WIN"]
     losses = [row for row in closed if row.get("result") == "LOSS"]
@@ -1027,32 +1063,108 @@ def _trade_analysis(rows: list[dict[str, Any]]) -> dict[str, Any]:
     profit_rates = [float(row["profit_rate"]) for row in closed if row.get("profit_rate") is not None]
     win_rates = [float(row["profit_rate"]) for row in wins if row.get("profit_rate") is not None]
     loss_rates = [float(row["profit_rate"]) for row in losses if row.get("profit_rate") is not None]
+    stop_loss_rate = float(config.get("risk", {}).get("stop_loss_pct", -0.03))
+    stop_loss_rows = [row for row in closed if row.get("exit_reason") == "損切り"]
+    stop_loss_slippages = [
+        float(row["stop_loss_slippage_rate"]) for row in stop_loss_rows if row.get("stop_loss_slippage_rate") is not None
+    ]
+    loss_over_stop_rows = [row for row in losses if row.get("profit_rate") is not None and float(row["profit_rate"]) < stop_loss_rate]
     holding_days = [float(row["holding_days"]) for row in closed if row.get("holding_days") is not None]
     slippages = [float(row["slippage_rate"]) for row in rows if row.get("slippage_rate") is not None]
+    total_commission = round(sum(float(row.get("total_commission") or 0) for row in closed), 2)
+    trade_estimated_tax_total = round(sum(float(row.get("estimated_tax") or 0) for row in closed), 2)
+    estimated_tax_total = calculate_period_estimated_tax(gross_profit_total, total_commission, config)
+    net_profit_total = round(gross_profit_total - estimated_tax_total - total_commission, 2)
+    average_win_profit_rate = _average(win_rates)
+    average_loss_profit_rate = _average(loss_rates)
+    win_count = len(wins)
+    loss_count = len(losses)
+    win_rate = round(win_count / len(closed), 4) if closed else None
+    expectancy = None
+    if win_rate is not None:
+        expectancy = round((win_rate * (average_win_profit_rate or 0.0)) + ((1 - win_rate) * (average_loss_profit_rate or 0.0)), 4)
+    profit_ratio = None
+    if average_win_profit_rate is not None and average_loss_profit_rate not in (None, 0):
+        profit_ratio = round(average_win_profit_rate / abs(average_loss_profit_rate), 4)
+    best_trade = max(closed, key=lambda row: float(row.get("gross_profit") or row.get("profit") or 0), default=None)
+    worst_trade = min(closed, key=lambda row: float(row.get("gross_profit") or row.get("profit") or 0), default=None)
     return {
         "total_trades": len([row for row in rows if row.get("action") in {"BUY", "SELL"}]),
         "closed_trades": len(closed),
-        "winning_trades": len(wins),
-        "losing_trades": len(losses),
-        "win_rate": round(len(wins) / len(closed), 4) if closed else None,
-        "average_profit_rate": _average(win_rates),
-        "average_loss_rate": _average(loss_rates),
+        "winning_trades": win_count,
+        "losing_trades": loss_count,
+        "win_count": win_count,
+        "loss_count": loss_count,
+        "win_rate": win_rate,
+        "average_profit_rate": average_win_profit_rate,
+        "average_loss_rate": average_loss_profit_rate,
+        "average_win_profit_rate": average_win_profit_rate,
+        "average_loss_profit_rate": average_loss_profit_rate,
+        "worst_loss_profit_rate": min(loss_rates) if loss_rates else None,
         "average_all_profit_rate": _average(profit_rates),
+        "expectancy": expectancy,
+        "profit_ratio": profit_ratio,
+        "best_trade": _trade_summary(best_trade),
+        "worst_trade": _trade_summary(worst_trade),
+        "exit_reason_analysis": _exit_reason_analysis(closed),
         "average_holding_days": _average(holding_days),
         "take_profit_count": sum(1 for row in closed if row.get("exit_reason") == "利確"),
         "stop_loss_count": sum(1 for row in closed if row.get("exit_reason") == "損切り"),
+        "stop_loss_slippage_average": _average(stop_loss_slippages),
+        "stop_loss_slippage_max": max(stop_loss_slippages, key=abs) if stop_loss_slippages else None,
+        "loss_over_stop_count": len(loss_over_stop_rows),
+        "loss_over_stop_rate": round(len(loss_over_stop_rows) / loss_count, 4) if loss_count else None,
         "max_holding_exit_count": sum(1 for row in closed if row.get("exit_reason") == "最大保有期間到達"),
-        "total_commission": round(sum(float(row.get("total_commission") or 0) for row in closed), 2),
-        "estimated_tax_total": round(sum(float(row.get("estimated_tax") or 0) for row in closed), 2),
+        "total_commission": total_commission,
+        "estimated_tax_total": estimated_tax_total,
+        "trade_estimated_tax_total": trade_estimated_tax_total,
         "gross_profit_total": gross_profit_total,
         "gross_win_total": gross_win_total,
         "gross_loss_total": gross_loss_total,
         "profit_factor": round(gross_win_total / abs(gross_loss_total), 4) if gross_loss_total < 0 else None,
-        "net_profit_total": round(sum(float(row.get("net_profit") or row.get("profit") or 0) for row in closed), 2),
+        "net_profit_total": net_profit_total,
         "average_slippage": _average(slippages),
         "max_slippage": max(slippages, key=abs) if slippages else None,
         "gap_up_count": sum(1 for row in rows if row.get("slippage_rate") is not None and float(row["slippage_rate"]) > 0),
         "gap_down_count": sum(1 for row in rows if row.get("slippage_rate") is not None and float(row["slippage_rate"]) < 0),
+    }
+
+
+def _exit_reason_analysis(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    reasons = sorted({str(row.get("exit_reason") or "unknown") for row in rows})
+    summaries = []
+    for reason in reasons:
+        reason_rows = [row for row in rows if str(row.get("exit_reason") or "unknown") == reason]
+        profit_rates = [float(row["profit_rate"]) for row in reason_rows if row.get("profit_rate") is not None]
+        summaries.append(
+            {
+                "exit_reason": reason,
+                "count": len(reason_rows),
+                "average_profit_rate": _average(profit_rates),
+            }
+        )
+    return summaries
+
+
+def _trade_summary(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    return {
+        "trade_id": row.get("trade_id"),
+        "code": row.get("code"),
+        "name": row.get("name"),
+        "entry_date": row.get("entry_date"),
+        "exit_date": row.get("exit_date"),
+        "holding_days": row.get("holding_days"),
+        "entry_price": row.get("entry_price"),
+        "exit_price": row.get("exit_price"),
+        "shares": row.get("shares"),
+        "profit": row.get("profit"),
+        "profit_rate": row.get("profit_rate"),
+        "gross_profit": row.get("gross_profit"),
+        "net_profit": row.get("net_profit"),
+        "exit_reason": row.get("exit_reason"),
+        "result": row.get("result"),
     }
 
 

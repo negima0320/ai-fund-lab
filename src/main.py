@@ -62,6 +62,7 @@ from scoring import build_trade_decisions, score_candidates, score_real_candidat
 from screening import generate_screening_log
 from tachibana_auth import load_private_key, load_tachibana_auth_config
 from technical_indicators import TechnicalIndicatorDependencyError
+from tax import calculate_period_profit_summary
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -522,6 +523,7 @@ def run_analyze(config: dict[str, Any]) -> None:
 
     portfolio = analysis["portfolio_analysis"]
     trades = analysis["trade_analysis"]
+    trades_csv, db_trade_count, csv_trade_count = write_trades_csv_from_db(config)
     print("analysis completed")
     print(f"latest_total_assets: {_format_optional_number(portfolio['latest_total_assets'])}")
     print(f"cumulative_profit: {_format_optional_number(portfolio['cumulative_profit'])}")
@@ -531,8 +533,13 @@ def run_analyze(config: dict[str, Any]) -> None:
     print(f"total_commission: {_format_optional_number(portfolio.get('total_commission'))}")
     print(f"win_rate: {_format_optional_percent(trades['win_rate'])}")
     print(f"profit_factor: {_format_optional_number(trades.get('profit_factor'))}")
+    print(f"profit_ratio: {_format_optional_number(trades.get('profit_ratio'))}")
+    print(f"expectancy: {_format_optional_percent(trades.get('expectancy'))}")
+    print(f"worst_loss_profit_rate: {_format_optional_percent(trades.get('worst_loss_profit_rate'))}")
+    print(f"loss_over_stop_count: {trades.get('loss_over_stop_count', 0)}")
     print(f"max_drawdown: {_format_optional_percent(portfolio['max_drawdown'])}")
     print(f"total_trades: {trades['total_trades']}")
+    print(f"trades_csv: {trades_csv.relative_to(ROOT)} ({csv_trade_count}/{db_trade_count} rows)")
     print(f"markdown: {markdown_path.relative_to(ROOT)}")
     print(f"json: {json_path.relative_to(ROOT)}")
 
@@ -3338,12 +3345,38 @@ def write_real_summary_csvs() -> tuple[Path, Path]:
     for path in sorted(portfolio_dir.glob("portfolio_*.json")):
         summaries.append(read_json(path))
     summary_csv = ROOT / "reports" / profile_id_from(config) / "summary.csv"
-    trades_csv = ROOT / "reports" / profile_id_from(config) / "trades.csv"
     write_summary_csv(summary_csv, summaries)
-    state_path = portfolio_dir / "state.json"
-    state = read_json(state_path) if state_path.exists() else {"closed_trades": []}
-    write_trades_csv(trades_csv, state.get("closed_trades", []))
+    trades_csv, db_trade_count, _csv_trade_count = write_trades_csv_from_db(config)
+    if db_trade_count == 0:
+        state_path = portfolio_dir / "state.json"
+        state = read_json(state_path) if state_path.exists() else {"closed_trades": []}
+        write_trades_csv(trades_csv, state.get("closed_trades", []))
     return summary_csv, trades_csv
+
+
+def load_trade_rows_for_csv(config: dict[str, Any], root: Path = ROOT) -> list[dict[str, Any]]:
+    db_path = get_database_path(config, root)
+    if not db_path.exists():
+        return []
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM trades
+            WHERE profile_id = ?
+            ORDER BY entry_date, exit_date, id
+            """,
+            (profile_id_from(config),),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def write_trades_csv_from_db(config: dict[str, Any], root: Path = ROOT) -> tuple[Path, int, int]:
+    rows = load_trade_rows_for_csv(config, root)
+    trades_csv = root / "reports" / profile_id_from(config) / "trades.csv"
+    write_trades_csv(trades_csv, rows)
+    return trades_csv, len(rows), count_csv_data_rows(trades_csv)
 
 
 def ensure_price_history_for_backtest(provider_name: str, start_date: date, end_date: date) -> None:
@@ -3535,11 +3568,12 @@ def write_backtest_summary(
     final_assets = float(state.get("total_assets", initial_capital))
     closed_trades = state.get("closed_trades", [])
     executed_trade_actions = [trade for trade in all_trades if trade.get("action") in {"BUY", "SELL"}]
+    period_profit = calculate_period_profit_summary(closed_trades, config)
     gross_profits = [float(trade.get("gross_profit", trade.get("profit", 0)) or 0) for trade in closed_trades]
-    gross_profit_total = round(sum(gross_profits), 2)
+    gross_profit_total = period_profit["gross_cumulative_profit"]
     gross_win_total = round(sum(value for value in gross_profits if value > 0), 2)
     gross_loss_total = round(sum(value for value in gross_profits if value < 0), 2)
-    net_cumulative_profit = round(sum(float(trade.get("net_profit", trade.get("profit", 0)) or 0) for trade in closed_trades), 2)
+    net_cumulative_profit = period_profit["net_cumulative_profit"]
     wins = sum(1 for trade in closed_trades if trade.get("result") == "WIN")
     win_rate = round(wins / len(closed_trades), 4) if closed_trades else None
     take_profit_count = sum(1 for trade in closed_trades if trade.get("exit_reason") == "利確")
@@ -3582,6 +3616,8 @@ def write_backtest_summary(
         "gross_cumulative_profit": gross_profit_total,
         "net_cumulative_profit": net_cumulative_profit,
         "net_cumulative_profit_rate": net_cumulative_profit_rate,
+        "total_commission": period_profit["total_commission"],
+        "estimated_tax_total": period_profit["estimated_tax_total"],
         "profit_factor": round(gross_win_total / abs(gross_loss_total), 4) if gross_loss_total < 0 else None,
         "gross_profit_total": gross_profit_total,
         "gross_win_total": gross_win_total,
@@ -3649,6 +3685,8 @@ def render_backtest_summary_markdown(summary: dict[str, Any], config: dict[str, 
         f"- 累計損益: {summary['cumulative_profit']:,.0f}円",
         f"- 累計損益率: {summary['cumulative_profit_rate']:.2%}",
         f"- 税引前損益: {_format_optional_yen(summary.get('gross_cumulative_profit'))}",
+        f"- 概算税額: {_format_optional_yen(summary.get('estimated_tax_total'))}",
+        f"- 手数料合計: {_format_optional_yen(summary.get('total_commission'))}",
         f"- 税引後損益: {_format_optional_yen(summary.get('net_cumulative_profit'))}",
         f"- 税引後損益率: {_format_optional_percent(summary.get('net_cumulative_profit_rate'))}",
         f"- 勝率: {_format_optional_rate(summary['win_rate'])}",
@@ -3770,20 +3808,33 @@ def render_analysis_markdown(analysis: dict[str, Any]) -> str:
         "## 取引分析",
         "",
         f"- 総取引数: {trades['total_trades']}",
-        f"- 勝ち取引数: {trades['winning_trades']}",
-        f"- 負け取引数: {trades['losing_trades']}",
+        f"- 勝ち取引数: {trades.get('win_count', trades['winning_trades'])}",
+        f"- 負け取引数: {trades.get('loss_count', trades['losing_trades'])}",
         f"- 勝率: {_format_optional_percent(trades['win_rate'])}",
         f"- profit factor: {_format_optional_number(trades.get('profit_factor'))}",
-        f"- 平均利益率: {_format_optional_percent(trades['average_profit_rate'])}",
-        f"- 平均損失率: {_format_optional_percent(trades['average_loss_rate'])}",
+        f"- profit ratio: {_format_optional_number(trades.get('profit_ratio'))}",
+        f"- 期待値: {_format_optional_percent(trades.get('expectancy'))}",
+        f"- 平均勝ち利益率: {_format_optional_percent(trades.get('average_win_profit_rate', trades['average_profit_rate']))}",
+        f"- 平均負け損失率: {_format_optional_percent(trades.get('average_loss_profit_rate', trades['average_loss_rate']))}",
+        f"- 最大負け損失率: {_format_optional_percent(trades.get('worst_loss_profit_rate'))}",
+        f"- best_trade: {_format_trade_summary_inline(trades.get('best_trade'))}",
+        f"- worst_trade: {_format_trade_summary_inline(trades.get('worst_trade'))}",
         f"- 平均保有日数: {_format_optional_number(trades['average_holding_days'])}",
         f"- 利確回数: {trades['take_profit_count']}",
         f"- 損切り回数: {trades['stop_loss_count']}",
+        f"- 損切り乖離平均: {_format_optional_percent(trades.get('stop_loss_slippage_average'))}",
+        f"- 損切り乖離最大: {_format_optional_percent(trades.get('stop_loss_slippage_max'))}",
+        f"- 設定損切り超過件数: {trades.get('loss_over_stop_count', 0)}",
+        f"- 設定損切り超過率: {_format_optional_percent(trades.get('loss_over_stop_rate'))}",
         f"- 最大保有期間売却回数: {trades['max_holding_exit_count']}",
         f"- 平均スリッページ: {_format_optional_percent(trades.get('average_slippage'))}",
         f"- 最大スリッページ: {_format_optional_percent(trades.get('max_slippage'))}",
         f"- ギャップアップ回数: {trades.get('gap_up_count', 0)}",
         f"- ギャップダウン回数: {trades.get('gap_down_count', 0)}",
+        "",
+        "### exit_reason別集計",
+        "",
+        *_exit_reason_analysis_lines(trades.get("exit_reason_analysis", [])),
         "",
         "## config_version別集計",
         "",
@@ -3851,6 +3902,18 @@ def _format_optional_yen(value: Any) -> str:
     return f"{float(value):,.0f}円"
 
 
+def _format_trade_summary_inline(trade: Any) -> str:
+    if not trade:
+        return "N/A"
+    code = trade.get("code", "")
+    name = trade.get("name", "")
+    result = trade.get("result", "")
+    profit = _format_optional_yen(trade.get("profit"))
+    profit_rate = _format_optional_percent(trade.get("profit_rate"))
+    exit_reason = trade.get("exit_reason") or "N/A"
+    return f"{code} {name} {result} {profit} ({profit_rate}) / {exit_reason}"
+
+
 def _relative_path_text(path_text: Any) -> str:
     if not path_text:
         return "N/A"
@@ -3898,6 +3961,18 @@ def _profile_analysis_lines(items: list[dict[str, Any]]) -> list[str]:
             f"勝率 {_format_optional_percent(item.get('win_rate'))}, "
             f"最大DD {_format_optional_percent(item.get('max_drawdown'))}, "
             f"総取引数 {item.get('total_trades', 0)}"
+        )
+        for item in items
+    ]
+
+
+def _exit_reason_analysis_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- 売却理由別データなし"]
+    return [
+        (
+            f"- {item['exit_reason']}: 件数 {item['count']}件, "
+            f"平均損益率 {_format_optional_percent(item.get('average_profit_rate'))}"
         )
         for item in items
     ]
@@ -4268,17 +4343,29 @@ def write_summary_csv(path: Path, summaries: list[dict[str, Any]]) -> None:
 
 def write_trades_csv(path: Path, trades: list[dict[str, Any]]) -> None:
     fieldnames = [
+        "id",
         "trade_id",
+        "profile_id",
+        "profile_name",
+        "action",
         "code",
         "name",
+        "sector_name",
         "entry_date",
         "exit_date",
         "holding_days",
         "entry_price",
         "exit_price",
+        "intended_exit_price",
+        "actual_exit_price",
         "shares",
         "profit",
         "profit_rate",
+        "stop_loss_rate",
+        "stop_loss_trigger_price",
+        "stop_loss_triggered_date",
+        "gap_slippage_rate",
+        "stop_loss_slippage_rate",
         "gross_profit",
         "gross_profit_rate",
         "buy_commission",
@@ -4290,9 +4377,23 @@ def write_trades_csv(path: Path, trades: list[dict[str, Any]]) -> None:
         "net_profit_rate",
         "exit_reason",
         "result",
+        "score",
+        "reason",
+        "broker_provider",
+        "order_status",
+        "config_version",
+        "created_at",
     ]
     rows = [{field: trade.get(field, "") for field in fieldnames} for trade in trades]
     write_csv(path, fieldnames, rows)
+
+
+def count_csv_data_rows(path: Path) -> int:
+    if not path.exists():
+        return 0
+    with path.open("r", encoding="utf-8", newline="") as file:
+        reader = csv.DictReader(file)
+        return sum(1 for _row in reader)
 
 
 def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, Any]]) -> None:

@@ -8,6 +8,7 @@ from typing import Any
 from broker import build_broker
 from commentary import generate_buy_comment, generate_no_trade_comment, generate_sell_comment
 from safety import can_trade, safety_event
+from tax import calculate_period_profit_summary
 
 
 def execute_paper_trades(
@@ -182,6 +183,13 @@ def execute_paper_trade_day(
         if exit_reason:
             proceeds = updated["quantity"] * updated["current_price"]
             entry_notional = updated["quantity"] * updated["entry_price"]
+            stop_loss_fields = _demo_stop_loss_fields(
+                exit_reason,
+                float(updated["entry_price"]),
+                float(updated["current_price"]),
+                stop_loss_pct,
+                trade_date,
+            )
             closed = _apply_exit_costs(
                 {
                     "trade_id": f"{updated['entry_date']}_{trade_date}_{updated['code']}",
@@ -196,6 +204,7 @@ def execute_paper_trade_day(
                     "shares": updated["quantity"],
                     "exit_reason": exit_reason,
                     "buy_reason": updated["buy_reason"],
+                    **stop_loss_fields,
                 },
                 entry_notional,
                 proceeds,
@@ -308,11 +317,12 @@ def execute_paper_trade_day(
     portfolio_market_value = round(sum(position["market_value"] for position in next_positions), 2)
     total_assets = round(state["cash"] + portfolio_market_value, 2)
     state["asset_history"].append(total_assets)
-    realized_pnl = round(sum(trade["profit"] for trade in state["closed_trades"]), 2)
-    gross_cumulative_profit = round(sum(trade.get("gross_profit", trade.get("profit", 0)) for trade in state["closed_trades"]), 2)
-    net_cumulative_profit = round(sum(trade.get("net_profit", trade.get("profit", 0)) for trade in state["closed_trades"]), 2)
-    total_commission = round(sum(trade.get("total_commission", 0) for trade in state["closed_trades"]), 2)
-    estimated_tax_total = round(sum(trade.get("estimated_tax", 0) for trade in state["closed_trades"]), 2)
+    period_profit = calculate_period_profit_summary(state["closed_trades"], config)
+    realized_pnl = period_profit["net_cumulative_profit"]
+    gross_cumulative_profit = period_profit["gross_cumulative_profit"]
+    net_cumulative_profit = period_profit["net_cumulative_profit"]
+    total_commission = period_profit["total_commission"]
+    estimated_tax_total = period_profit["estimated_tax_total"]
     cumulative_pnl = round(total_assets - initial_cash, 2)
 
     return {
@@ -554,6 +564,7 @@ def execute_real_data_paper_trade(
     max_holding_days = int(config["risk"]["max_holding_business_days"])
     broker = build_broker(state, config)
     next_day_execution = bool(config.get("execution", {}).get("use_next_day_open_execution", False))
+    stop_loss_execution = str(config.get("execution", {}).get("stop_loss_execution", "next_day_open"))
 
     trades = []
     safety_events = []
@@ -640,9 +651,11 @@ def execute_real_data_paper_trade(
                     "entry_price": position["entry_price"],
                     "exit_price": executed_price,
                     "executed_price": executed_price,
+                    "actual_exit_price": executed_price,
                     "shares": position["shares"],
                     "buy_reason": position.get("reason", ""),
                     **_slippage_fields(float(pending["intended_price"]), executed_price),
+                    **_pending_stop_loss_execution_fields(pending, executed_price),
                 },
                 entry_notional,
                 proceeds,
@@ -672,8 +685,20 @@ def execute_real_data_paper_trade(
         market = price_by_code.get(position["code"])
         current_price = float(market["close"]) if market else float(position["current_price"])
         holding_days = int(position["holding_days"]) if position.get("entry_date") == trade_date else int(position["holding_days"]) + 1
-        profit_rate = (current_price - float(position["entry_price"])) / float(position["entry_price"])
-        exit_reason = _real_exit_reason(profit_rate, take_profit_pct, stop_loss_pct, holding_days, max_holding_days)
+        exit_plan = _real_exit_plan(
+            position=position,
+            market=market or {},
+            trade_date=trade_date,
+            current_price=current_price,
+            holding_days=holding_days,
+            take_profit_pct=take_profit_pct,
+            stop_loss_pct=stop_loss_pct,
+            max_holding_days=max_holding_days,
+            stop_loss_execution=stop_loss_execution,
+        )
+        profit_rate = exit_plan["mark_profit_rate"]
+        exit_reason = exit_plan["exit_reason"]
+        planned_exit_price = float(exit_plan["exit_price"] or current_price)
         updated_position = {
             **position,
             "current_price": current_price,
@@ -683,7 +708,8 @@ def execute_real_data_paper_trade(
             "unrealized_profit_rate": round(profit_rate, 4),
         }
         if exit_reason and position["code"] not in pending_sell_codes:
-            proceeds = int(position["shares"]) * current_price
+            execute_now = bool(exit_plan.get("execute_now", False))
+            proceeds = int(position["shares"]) * planned_exit_price
             entry_notional = int(position["shares"]) * float(position["entry_price"])
             closed = _apply_exit_costs(
                 {
@@ -696,10 +722,12 @@ def execute_real_data_paper_trade(
                     "exit_date": trade_date,
                     "holding_days": holding_days,
                     "entry_price": position["entry_price"],
-                    "exit_price": current_price,
+                    "exit_price": planned_exit_price,
+                    "actual_exit_price": planned_exit_price,
                     "shares": position["shares"],
                     "exit_reason": exit_reason,
                     "buy_reason": position.get("reason", ""),
+                    **_stop_loss_trade_fields(exit_plan, planned_exit_price),
                 },
                 entry_notional,
                 proceeds,
@@ -717,7 +745,7 @@ def execute_real_data_paper_trade(
                 trades.append(_safety_rejected_order(closed, validation))
                 next_positions_after_pending.append(updated_position)
                 continue
-            if next_day_execution:
+            if next_day_execution and not execute_now:
                 pending_sell = _pending_order_from_trade(closed, trade_date, action="SELL")
                 future_pending.append(pending_sell)
                 trades.append(pending_sell)
@@ -847,10 +875,11 @@ def execute_real_data_paper_trade(
     state["cumulative_profit"] = cumulative_profit
     state["closed_trades"].extend(closed_today)
     state["pending_orders"] = future_pending
-    state["gross_cumulative_profit"] = round(sum(trade.get("gross_profit", trade.get("profit", 0)) for trade in state["closed_trades"]), 2)
-    state["net_cumulative_profit"] = round(sum(trade.get("net_profit", trade.get("profit", 0)) for trade in state["closed_trades"]), 2)
-    state["total_commission"] = round(sum(trade.get("total_commission", 0) for trade in state["closed_trades"]), 2)
-    state["estimated_tax_total"] = round(sum(trade.get("estimated_tax", 0) for trade in state["closed_trades"]), 2)
+    period_profit = calculate_period_profit_summary(state["closed_trades"], config)
+    state["gross_cumulative_profit"] = period_profit["gross_cumulative_profit"]
+    state["net_cumulative_profit"] = period_profit["net_cumulative_profit"]
+    state["total_commission"] = period_profit["total_commission"]
+    state["estimated_tax_total"] = period_profit["estimated_tax_total"]
     state.setdefault("asset_history", [initial_cash]).append(total_assets)
     state["current_day"] = int(state.get("current_day", 0)) + 1
     processed_dates = state.setdefault("processed_dates", [])
@@ -881,6 +910,129 @@ def _real_exit_reason(
     if holding_days >= max_holding_days:
         return "最大保有期間到達"
     return ""
+
+
+def _real_exit_plan(
+    position: dict[str, Any],
+    market: dict[str, Any],
+    trade_date: str,
+    current_price: float,
+    holding_days: int,
+    take_profit_pct: float,
+    stop_loss_pct: float,
+    max_holding_days: int,
+    stop_loss_execution: str,
+) -> dict[str, Any]:
+    entry_price = float(position["entry_price"])
+    mark_profit_rate = (current_price - entry_price) / entry_price if entry_price else 0.0
+    trigger_price = round(entry_price * (1 + stop_loss_pct), 4)
+    low_price = _optional_float(market.get("low"))
+    stop_hit_intraday = holding_days >= 2 and low_price is not None and low_price <= trigger_price
+    if stop_loss_execution in {"intraday_stop", "conservative_intraday_stop"} and stop_hit_intraday:
+        exit_price = trigger_price
+        if stop_loss_execution == "conservative_intraday_stop":
+            exit_price = min(trigger_price, current_price)
+        return {
+            "exit_reason": "損切り",
+            "exit_price": exit_price,
+            "mark_profit_rate": mark_profit_rate,
+            "stop_loss_rate": stop_loss_pct,
+            "stop_loss_trigger_price": trigger_price,
+            "stop_loss_triggered_date": trade_date,
+            "intended_exit_price": trigger_price,
+            "execute_now": True,
+        }
+
+    exit_reason = _real_exit_reason(mark_profit_rate, take_profit_pct, stop_loss_pct, holding_days, max_holding_days)
+    plan = {
+        "exit_reason": exit_reason,
+        "exit_price": current_price if exit_reason else None,
+        "mark_profit_rate": mark_profit_rate,
+        "stop_loss_rate": stop_loss_pct,
+        "stop_loss_trigger_price": None,
+        "stop_loss_triggered_date": None,
+        "intended_exit_price": current_price if exit_reason else None,
+        "execute_now": False,
+    }
+    if exit_reason == "損切り":
+        plan["stop_loss_trigger_price"] = trigger_price
+        plan["stop_loss_triggered_date"] = trade_date
+    return plan
+
+
+def _stop_loss_trade_fields(exit_plan: dict[str, Any], actual_exit_price: float) -> dict[str, Any]:
+    trigger_price = exit_plan.get("stop_loss_trigger_price")
+    stop_loss_slippage_rate = None
+    if trigger_price:
+        stop_loss_slippage_rate = round((actual_exit_price - float(trigger_price)) / float(trigger_price), 4)
+    intended_exit_price = exit_plan.get("intended_exit_price")
+    gap_slippage_rate = None
+    if intended_exit_price:
+        gap_slippage_rate = round((actual_exit_price - float(intended_exit_price)) / float(intended_exit_price), 4)
+    return {
+        "stop_loss_rate": exit_plan.get("stop_loss_rate"),
+        "stop_loss_trigger_price": trigger_price,
+        "stop_loss_triggered_date": exit_plan.get("stop_loss_triggered_date"),
+        "intended_exit_price": intended_exit_price,
+        "actual_exit_price": actual_exit_price,
+        "gap_slippage_rate": gap_slippage_rate,
+        "stop_loss_slippage_rate": stop_loss_slippage_rate,
+    }
+
+
+def _demo_stop_loss_fields(
+    exit_reason: str,
+    entry_price: float,
+    actual_exit_price: float,
+    stop_loss_pct: float,
+    trade_date: str,
+) -> dict[str, Any]:
+    if exit_reason != "損切り":
+        return {
+            "stop_loss_rate": None,
+            "stop_loss_trigger_price": None,
+            "stop_loss_triggered_date": None,
+            "intended_exit_price": actual_exit_price,
+            "actual_exit_price": actual_exit_price,
+            "gap_slippage_rate": None,
+            "stop_loss_slippage_rate": None,
+        }
+    trigger_price = round(entry_price * (1 + stop_loss_pct), 4)
+    return _stop_loss_trade_fields(
+        {
+            "stop_loss_rate": stop_loss_pct,
+            "stop_loss_trigger_price": trigger_price,
+            "stop_loss_triggered_date": trade_date,
+            "intended_exit_price": actual_exit_price,
+        },
+        actual_exit_price,
+    )
+
+
+def _pending_stop_loss_execution_fields(pending: dict[str, Any], actual_exit_price: float) -> dict[str, Any]:
+    trigger_price = pending.get("stop_loss_trigger_price")
+    intended_exit_price = pending.get("intended_exit_price") or pending.get("intended_price")
+    stop_loss_slippage_rate = None
+    if trigger_price:
+        stop_loss_slippage_rate = round((actual_exit_price - float(trigger_price)) / float(trigger_price), 4)
+    gap_slippage_rate = None
+    if intended_exit_price:
+        gap_slippage_rate = round((actual_exit_price - float(intended_exit_price)) / float(intended_exit_price), 4)
+    return {
+        "stop_loss_rate": pending.get("stop_loss_rate"),
+        "stop_loss_trigger_price": trigger_price,
+        "stop_loss_triggered_date": pending.get("stop_loss_triggered_date"),
+        "intended_exit_price": intended_exit_price,
+        "actual_exit_price": actual_exit_price,
+        "gap_slippage_rate": gap_slippage_rate,
+        "stop_loss_slippage_rate": stop_loss_slippage_rate,
+    }
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value)
 
 
 def _split_due_pending_orders(pending_orders: list[dict[str, Any]], trade_date: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

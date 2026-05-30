@@ -299,9 +299,12 @@ screening結果、scoring結果、AI Decision結果、trade結果、portfolio sn
 ```yaml
 execution:
   use_next_day_open_execution: true
+  stop_loss_execution: next_day_open
 ```
 
 `true` の場合、新人ディーラー1号は Day N の引け後にBUY/SELL判断を行い、注文は `pending_orders` として保存され、Day N+1 の `open` 価格で約定します。想定価格と約定価格の差は `slippage_amount` / `slippage_rate` として保存します。`false` の場合は従来通り、判断日の価格で即時約定する仮想売買になります。
+
+損切り方式は `execution.stop_loss_execution` で切り替えます。デフォルトの `next_day_open` は引け後に損切り判定し、翌営業日の寄り付きで約定するため現実的ですが、ギャップダウンにより設定損切り幅を超える損失が出ることがあります。`intraday_stop` は当日安値が `stop_loss_trigger_price` を下回った場合に逆指値を想定し、損切りライン到達価格で売却したものとして検証します。`conservative_intraday_stop` は同じく当日安値で判定しつつ、`min(stop_loss_trigger_price, close)` でより保守的に評価します。いずれも実際の約定価格を保証するものではなく、損切り方式によりバックテスト結果は大きく変わります。
 
 ## スコアリングルール
 
@@ -910,7 +913,7 @@ python src/main.py --mode analyze
 - `reports/backtests/analysis_latest.md`
 - `reports/backtests/analysis_latest.json`
 
-分析レポートには、最新総資産、累計損益、最大ドローダウン、勝率、平均利益率、平均損失率、業種別勝率、スコア帯別件数、AI振り返りの頻出項目などを含みます。`reports/backtests/` はGit管理対象です。
+分析レポートには、最新総資産、累計損益、最大ドローダウン、勝率、勝ち取引数、負け取引数、平均勝ち利益率、平均負け損失率、最大負け損失率、`profit_ratio`、`profit_factor`、期待値、best/worst trade、exit_reason別集計、損切り乖離平均、損切り乖離最大、設定損切り超過件数、設定損切り超過率、業種別勝率、スコア帯別件数、AI振り返りの頻出項目などを含みます。`profit_ratio` は `average_win_profit_rate / abs(average_loss_profit_rate)` で、1回の勝ちの大きさが1回の負けに対してどの程度あるかを見る簡易指標です。exit_reason別集計では、損切り、利確、最大保有期間到達などの件数と平均損益率を確認できます。`reports/backtests/` はGit管理対象です。
 
 Gitのコミット履歴から、週次・期間単位の開発ノートを生成できます。
 
@@ -1194,6 +1197,8 @@ python src/main.py --mode analyze --profile rookie_dealer_01
 - `max_holding_exit_count`
 - `no_trade_days`
 - `selected_count_total`
+
+税額は概算であり、portfolio/analyze とバックテストサマリでは期間損益通算後の利益に対する簡易計算として扱います。`gross_cumulative_profit <= 0` の場合、`estimated_tax_total` は `0` になり、`net_cumulative_profit = gross_cumulative_profit - estimated_tax_total - total_commission` で集計します。取引単位の `estimated_tax` は参考値です。
 
 J-Quants Freeプランでは、取得できる株価データが12週間遅延データである可能性があります。バックテストおよび開発検証では、この遅延を前提として扱ってください。
 
