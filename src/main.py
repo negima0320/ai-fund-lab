@@ -83,6 +83,9 @@ def main() -> None:
     if args.mode == "preflight":
         run_preflight(args.profile)
         return
+    if args.mode == "compare-profiles":
+        run_compare_profiles(args.profiles, args.start_date, args.end_date)
+        return
     config = load_config(CONFIG_PATH)
     if args.mode == "status":
         run_status(config, args.output_format)
@@ -266,6 +269,7 @@ def parse_args() -> Any:
             "backtest",
             "export-ai-dataset",
             "export-ai-summary",
+            "compare-profiles",
         ],
         default="demo",
         help="Execution mode. Use demo, healthcheck, list-stocks, fetch-prices, or calculate-indicators.",
@@ -280,6 +284,12 @@ def parse_args() -> Any:
         "--profile",
         default=DEFAULT_PROFILE_ID,
         help="AI fund profile id under config/profiles. Default: rookie_dealer_01.",
+    )
+    parser.add_argument(
+        "--profiles",
+        nargs="+",
+        default=None,
+        help="Profile ids for compare-profiles mode.",
     )
     parser.add_argument(
         "--env",
@@ -332,7 +342,9 @@ def parse_args() -> Any:
         parser.error(f"--date YYYY-MM-DD is required for {args.mode} mode.")
     if args.mode == "publish-article" and not args.note_url:
         parser.error("--note-url URL is required for publish-article mode.")
-    if args.mode in {"backtest", "full-paper-run", "export-ai-dataset", "export-ai-summary"}:
+    if args.mode in {"backtest", "full-paper-run", "export-ai-dataset", "export-ai-summary", "compare-profiles"}:
+        if args.mode == "compare-profiles" and not args.profiles:
+            parser.error("--profiles PROFILE_ID [PROFILE_ID ...] is required for compare-profiles mode.")
         if not args.start_date or not args.end_date:
             parser.error(f"--start-date YYYY-MM-DD and --end-date YYYY-MM-DD are required for {args.mode} mode.")
         try:
@@ -542,6 +554,136 @@ def run_analyze(config: dict[str, Any]) -> None:
     print(f"trades_csv: {trades_csv.relative_to(ROOT)} ({csv_trade_count}/{db_trade_count} rows)")
     print(f"markdown: {markdown_path.relative_to(ROOT)}")
     print(f"json: {json_path.relative_to(ROOT)}")
+
+
+def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_text: str) -> None:
+    profiles = [load_profile(profile_id) for profile_id in profile_ids]
+    db_path = get_database_path(profiles[0], ROOT)
+    if not db_path.exists():
+        raise SystemExit(f"SQLite DB not found: {db_path}")
+
+    rows = [_profile_compare_row(config, db_path, start_date_text, end_date_text) for config in profiles]
+    payload = {
+        "start_date": start_date_text,
+        "end_date": end_date_text,
+        "profiles": rows,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    output_dir = ROOT / "reports" / "profile_comparisons"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    key = f"{start_date_text}_to_{end_date_text}_{'_vs_'.join(profile_ids)}"
+    json_path = output_dir / f"compare_{key}.json"
+    markdown_path = output_dir / f"compare_{key}.md"
+    write_json(json_path, payload)
+    write_text(markdown_path, render_compare_profiles_markdown(payload))
+
+    print("profile comparison completed")
+    for row in rows:
+        print(
+            f"- {row['profile_id']}: final_assets={_format_optional_number(row.get('final_assets'))}, "
+            f"net_cumulative_profit={_format_optional_number(row.get('net_cumulative_profit'))}, "
+            f"win_rate={_format_optional_percent(row.get('win_rate'))}, "
+            f"profit_factor={_format_optional_number(row.get('profit_factor'))}, "
+            f"total_trades={row.get('total_trades')}"
+        )
+    print(f"markdown: {markdown_path.relative_to(ROOT)}")
+    print(f"json: {json_path.relative_to(ROOT)}")
+
+
+def _profile_compare_row(config: dict[str, Any], db_path: Path, start_date_text: str, end_date_text: str) -> dict[str, Any]:
+    profile_id = profile_id_from(config)
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        portfolio_rows = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT *
+                FROM portfolio_snapshots
+                WHERE profile_id = ? AND date BETWEEN ? AND ?
+                ORDER BY date, id
+                """,
+                (profile_id, start_date_text, end_date_text),
+            )
+        ]
+        trade_rows = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT *
+                FROM trades
+                WHERE profile_id = ?
+                  AND order_status = 'FILLED'
+                  AND action IN ('BUY', 'SELL')
+                  AND COALESCE(exit_date, entry_date) BETWEEN ? AND ?
+                ORDER BY entry_date, exit_date, id
+                """,
+                (profile_id, start_date_text, end_date_text),
+            )
+        ]
+
+    latest = portfolio_rows[-1] if portfolio_rows else {}
+    closed = [row for row in trade_rows if row.get("action") == "SELL" or row.get("exit_date")]
+    wins = [row for row in closed if row.get("result") == "WIN"]
+    gross_profits = [float(row.get("gross_profit") or row.get("profit") or 0) for row in closed]
+    gross_win_total = sum(value for value in gross_profits if value > 0)
+    gross_loss_total = sum(value for value in gross_profits if value < 0)
+    win_rates = [float(row["profit_rate"]) for row in wins if row.get("profit_rate") is not None]
+    loss_rows = [row for row in closed if row.get("result") == "LOSS"]
+    loss_rates = [float(row["profit_rate"]) for row in loss_rows if row.get("profit_rate") is not None]
+    max_drawdown = min((float(row.get("max_drawdown") or 0) for row in portfolio_rows), default=None) if portfolio_rows else None
+    return {
+        "profile_id": profile_id,
+        "profile_name": profile_name_from(config),
+        "stop_loss_execution": config.get("execution", {}).get("stop_loss_execution", "next_day_open"),
+        "final_assets": latest.get("total_assets"),
+        "net_cumulative_profit": latest.get("net_cumulative_profit"),
+        "win_rate": round(len(wins) / len(closed), 4) if closed else None,
+        "profit_factor": round(gross_win_total / abs(gross_loss_total), 4) if gross_loss_total < 0 else None,
+        "average_win_profit_rate": _average_number(win_rates),
+        "average_loss_profit_rate": _average_number(loss_rates),
+        "max_drawdown": max_drawdown,
+        "total_trades": len(trade_rows),
+        "loss_over_stop_count": len(
+            [
+                row
+                for row in loss_rows
+                if row.get("profit_rate") is not None and float(row["profit_rate"]) < float(config.get("risk", {}).get("stop_loss_pct", -0.03))
+            ]
+        ),
+    }
+
+
+def render_compare_profiles_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        f"# Profile比較 {payload['start_date']} to {payload['end_date']}",
+        "",
+        "| profile | stop_loss_execution | final_assets | net_cumulative_profit | win_rate | profit_factor | avg_win | avg_loss | max_drawdown | total_trades | loss_over_stop_count |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in payload["profiles"]:
+        lines.append(
+            "| "
+            f"{row['profile_id']} {row['profile_name']} | "
+            f"{row.get('stop_loss_execution')} | "
+            f"{_format_optional_yen(row.get('final_assets'))} | "
+            f"{_format_optional_yen(row.get('net_cumulative_profit'))} | "
+            f"{_format_optional_percent(row.get('win_rate'))} | "
+            f"{_format_optional_number(row.get('profit_factor'))} | "
+            f"{_format_optional_percent(row.get('average_win_profit_rate'))} | "
+            f"{_format_optional_percent(row.get('average_loss_profit_rate'))} | "
+            f"{_format_optional_percent(row.get('max_drawdown'))} | "
+            f"{row.get('total_trades')} | "
+            f"{row.get('loss_over_stop_count')} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _average_number(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return round(sum(values) / len(values), 4)
 
 
 def run_export_ai_dataset(config: dict[str, Any], start_date: str, end_date: str) -> None:
@@ -847,6 +989,7 @@ def run_help() -> None:
 - backtest: 指定期間のバックテストを実行
 - full-paper-run: PaperBrokerで事前チェックから分析まで通し実行
 - analyze: SQLiteから分析レポートを生成
+- compare-profiles: profile別のバックテスト結果を横並び比較
 - export-ai-dataset: AI改善用JSONLデータセットを生成
 - export-ai-summary: AI改善用Markdownサマリを生成
 - release-notes: Gitコミット履歴から開発ノートを生成
@@ -864,9 +1007,10 @@ def run_help() -> None:
 6. python src/main.py --mode preview-orders --provider jquants --date YYYY-MM-DD
 7. python src/main.py --mode analyze
 8. python src/main.py --mode backtest --provider jquants --start-date YYYY-MM-DD --end-date YYYY-MM-DD
-9. python src/main.py --mode export-ai-summary --start-date YYYY-MM-DD --end-date YYYY-MM-DD
-10. python src/main.py --mode full-paper-run --provider jquants --start-date YYYY-MM-DD --end-date YYYY-MM-DD
-11. python src/main.py --mode release-notes --since YYYY-MM-DD --until YYYY-MM-DD
+9. python src/main.py --mode compare-profiles --profiles rookie_dealer_01 rookie_dealer_02 --start-date YYYY-MM-DD --end-date YYYY-MM-DD
+10. python src/main.py --mode export-ai-summary --start-date YYYY-MM-DD --end-date YYYY-MM-DD
+11. python src/main.py --mode full-paper-run --provider jquants --start-date YYYY-MM-DD --end-date YYYY-MM-DD
+12. python src/main.py --mode release-notes --since YYYY-MM-DD --until YYYY-MM-DD
 
 補足:
 - 実売買は未実装です。
@@ -3365,6 +3509,8 @@ def load_trade_rows_for_csv(config: dict[str, Any], root: Path = ROOT) -> list[d
             SELECT *
             FROM trades
             WHERE profile_id = ?
+              AND order_status = 'FILLED'
+              AND action IN ('BUY', 'SELL')
             ORDER BY entry_date, exit_date, id
             """,
             (profile_id_from(config),),
@@ -3567,7 +3713,11 @@ def write_backtest_summary(
     initial_capital = float(config["portfolio"]["initial_cash"])
     final_assets = float(state.get("total_assets", initial_capital))
     closed_trades = state.get("closed_trades", [])
-    executed_trade_actions = [trade for trade in all_trades if trade.get("action") in {"BUY", "SELL"}]
+    executed_trade_actions = [
+        trade
+        for trade in all_trades
+        if trade.get("action") in {"BUY", "SELL"} and str(trade.get("order_status") or trade.get("status") or "").upper() == "FILLED"
+    ]
     period_profit = calculate_period_profit_summary(closed_trades, config)
     gross_profits = [float(trade.get("gross_profit", trade.get("profit", 0)) or 0) for trade in closed_trades]
     gross_profit_total = period_profit["gross_cumulative_profit"]

@@ -16,6 +16,7 @@ def test_trade_analysis_includes_extended_metrics(config_copy: dict) -> None:
             "total_commission": 100,
             "result": "WIN",
             "exit_reason": "利確",
+            "order_status": "FILLED",
         },
         {
             "action": "SELL",
@@ -29,6 +30,19 @@ def test_trade_analysis_includes_extended_metrics(config_copy: dict) -> None:
             "result": "LOSS",
             "exit_reason": "損切り",
             "stop_loss_slippage_rate": -0.01,
+            "order_status": "FILLED",
+        },
+        {
+            "action": "SELL",
+            "trade_id": "pending",
+            "code": "1003",
+            "name": "Pending",
+            "profit": 999999,
+            "profit_rate": 9.99,
+            "gross_profit": 999999,
+            "result": "WIN",
+            "exit_reason": "利確",
+            "order_status": "PENDING",
         },
     ]
 
@@ -36,6 +50,7 @@ def test_trade_analysis_includes_extended_metrics(config_copy: dict) -> None:
 
     assert analysis["win_count"] == 1
     assert analysis["loss_count"] == 1
+    assert analysis["total_trades"] == 2
     assert analysis["average_win_profit_rate"] == 0.1
     assert analysis["average_loss_profit_rate"] == -0.04
     assert analysis["profit_ratio"] == 2.5

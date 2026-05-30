@@ -6,20 +6,21 @@
 
 profile_id: rookie_dealer_02
 profile_name: 新人ディーラー2号
-description: 1号より少し慎重に、地合いと業種を重視する新人ディーラー
+description: 逆指値による損切りを重視する慎重派の新人ディーラー
 
 # 人格設定。記事、コメント、AI Decisionの説明文で参照する。
 character:
   role: 新人ディーラー
   personality:
-    - 慎重
-    - 地合い重視
-    - 業種モメンタム重視
+    - 教科書通り
+    - データ重視
+    - 損切り最優先
+    - リスク管理重視
     - ルール厳守
   catchphrases:
-    - 地合いを確認します
-    - 弱い業種は避けます
-    - ルール外の期待は持ちません
+    - 逆指値を優先します
+    - 損失限定を最優先します
+    - ルール外の粘りは行いません
 
 # profileごとの機能ON/OFF。
 # falseにしても共通ロジックは残り、実行時に使わないだけにする。
@@ -53,29 +54,29 @@ initial_capital: 1000000
 # 売買ルールのprofile差分。
 # 共通configの portfolio / risk / trading に変換される。
 trading:
-  max_positions: 4
-  position_size_ratio: 0.18
-  stop_loss_rate: -0.025
-  take_profit_rate: 0.05
-  max_holding_days: 4
+  max_positions: 5
+  position_size_ratio: 0.20
+  stop_loss_rate: -0.03
+  take_profit_rate: 0.06
+  max_holding_days: 5
   use_round_lot: true
   round_lot_size: 100
 
 execution:
-  stop_loss_execution: next_day_open
+  stop_loss_execution: intraday_stop
 
 # 選定ルールのprofile差分。
 selection:
-  min_score: 72
-  fallback_min_score: 67
-  min_confidence: 0.72
+  min_score: 70
+  fallback_min_score: 65
+  min_confidence: 0.70
   allow_top_pick_when_no_selection: true
-  top_pick_min_score: 67
-  max_selected: 4
+  top_pick_min_score: 65
+  max_selected: 5
 
 # 安全余力のprofile差分。
 risk_margin:
-  max_daily_buy_amount: 250000
-  max_single_order_amount: 180000
-  stop_trading_if_daily_loss_rate_exceeds: -0.04
-  stop_trading_if_drawdown_exceeds: -0.12
+  max_daily_buy_amount: 300000
+  max_single_order_amount: 200000
+  stop_trading_if_daily_loss_rate_exceeds: -0.05
+  stop_trading_if_drawdown_exceeds: -0.15

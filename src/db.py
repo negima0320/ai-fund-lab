@@ -397,6 +397,7 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
         _add_column_if_missing(connection, "scoring_results", "negative_news_count", "INTEGER")
         _add_column_if_missing(connection, "scoring_results", "news_provider", "TEXT")
         _add_column_if_missing(connection, "scoring_results", "news_limitation", "TEXT")
+        _delete_non_trade_order_rows(connection)
         _add_column_if_missing(connection, "scoring_results", "ai_reason", "TEXT")
         _add_column_if_missing(connection, "scoring_results", "ai_risk", "TEXT")
         _add_column_if_missing(connection, "scoring_results", "ai_confidence", "REAL")
@@ -611,6 +612,8 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
         connection.execute("DELETE FROM trades WHERE profile_id = ? AND (entry_date = ? OR exit_date = ?)", (profile_id, trade_date, trade_date))
         rows = []
         for trade in trades:
+            if not _is_filled_trade(trade):
+                continue
             rows.append(
                 (
                     trade.get("trade_id"),
@@ -955,6 +958,8 @@ def analyze_operation_data(config: dict[str, Any], root: Path) -> dict[str, Any]
 
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
+        _delete_non_trade_order_rows(connection)
+        connection.commit()
         portfolio_rows = [dict(row) for row in connection.execute("SELECT * FROM portfolio_snapshots ORDER BY date, id")]
         trade_rows = [dict(row) for row in connection.execute("SELECT * FROM trades ORDER BY entry_date, exit_date, id")]
         scoring_rows = [dict(row) for row in connection.execute("SELECT * FROM scoring_results ORDER BY date, rank, id")]
@@ -1053,7 +1058,8 @@ def _portfolio_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> d
 
 
 def _trade_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
-    closed = [row for row in rows if row.get("action") == "SELL" or row.get("exit_date")]
+    filled_rows = [row for row in rows if _is_filled_trade(row)]
+    closed = [row for row in filled_rows if row.get("action") == "SELL" or row.get("exit_date")]
     wins = [row for row in closed if row.get("result") == "WIN"]
     losses = [row for row in closed if row.get("result") == "LOSS"]
     gross_profits = [float(row.get("gross_profit") or row.get("profit") or 0) for row in closed]
@@ -1070,7 +1076,7 @@ def _trade_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> dict[
     ]
     loss_over_stop_rows = [row for row in losses if row.get("profit_rate") is not None and float(row["profit_rate"]) < stop_loss_rate]
     holding_days = [float(row["holding_days"]) for row in closed if row.get("holding_days") is not None]
-    slippages = [float(row["slippage_rate"]) for row in rows if row.get("slippage_rate") is not None]
+    slippages = [float(row["slippage_rate"]) for row in filled_rows if row.get("slippage_rate") is not None]
     total_commission = round(sum(float(row.get("total_commission") or 0) for row in closed), 2)
     trade_estimated_tax_total = round(sum(float(row.get("estimated_tax") or 0) for row in closed), 2)
     estimated_tax_total = calculate_period_estimated_tax(gross_profit_total, total_commission, config)
@@ -1089,7 +1095,7 @@ def _trade_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> dict[
     best_trade = max(closed, key=lambda row: float(row.get("gross_profit") or row.get("profit") or 0), default=None)
     worst_trade = min(closed, key=lambda row: float(row.get("gross_profit") or row.get("profit") or 0), default=None)
     return {
-        "total_trades": len([row for row in rows if row.get("action") in {"BUY", "SELL"}]),
+        "total_trades": len([row for row in filled_rows if row.get("action") in {"BUY", "SELL"}]),
         "closed_trades": len(closed),
         "winning_trades": win_count,
         "losing_trades": loss_count,
@@ -1125,8 +1131,8 @@ def _trade_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> dict[
         "net_profit_total": net_profit_total,
         "average_slippage": _average(slippages),
         "max_slippage": max(slippages, key=abs) if slippages else None,
-        "gap_up_count": sum(1 for row in rows if row.get("slippage_rate") is not None and float(row["slippage_rate"]) > 0),
-        "gap_down_count": sum(1 for row in rows if row.get("slippage_rate") is not None and float(row["slippage_rate"]) < 0),
+        "gap_up_count": sum(1 for row in filled_rows if row.get("slippage_rate") is not None and float(row["slippage_rate"]) > 0),
+        "gap_down_count": sum(1 for row in filled_rows if row.get("slippage_rate") is not None and float(row["slippage_rate"]) < 0),
     }
 
 
@@ -1208,7 +1214,7 @@ def _reflection_analysis(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _config_version_analysis(trade_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
-    for row in trade_rows:
+    for row in [item for item in trade_rows if _is_filled_trade(item)]:
         version = row.get("config_version") or "unknown"
         grouped.setdefault(version, []).append(row)
 
@@ -1231,7 +1237,7 @@ def _config_version_analysis(trade_rows: list[dict[str, Any]]) -> list[dict[str,
 
 def _sector_win_rate_analysis(trade_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
-    for row in trade_rows:
+    for row in [item for item in trade_rows if _is_filled_trade(item)]:
         if not (row.get("action") == "SELL" or row.get("exit_date")):
             continue
         sector = row.get("sector_name") or "未分類"
@@ -1256,17 +1262,18 @@ def _sector_win_rate_analysis(trade_rows: list[dict[str, Any]]) -> list[dict[str
 
 
 def _profile_analysis(portfolio_rows: list[dict[str, Any]], trade_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    filled_trade_rows = [row for row in trade_rows if _is_filled_trade(row)]
     profile_ids = sorted(
         {
             row.get("profile_id") or "unknown"
-            for row in portfolio_rows + trade_rows
+            for row in portfolio_rows + filled_trade_rows
             if row.get("profile_id") or row.get("profile_name")
         }
     )
     summaries = []
     for profile_id in profile_ids:
         p_rows = [row for row in portfolio_rows if (row.get("profile_id") or "unknown") == profile_id]
-        t_rows = [row for row in trade_rows if (row.get("profile_id") or "unknown") == profile_id]
+        t_rows = [row for row in filled_trade_rows if (row.get("profile_id") or "unknown") == profile_id]
         latest = p_rows[-1] if p_rows else {}
         closed = [row for row in t_rows if row.get("action") == "SELL" or row.get("exit_date")]
         wins = [row for row in closed if row.get("result") == "WIN"]
@@ -1281,6 +1288,22 @@ def _profile_analysis(portfolio_rows: list[dict[str, Any]], trade_rows: list[dic
             }
         )
     return summaries
+
+
+def _is_filled_trade(row: dict[str, Any]) -> bool:
+    if row.get("action") not in {"BUY", "SELL"}:
+        return False
+    return str(row.get("order_status") or row.get("status") or "").upper() == "FILLED"
+
+
+def _delete_non_trade_order_rows(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        DELETE FROM trades
+        WHERE UPPER(COALESCE(order_status, '')) IN ('PENDING', 'REJECTED', 'CANCELLED', 'PREVIEW')
+           OR action NOT IN ('BUY', 'SELL')
+        """
+    )
 
 
 def _average(values: list[float]) -> float | None:
