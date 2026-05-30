@@ -1144,22 +1144,53 @@ python src/main.py --mode preview-orders --provider jquants --date 2026-03-06
 J-Quants実データで指定期間のバックテストを行う場合は以下を実行します。
 
 ```bash
-python src/main.py --mode backtest --provider jquants --start-date 2026-03-02 --end-date 2026-03-06
+python src/main.py --mode backtest --provider jquants --profile rookie_dealer_01 --start-date 2026-03-02 --end-date 2026-03-06
 ```
 
 `backtest` は通常運用の `logs/portfolio/state.json` を使わず、バックテスト専用のポートフォリオ状態で指定期間を順番に検証します。実売買は行わず、kabuステーションAPIにも接続しません。
 
 バックテストでは、指定期間に必要な価格データを取得し、既存キャッシュがあれば再利用します。各営業日ごとに、指標計算、スクリーニング、スコアリング、仮想売買、日報Markdown生成、note記事Markdown生成を実行します。
 
+OpenAI / ChatGPT APIを使わず、新人ディーラー1号のルールベースのみで90日バックテストする場合は、profileを以下の状態にします。
+
+- `ai_decision.enabled: false`
+- `ai_commentary.provider: rule_based`
+- `broker.provider: paper`
+- `broker.live_trading_enabled: false`
+- `safety.allow_live_trading: false`
+
+実行例:
+
+```bash
+python src/main.py --mode backtest --provider jquants --profile rookie_dealer_01 --start-date YYYY-MM-DD --end-date YYYY-MM-DD
+python src/main.py --mode analyze --profile rookie_dealer_01
+```
+
 結果は以下に保存します。
 
-- `logs/backtests/YYYY-MM-DD_to_YYYY-MM-DD/`: 日別の売買ログ、ポートフォリオログ、採点ログ、振り返りログ、CSV
-- `reports/backtest_YYYY-MM-DD_to_YYYY-MM-DD.md`: バックテストサマリMarkdown
-- `reports/backtest_YYYY-MM-DD_to_YYYY-MM-DD.json`: バックテストサマリJSON
-- `reports/backtests/YYYY-MM-DD_to_YYYY-MM-DD/day_YYYY-MM-DD.md`: 日別レポート
-- `articles/drafts/backtests/YYYY-MM-DD_to_YYYY-MM-DD/day_YYYY-MM-DD.md`: 日別note下書き
+- `logs/backtests/<profile_id>/YYYY-MM-DD_to_YYYY-MM-DD/`: 日別の売買ログ、ポートフォリオログ、採点ログ、振り返りログ、CSV
+- `reports/<profile_id>/backtest_YYYY-MM-DD_to_YYYY-MM-DD.md`: バックテストサマリMarkdown
+- `reports/<profile_id>/backtest_YYYY-MM-DD_to_YYYY-MM-DD.json`: バックテストサマリJSON
+- `reports/backtests/rule_based_90d_summary_YYYY-MM-DD_to_YYYY-MM-DD.md`: OpenAIなし90日検証用Markdownサマリ
+- `reports/backtests/<profile_id>/YYYY-MM-DD_to_YYYY-MM-DD/day_YYYY-MM-DD.md`: 日別レポート
+- `articles/drafts/backtests/<profile_id>/YYYY-MM-DD_to_YYYY-MM-DD/day_YYYY-MM-DD.md`: 日別note下書き
 
-バックテストサマリには、開始日、終了日、初期資金、最終資産、累計損益、累計損益率、勝率、総取引数、利確回数、損切り回数、最大保有期間売却回数、最大ドローダウン、ベスト取引、ワースト取引、日別資産推移、新人ディーラー1号コメントを保存します。
+バックテストサマリでは最低限、以下を確認します。
+
+- `initial_capital`
+- `final_assets`
+- `gross_cumulative_profit`
+- `net_cumulative_profit`
+- `net_cumulative_profit_rate`
+- `total_trades`
+- `win_rate`
+- `max_drawdown`
+- `profit_factor`
+- `take_profit_count`
+- `stop_loss_count`
+- `max_holding_exit_count`
+- `no_trade_days`
+- `selected_count_total`
 
 J-Quants Freeプランでは、取得できる株価データが12週間遅延データである可能性があります。バックテストおよび開発検証では、この遅延を前提として扱ってください。
 

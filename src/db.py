@@ -1010,6 +1010,10 @@ def _trade_analysis(rows: list[dict[str, Any]]) -> dict[str, Any]:
     closed = [row for row in rows if row.get("action") == "SELL" or row.get("exit_date")]
     wins = [row for row in closed if row.get("result") == "WIN"]
     losses = [row for row in closed if row.get("result") == "LOSS"]
+    gross_profits = [float(row.get("gross_profit") or row.get("profit") or 0) for row in closed]
+    gross_profit_total = round(sum(gross_profits), 2)
+    gross_win_total = round(sum(value for value in gross_profits if value > 0), 2)
+    gross_loss_total = round(sum(value for value in gross_profits if value < 0), 2)
     profit_rates = [float(row["profit_rate"]) for row in closed if row.get("profit_rate") is not None]
     win_rates = [float(row["profit_rate"]) for row in wins if row.get("profit_rate") is not None]
     loss_rates = [float(row["profit_rate"]) for row in losses if row.get("profit_rate") is not None]
@@ -1030,7 +1034,10 @@ def _trade_analysis(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "max_holding_exit_count": sum(1 for row in closed if row.get("exit_reason") == "最大保有期間到達"),
         "total_commission": round(sum(float(row.get("total_commission") or 0) for row in closed), 2),
         "estimated_tax_total": round(sum(float(row.get("estimated_tax") or 0) for row in closed), 2),
-        "gross_profit_total": round(sum(float(row.get("gross_profit") or row.get("profit") or 0) for row in closed), 2),
+        "gross_profit_total": gross_profit_total,
+        "gross_win_total": gross_win_total,
+        "gross_loss_total": gross_loss_total,
+        "profit_factor": round(gross_win_total / abs(gross_loss_total), 4) if gross_loss_total < 0 else None,
         "net_profit_total": round(sum(float(row.get("net_profit") or row.get("profit") or 0) for row in closed), 2),
         "average_slippage": _average(slippages),
         "max_slippage": max(slippages, key=abs) if slippages else None,

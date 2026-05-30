@@ -187,31 +187,52 @@ reports/order_previews/order_preview_YYYY-MM-DD.json
 ## 8. バックテスト
 
 ```bash
-python src/main.py --mode backtest --provider jquants --start-date YYYY-MM-DD --end-date YYYY-MM-DD
+python src/main.py --mode backtest --provider jquants --profile rookie_dealer_01 --start-date YYYY-MM-DD --end-date YYYY-MM-DD
 ```
 
 例:
 
 ```bash
-python src/main.py --mode backtest --provider jquants --start-date 2026-03-02 --end-date 2026-03-06
+python src/main.py --mode backtest --provider jquants --profile rookie_dealer_01 --start-date 2026-03-02 --end-date 2026-06-05
+python src/main.py --mode analyze --profile rookie_dealer_01
 ```
 
 確認すること:
 
-- 最終資産
-- 勝率
-- 最大ドローダウン
-- 取引数
-- 税引後損益
+- `initial_capital`
+- `final_assets`
+- `gross_cumulative_profit`
+- `net_cumulative_profit`
+- `net_cumulative_profit_rate`
+- `total_trades`
+- `win_rate`
+- `max_drawdown`
+- `profit_factor`
+- `take_profit_count`
+- `stop_loss_count`
+- `max_holding_exit_count`
+- `no_trade_days`
+- `selected_count_total`
 
 バックテストは通常運用の `logs/portfolio/state.json` を壊さず、バックテスト専用の状態で実行します。
+
+OpenAI / ChatGPT APIを使わず、ルールベースのみで90日バックテストする場合は、`config/profiles/rookie_dealer_01.yaml` を以下の状態にします。
+
+- `ai_decision.enabled: false`
+- `ai_commentary.provider: rule_based`
+- `broker.provider: paper`
+- `broker.live_trading_enabled: false`
+- `safety.allow_live_trading: false`
+
+この構成では `OPENAI_API_KEY` が未設定でも実行できます。候補銘柄の最終判断とコメント生成はルールベースで完結し、実売買は行いません。J-Quants Freeプランでは12週間遅延データを前提に検証します。
 
 代表的な保存先:
 
 ```text
-logs/backtests/YYYY-MM-DD_to_YYYY-MM-DD/
-reports/backtest_YYYY-MM-DD_to_YYYY-MM-DD.md
-reports/backtest_YYYY-MM-DD_to_YYYY-MM-DD.json
+logs/backtests/<profile_id>/YYYY-MM-DD_to_YYYY-MM-DD/
+reports/<profile_id>/backtest_YYYY-MM-DD_to_YYYY-MM-DD.md
+reports/<profile_id>/backtest_YYYY-MM-DD_to_YYYY-MM-DD.json
+reports/backtests/rule_based_90d_summary_YYYY-MM-DD_to_YYYY-MM-DD.md
 ```
 
 ## 9. 分析レポート

@@ -48,6 +48,19 @@ ai_commentary:
   provider: rule_based
   fallback_to_rule_based: true
 
+# Broker設定。
+# paper: 仮想売買のみ。証券会社APIへ発注しない。
+broker:
+  provider: paper
+  live_trading_enabled: false
+
+# Safety設定。
+# allow_live_trading: false のため、実売買は許可しない。
+safety:
+  mode: paper
+  allow_live_trading: false
+  require_manual_approval_for_live: true
+
 initial_capital: 1000000
 
 # 売買ルールのprofile差分。

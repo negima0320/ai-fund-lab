@@ -526,6 +526,7 @@ def run_analyze(config: dict[str, Any]) -> None:
     print(f"estimated_tax_total: {_format_optional_number(portfolio.get('estimated_tax_total'))}")
     print(f"total_commission: {_format_optional_number(portfolio.get('total_commission'))}")
     print(f"win_rate: {_format_optional_percent(trades['win_rate'])}")
+    print(f"profit_factor: {_format_optional_number(trades.get('profit_factor'))}")
     print(f"max_drawdown: {_format_optional_percent(portfolio['max_drawdown'])}")
     print(f"total_trades: {trades['total_trades']}")
     print(f"markdown: {markdown_path.relative_to(ROOT)}")
@@ -2543,6 +2544,17 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
     print(f"cumulative_profit: {summary['cumulative_profit']}")
     print(f"summary_md: {Path(summary['report_markdown_path']).relative_to(ROOT)}")
     print(f"summary_json: {Path(summary['report_json_path']).relative_to(ROOT)}")
+    if _is_rule_based_backtest(config):
+        print("")
+        print("Rule-based 90d backtest completed")
+        print("")
+        print(f"- final_assets: {summary['final_assets']}")
+        print(f"- net_cumulative_profit: {summary.get('net_cumulative_profit')}")
+        print(f"- net_cumulative_profit_rate: {summary.get('net_cumulative_profit_rate')}")
+        print(f"- win_rate: {summary.get('win_rate')}")
+        print(f"- max_drawdown: {summary.get('max_drawdown')}")
+        print(f"- total_trades: {summary.get('total_trades')}")
+        print(f"- report_path: {Path(summary['rule_based_90d_report_path']).relative_to(ROOT)}")
 
 
 def _run_daily_step(step_number: int, total_steps: int, step_name: str, action: Any) -> Any:
@@ -3187,6 +3199,11 @@ def write_backtest_summary(
     final_assets = float(state.get("total_assets", initial_capital))
     closed_trades = state.get("closed_trades", [])
     executed_trade_actions = [trade for trade in all_trades if trade.get("action") in {"BUY", "SELL"}]
+    gross_profits = [float(trade.get("gross_profit", trade.get("profit", 0)) or 0) for trade in closed_trades]
+    gross_profit_total = round(sum(gross_profits), 2)
+    gross_win_total = round(sum(value for value in gross_profits if value > 0), 2)
+    gross_loss_total = round(sum(value for value in gross_profits if value < 0), 2)
+    net_cumulative_profit = round(sum(float(trade.get("net_profit", trade.get("profit", 0)) or 0) for trade in closed_trades), 2)
     wins = sum(1 for trade in closed_trades if trade.get("result") == "WIN")
     win_rate = round(wins / len(closed_trades), 4) if closed_trades else None
     take_profit_count = sum(1 for trade in closed_trades if trade.get("exit_reason") == "利確")
@@ -3204,20 +3221,43 @@ def write_backtest_summary(
         }
         for item in daily_summaries
     ]
+    selected_count_total = 0
+    no_trade_days = 0
+    for scoring_file in sorted(backtest_dir.glob("scoring_*.json")):
+        scoring = read_json(scoring_file)
+        selected_count = len(scoring.get("selected", []))
+        selected_count_total += selected_count
+        if selected_count == 0:
+            no_trade_days += 1
+    net_cumulative_profit_rate = round(net_cumulative_profit / initial_capital, 4) if initial_capital else None
     summary = {
         "start_date": start_date_text,
         "end_date": end_date_text,
+        "profile_id": profile_id_from(config),
+        "profile_name": profile_name_from(config),
+        "provider": "jquants",
+        "broker": config.get("broker", {}).get("provider", "paper"),
+        "openai": "disabled" if _is_rule_based_backtest(config) else "enabled",
         "config_version": config_version_from(config),
         "initial_capital": initial_capital,
         "final_assets": round(final_assets, 2),
         "cumulative_profit": round(final_assets - initial_capital, 2),
         "cumulative_profit_rate": round((final_assets - initial_capital) / initial_capital, 4),
+        "gross_cumulative_profit": gross_profit_total,
+        "net_cumulative_profit": net_cumulative_profit,
+        "net_cumulative_profit_rate": net_cumulative_profit_rate,
+        "profit_factor": round(gross_win_total / abs(gross_loss_total), 4) if gross_loss_total < 0 else None,
+        "gross_profit_total": gross_profit_total,
+        "gross_win_total": gross_win_total,
+        "gross_loss_total": gross_loss_total,
         "win_rate": win_rate,
         "total_trades": len(executed_trade_actions),
         "closed_trades_count": len(closed_trades),
         "take_profit_count": take_profit_count,
         "stop_loss_count": stop_loss_count,
         "max_holding_exit_count": max_holding_exit_count,
+        "no_trade_days": no_trade_days,
+        "selected_count_total": selected_count_total,
         "max_drawdown": daily_summaries[-1]["max_drawdown"] if daily_summaries else 0.0,
         "best_trade": best_trade,
         "worst_trade": worst_trade,
@@ -3226,17 +3266,35 @@ def write_backtest_summary(
     }
     report_json_path = ROOT / "reports" / profile_id_from(config) / f"backtest_{range_key}.json"
     report_md_path = ROOT / "reports" / profile_id_from(config) / f"backtest_{range_key}.md"
+    rule_based_90d_report_path = ROOT / "reports" / "backtests" / f"rule_based_90d_summary_{range_key}.md"
     log_summary_path = backtest_dir / "backtest_summary.json"
     summary["report_json_path"] = str(report_json_path)
     summary["report_markdown_path"] = str(report_md_path)
+    summary["rule_based_90d_report_path"] = str(rule_based_90d_report_path)
     summary["log_summary_path"] = str(log_summary_path)
 
     write_json(report_json_path, summary)
     write_json(log_summary_path, {**summary, "all_trades": all_trades, "state": state})
     write_text(report_md_path, render_backtest_summary_markdown(summary, config))
+    if _is_rule_based_backtest(config):
+        write_text(rule_based_90d_report_path, render_rule_based_90d_summary_markdown(summary))
     write_summary_csv(backtest_dir / "summary.csv", daily_summaries)
     write_trades_csv(backtest_dir / "trades.csv", closed_trades)
     return summary
+
+
+def _is_rule_based_backtest(config: dict[str, Any]) -> bool:
+    ai_decision = config.get("ai_decision", {})
+    ai_commentary = config.get("ai_commentary", {})
+    broker = config.get("broker", {})
+    safety = config.get("safety", {})
+    return (
+        not bool(ai_decision.get("enabled", False))
+        and ai_commentary.get("provider", "rule_based") == "rule_based"
+        and broker.get("provider", "paper") == "paper"
+        and not bool(broker.get("live_trading_enabled", False))
+        and not bool(safety.get("allow_live_trading", False))
+    )
 
 
 def render_backtest_summary_markdown(summary: dict[str, Any], config: dict[str, Any]) -> str:
@@ -3254,11 +3312,17 @@ def render_backtest_summary_markdown(summary: dict[str, Any], config: dict[str, 
         f"- 最終資産: {summary['final_assets']:,.0f}円",
         f"- 累計損益: {summary['cumulative_profit']:,.0f}円",
         f"- 累計損益率: {summary['cumulative_profit_rate']:.2%}",
+        f"- 税引前損益: {_format_optional_yen(summary.get('gross_cumulative_profit'))}",
+        f"- 税引後損益: {_format_optional_yen(summary.get('net_cumulative_profit'))}",
+        f"- 税引後損益率: {_format_optional_percent(summary.get('net_cumulative_profit_rate'))}",
         f"- 勝率: {_format_optional_rate(summary['win_rate'])}",
+        f"- profit factor: {_format_optional_number(summary.get('profit_factor'))}",
         f"- 総取引数: {summary['total_trades']}",
         f"- 利確回数: {summary['take_profit_count']}",
         f"- 損切り回数: {summary['stop_loss_count']}",
         f"- 最大保有期間売却回数: {summary['max_holding_exit_count']}",
+        f"- no trade日数: {summary.get('no_trade_days', 0)}",
+        f"- selected_count合計: {summary.get('selected_count_total', 0)}",
         f"- 最大ドローダウン: {summary['max_drawdown']:.2%}",
         "",
         "## ベスト取引",
@@ -3281,6 +3345,56 @@ def render_backtest_summary_markdown(summary: dict[str, Any], config: dict[str, 
                 f"累計損益 {item['cumulative_profit']:,.0f}円, DD {item['max_drawdown']:.2%}"
             )
     lines.extend(["", "## 新人ディーラー1号コメント", "", summary["dealer_comment"], ""])
+    return "\n".join(lines)
+
+
+def render_rule_based_90d_summary_markdown(summary: dict[str, Any]) -> str:
+    lines = [
+        f"# Rule-based 90d Backtest Summary {summary['start_date']} to {summary['end_date']}",
+        "",
+        "## 実行条件",
+        "",
+        f"- 期間: {summary['start_date']} 〜 {summary['end_date']}",
+        f"- profile: {summary.get('profile_id')} {summary.get('profile_name')}",
+        f"- provider: {summary.get('provider', 'jquants')}",
+        "- ChatGPT/OpenAI: disabled",
+        f"- broker: {summary.get('broker', 'paper')}",
+        f"- config_version: {summary.get('config_version')}",
+        "",
+        "## 結果サマリ",
+        "",
+        f"- 初期資金: {_format_optional_yen(summary.get('initial_capital'))}",
+        f"- 最終資産: {_format_optional_yen(summary.get('final_assets'))}",
+        f"- 税引前損益: {_format_optional_yen(summary.get('gross_cumulative_profit'))}",
+        f"- 税引後損益: {_format_optional_yen(summary.get('net_cumulative_profit'))}",
+        f"- 税引後損益率: {_format_optional_percent(summary.get('net_cumulative_profit_rate'))}",
+        f"- 勝率: {_format_optional_percent(summary.get('win_rate'))}",
+        f"- profit factor: {_format_optional_number(summary.get('profit_factor'))}",
+        f"- 最大ドローダウン: {_format_optional_percent(summary.get('max_drawdown'))}",
+        f"- 総取引数: {summary.get('total_trades')}",
+        f"- 利確回数: {summary.get('take_profit_count')}",
+        f"- 損切り回数: {summary.get('stop_loss_count')}",
+        f"- 最大保有期間売却回数: {summary.get('max_holding_exit_count')}",
+        f"- no trade日数: {summary.get('no_trade_days')}",
+        f"- selected_count合計: {summary.get('selected_count_total')}",
+        "",
+        "## 新人ディーラー1号コメント",
+        "",
+        summary.get("dealer_comment", ""),
+        "",
+        "## 次に見るべき改善ポイント",
+        "",
+        "- selected_count_total と no_trade_days を見て、スクリーニングが厳しすぎないか確認する。",
+        "- profit factor と勝率を合わせて、利幅と損切り幅のバランスを確認する。",
+        "- 最大ドローダウンがrisk_marginの許容範囲内か確認する。",
+        "- 利確、損切り、最大保有期間売却の比率を見て、出口ルールが短期売買に合っているか確認する。",
+        "- J-Quants Freeプランの12週間遅延データ前提で、複数期間でも再現するか確認する。",
+        "",
+        "## 注意",
+        "",
+        "OpenAI / ChatGPT APIは使わず、ルールベースのみで検証しています。PaperBrokerによる仮想売買であり、実売買は行いません。",
+        "",
+    ]
     return "\n".join(lines)
 
 
@@ -3323,6 +3437,7 @@ def render_analysis_markdown(analysis: dict[str, Any]) -> str:
         f"- 勝ち取引数: {trades['winning_trades']}",
         f"- 負け取引数: {trades['losing_trades']}",
         f"- 勝率: {_format_optional_percent(trades['win_rate'])}",
+        f"- profit factor: {_format_optional_number(trades.get('profit_factor'))}",
         f"- 平均利益率: {_format_optional_percent(trades['average_profit_rate'])}",
         f"- 平均損失率: {_format_optional_percent(trades['average_loss_rate'])}",
         f"- 平均保有日数: {_format_optional_number(trades['average_holding_days'])}",
