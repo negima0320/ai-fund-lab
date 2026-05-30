@@ -678,6 +678,18 @@ def _profile_compare_row(config: dict[str, Any], db_path: Path, start_date_text:
                 (profile_id, start_date_text, end_date_text),
             )
         ]
+        scoring_rows = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT *
+                FROM scoring_results
+                WHERE profile_id = ? AND date BETWEEN ? AND ?
+                ORDER BY date, rank, id
+                """,
+                (profile_id, start_date_text, end_date_text),
+            )
+        ]
 
     latest = portfolio_rows[-1] if portfolio_rows else {}
     pf_metrics = profit_factor_metrics(trade_rows)
@@ -721,6 +733,8 @@ def _profile_compare_row(config: dict[str, Any], db_path: Path, start_date_text:
                 if row.get("profit_rate") is not None and float(row["profit_rate"]) < float(config.get("risk", {}).get("stop_loss_pct", -0.03))
             ]
         ),
+        "conditional_selected_count": _conditional_selected_count(scoring_rows),
+        "conditional_rejected_count": _conditional_rejected_count(scoring_rows),
         "score_detail": score_detail_groups(closed),
     }
 
@@ -756,6 +770,10 @@ def build_profile_diff_analysis(
         "target_risk_off_candidate_count": _risk_off_candidate_count(target_rows),
         "base_risk_off_rejected_count": _risk_off_rejected_count(base_rows),
         "target_risk_off_rejected_count": _risk_off_rejected_count(target_rows),
+        "base_conditional_selected_count": _conditional_selected_count(base_rows),
+        "target_conditional_selected_count": _conditional_selected_count(target_rows),
+        "base_conditional_rejected_count": _conditional_rejected_count(base_rows),
+        "target_conditional_rejected_count": _conditional_rejected_count(target_rows),
         "newly_selected_count": len(newly_selected_keys),
         "removed_count": len(removed_keys),
         "newly_selected": [_selection_diff_record(target_selected[key]) for key in newly_selected_keys],
@@ -813,6 +831,22 @@ def _risk_off_rejected_count(rows: list[dict[str, Any]]) -> int:
     )
 
 
+def _conditional_selected_count(rows: list[dict[str, Any]]) -> int:
+    return sum(
+        1
+        for row in rows
+        if bool(row.get("selected")) and str(row.get("reason") or "").startswith("conditional selected")
+    )
+
+
+def _conditional_rejected_count(rows: list[dict[str, Any]]) -> int:
+    return sum(
+        1
+        for row in rows
+        if not bool(row.get("selected")) and str(row.get("rejected_reason") or "").startswith("conditional rejected")
+    )
+
+
 def _selection_diff_record(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "date": row.get("date"),
@@ -833,6 +867,9 @@ def _effective_config_differences(base_config: dict[str, Any], target_config: di
         ("market_filter", "risk_off_min_score"),
         ("market_filter", "risk_off_disable_top_pick"),
         ("selection", "min_score"),
+        ("selection", "fallback_min_score"),
+        ("selection", "top_pick_min_score"),
+        ("selection", "conditional_selection"),
         ("selection", "max_rsi_for_new_position"),
         ("volume_filter", "min_volume_ratio"),
         ("execution", "stop_loss_execution"),
@@ -909,8 +946,8 @@ def render_compare_profiles_markdown(payload: dict[str, Any]) -> str:
     lines = [
         f"# Profile比較 {payload['start_date']} to {payload['end_date']}",
         "",
-        "| profile | stop_loss_execution | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | avg_holding_days | closed | wins | losses | excluded | avg_win | avg_loss | total_trades | loss_over_stop_count |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| profile | stop_loss_execution | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | avg_holding_days | closed | wins | losses | excluded | avg_win | avg_loss | total_trades | loss_over_stop_count | conditional_selected | conditional_rejected |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in payload["profiles"]:
         lines.append(
@@ -931,7 +968,9 @@ def render_compare_profiles_markdown(payload: dict[str, Any]) -> str:
             f"{_format_optional_percent(row.get('average_win_profit_rate'))} | "
             f"{_format_optional_percent(row.get('average_loss_profit_rate'))} | "
             f"{row.get('total_trades')} | "
-            f"{row.get('loss_over_stop_count')} |"
+            f"{row.get('loss_over_stop_count')} | "
+            f"{row.get('conditional_selected_count')} | "
+            f"{row.get('conditional_rejected_count')} |"
         )
     if payload.get("ranking"):
         lines.extend(["", "## Profile Ranking", ""])
@@ -980,14 +1019,18 @@ def _profile_diff_analysis_lines(analysis: dict[str, Any]) -> list[str]:
     lines = [
         f"- base_profile: {analysis.get('base_profile_id')} {analysis.get('base_profile_name') or ''}",
         f"- target_profile: {analysis.get('target_profile_id')} {analysis.get('target_profile_name') or ''}",
-        f"- v2.1 selected count: {analysis.get('base_selected_count')}",
-        f"- v2.2 selected count: {analysis.get('target_selected_count')}",
-        f"- v2.1 risk_off candidate count: {analysis.get('base_risk_off_candidate_count')}",
-        f"- v2.2 risk_off candidate count: {analysis.get('target_risk_off_candidate_count')}",
-        f"- v2.1 risk_off rejected count: {analysis.get('base_risk_off_rejected_count')}",
-        f"- v2.2 risk_off rejected count: {analysis.get('target_risk_off_rejected_count')}",
-        f"- newly selected by v2.2: {analysis.get('newly_selected_count')}",
-        f"- removed by v2.2: {analysis.get('removed_count')}",
+        f"- base selected count: {analysis.get('base_selected_count')}",
+        f"- target selected count: {analysis.get('target_selected_count')}",
+        f"- base risk_off candidate count: {analysis.get('base_risk_off_candidate_count')}",
+        f"- target risk_off candidate count: {analysis.get('target_risk_off_candidate_count')}",
+        f"- base risk_off rejected count: {analysis.get('base_risk_off_rejected_count')}",
+        f"- target risk_off rejected count: {analysis.get('target_risk_off_rejected_count')}",
+        f"- base conditional selected count: {analysis.get('base_conditional_selected_count')}",
+        f"- target conditional selected count: {analysis.get('target_conditional_selected_count')}",
+        f"- base conditional rejected count: {analysis.get('base_conditional_rejected_count')}",
+        f"- target conditional rejected count: {analysis.get('target_conditional_rejected_count')}",
+        f"- newly selected by target: {analysis.get('newly_selected_count')}",
+        f"- removed by target: {analysis.get('removed_count')}",
     ]
     if analysis.get("no_practical_effect"):
         lines.extend(["", "No practical effect"])
@@ -1002,9 +1045,9 @@ def _profile_diff_analysis_lines(analysis: dict[str, Any]) -> list[str]:
         )
     else:
         lines.append("- 差分なし")
-    lines.extend(["", "### Newly Selected by v2.2", ""])
+    lines.extend(["", "### Newly Selected by Target", ""])
     lines.extend(_selection_diff_lines(analysis.get("newly_selected", [])))
-    lines.extend(["", "### Removed by v2.2", ""])
+    lines.extend(["", "### Removed by Target", ""])
     lines.extend(_selection_diff_lines(analysis.get("removed", [])))
     return lines
 
@@ -4411,6 +4454,8 @@ def render_analysis_markdown(analysis: dict[str, Any]) -> str:
         "## スコア分析",
         "",
         f"- selected銘柄数: {scores['selected_count']}",
+        f"- conditional selected count: {scores.get('conditional_selected_count', 0)}",
+        f"- conditional rejected count: {scores.get('conditional_rejected_count', 0)}",
         f"- selected銘柄の平均スコア: {_format_optional_number(scores['selected_average_score'])}",
         f"- rejected銘柄の平均スコア: {_format_optional_number(scores['rejected_average_score'])}",
         "",

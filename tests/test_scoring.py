@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scoring import score_real_candidates
+from scoring import _apply_selection_rules, _selection_config, score_real_candidates
 
 
 def candidate(
@@ -24,6 +24,66 @@ def candidate(
         "turnover_value": turnover_value,
         "five_day_volatility": volatility,
         "fallback": False,
+    }
+
+
+def scored_item(
+    code: str,
+    *,
+    total_score: float,
+    volume_ratio: float,
+    rsi: float,
+    candlestick_signals: list[str] | None = None,
+    confidence: float = 0.8,
+) -> dict:
+    return {
+        "code": code,
+        "name": f"Test{code}",
+        "total_score": total_score,
+        "confidence": confidence,
+        "volume_ratio": volume_ratio,
+        "rsi": rsi,
+        "candlestick_signals": candlestick_signals or [],
+        "selected": False,
+        "reason": "",
+        "selection_reason": "",
+        "selected_reason": "",
+        "rejected_reason": "",
+        "rsi_selection_excluded": False,
+        "volume_filter_excluded": False,
+        "market_filter_applied": False,
+        "market_filter_reason": "",
+    }
+
+
+def conditional_selection_config(config_copy: dict) -> dict:
+    config_copy["selection"] = {
+        **config_copy["selection"],
+        "min_score": 70,
+        "fallback_min_score": 65,
+        "top_pick_min_score": 65,
+        "conditional_selection": {
+            "enabled": True,
+            "low_score_range": {"min": 65, "max": 69},
+            "allow_if": {
+                "min_volume_ratio": 3.0,
+                "required_candlestick_signals": ["volume_confirmed_breakout"],
+                "min_rsi": 50,
+                "max_rsi": 65,
+                "allowed_market_regimes": ["risk_on", "neutral"],
+            },
+        },
+    }
+    return _selection_config(config_copy)
+
+
+def disabled_market_filter() -> dict:
+    return {
+        "enabled": False,
+        "risk_off_buy_policy": "conservative",
+        "risk_off_max_buy_orders": 1,
+        "risk_off_min_score": 75,
+        "risk_off_disable_top_pick": True,
     }
 
 
@@ -80,6 +140,100 @@ def test_no_selection_below_top_pick_threshold(config_copy: dict) -> None:
     )
     assert result["scores"][0]["total_score"] < config_copy["selection"]["top_pick_min_score"]
     assert len(result["selected"]) == 0
+
+
+def test_conditional_selection_accepts_low_score_when_strong_conditions_match(config_copy: dict) -> None:
+    scored = [
+        scored_item(
+            "1001",
+            total_score=68,
+            volume_ratio=3.2,
+            rsi=55,
+            candlestick_signals=["volume_confirmed_breakout"],
+        )
+    ]
+
+    _apply_selection_rules(scored, conditional_selection_config(config_copy), disabled_market_filter(), "neutral")
+
+    assert scored[0]["selected"] is True
+    assert scored[0]["conditional_selection_checked"] is True
+    assert scored[0]["conditional_selection_matched"] is True
+    assert scored[0]["selection_reason"] == "conditional selected: 低スコア例外条件を満たしたため採用"
+
+
+def test_conditional_selection_rejects_low_score_when_conditions_do_not_match(config_copy: dict) -> None:
+    scored = [
+        scored_item(
+            "1001",
+            total_score=68,
+            volume_ratio=2.9,
+            rsi=55,
+            candlestick_signals=["bullish_candle"],
+        )
+    ]
+
+    _apply_selection_rules(scored, conditional_selection_config(config_copy), disabled_market_filter(), "neutral")
+
+    assert scored[0]["selected"] is False
+    assert scored[0]["conditional_selection_checked"] is True
+    assert scored[0]["conditional_selection_matched"] is False
+    assert scored[0]["rejected_reason"].startswith("conditional rejected:")
+    assert "volume_ratio" in scored[0]["rejected_reason"]
+    assert "candlestick_signal" in scored[0]["rejected_reason"]
+
+
+def test_conditional_selection_keeps_regular_selection_for_score_70_or_more(config_copy: dict) -> None:
+    scored = [
+        scored_item(
+            "1001",
+            total_score=70,
+            volume_ratio=2.1,
+            rsi=55,
+            candlestick_signals=["bullish_candle"],
+        )
+    ]
+
+    _apply_selection_rules(scored, conditional_selection_config(config_copy), disabled_market_filter(), "neutral")
+
+    assert scored[0]["selected"] is True
+    assert scored[0]["conditional_selection_checked"] is False
+    assert scored[0]["selection_reason"] == "スコア基準を満たしたため採用"
+
+
+def test_conditional_selection_rejects_score_under_65(config_copy: dict) -> None:
+    scored = [
+        scored_item(
+            "1001",
+            total_score=64,
+            volume_ratio=4.0,
+            rsi=55,
+            candlestick_signals=["volume_confirmed_breakout"],
+        )
+    ]
+
+    _apply_selection_rules(scored, conditional_selection_config(config_copy), disabled_market_filter(), "neutral")
+
+    assert scored[0]["selected"] is False
+    assert scored[0]["conditional_selection_checked"] is False
+    assert scored[0]["rejected_reason"] == "トップピック基準65点を下回るため落選"
+
+
+def test_v2_1_style_selection_still_allows_top_pick_without_conditional_rules(config_copy: dict) -> None:
+    scored = [
+        scored_item(
+            "1001",
+            total_score=68,
+            volume_ratio=2.1,
+            rsi=55,
+            candlestick_signals=["bullish_candle"],
+        )
+    ]
+    selection_config = _selection_config(config_copy)
+
+    _apply_selection_rules(scored, selection_config, disabled_market_filter(), "neutral")
+
+    assert scored[0]["selected"] is True
+    assert scored[0]["selection_reason"] == "通常基準70点には届かなかったが、ノートレード回避ルールにより最上位候補として採用"
 
 
 def test_risk_off_blocks_low_score_candidate(config_copy: dict) -> None:

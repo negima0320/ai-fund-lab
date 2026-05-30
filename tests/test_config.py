@@ -122,6 +122,33 @@ def test_rookie_dealer_02_v2_dot_3_alias_loads() -> None:
     assert profile["selection"]["min_score"] == 72
 
 
+def test_rookie_dealer_02_v2_4_profile_uses_conditional_selection() -> None:
+    base = load_profile("rookie_dealer_02_v2_1")
+    profile = load_profile("rookie_dealer_02_v2_4")
+    conditional = profile["selection"]["conditional_selection"]
+
+    assert profile["profile_id"] == "rookie_dealer_02_v2_4"
+    assert profile["profile_name"] == "新人ディーラー2号 v2.4"
+    assert profile["selection"]["min_score"] == 70
+    assert profile["selection"]["fallback_min_score"] == 65
+    assert profile["selection"]["top_pick_min_score"] == 65
+    assert conditional["enabled"] is True
+    assert conditional["low_score_range"] == {"min": 65, "max": 69}
+    assert conditional["allow_if"]["min_volume_ratio"] == 3.0
+    assert conditional["allow_if"]["required_candlestick_signals"] == ["volume_confirmed_breakout"]
+    assert conditional["allow_if"]["min_rsi"] == 50
+    assert conditional["allow_if"]["max_rsi"] == 65
+    assert conditional["allow_if"]["allowed_market_regimes"] == ["risk_on", "neutral"]
+    assert "conditional_selection" not in base["selection"]
+
+
+def test_rookie_dealer_02_v2_dot_4_alias_loads() -> None:
+    profile = load_profile("rookie_dealer_02_v2.4")
+
+    assert profile["profile_id"] == "rookie_dealer_02_v2_4"
+    assert profile["selection"]["conditional_selection"]["enabled"] is True
+
+
 def test_rookie_dealer_02_v3_profile_uses_score_and_volume_filters() -> None:
     profile = load_profile("rookie_dealer_02_v3")
 

@@ -1402,6 +1402,8 @@ def _score_analysis(rows: list[dict[str, Any]]) -> dict[str, Any]:
     all_scores = [float(row["total_score"]) for row in rows if row.get("total_score") is not None]
     return {
         "selected_count": len(selected),
+        "conditional_selected_count": _conditional_selected_count(selected),
+        "conditional_rejected_count": _conditional_rejected_count(rejected),
         "selected_average_score": _average(selected_scores),
         "rejected_average_score": _average(rejected_scores),
         "score_bands": {
@@ -1412,6 +1414,14 @@ def _score_analysis(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "under_60": sum(1 for score in all_scores if score < 60),
         },
     }
+
+
+def _conditional_selected_count(rows: list[dict[str, Any]]) -> int:
+    return sum(1 for row in rows if str(row.get("reason") or "").startswith("conditional selected"))
+
+
+def _conditional_rejected_count(rows: list[dict[str, Any]]) -> int:
+    return sum(1 for row in rows if str(row.get("rejected_reason") or "").startswith("conditional rejected"))
 
 
 def _reflection_analysis(rows: list[dict[str, Any]]) -> dict[str, Any]:

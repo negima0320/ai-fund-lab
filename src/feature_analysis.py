@@ -87,6 +87,7 @@ def build_feature_analysis(
         "start_date": start_date,
         "end_date": end_date,
         "closed_trade_count": len(records),
+        "conditional_selected_trade_count": _conditional_selected_trade_count(records),
         "missing_feature_counts": _missing_feature_counts(records),
         "rsi_filter_rejected_count": rsi_filter["count"],
         "rsi_filter_rejected_avg_score": rsi_filter["average_score"],
@@ -125,6 +126,7 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         f"- start_date: {analysis.get('start_date') or 'all'}",
         f"- end_date: {analysis.get('end_date') or 'all'}",
         f"- closed_trade_count: {analysis.get('closed_trade_count')}",
+        f"- conditional_selected_trade_count: {analysis.get('conditional_selected_trade_count', 0)}",
         f"- missing_feature_counts: {json.dumps(analysis.get('missing_feature_counts', {}), ensure_ascii=False)}",
         f"- rsi_filter_rejected_count: {analysis.get('rsi_filter_rejected_count')}",
         f"- rsi_filter_rejected_avg_score: {_format_number(analysis.get('rsi_filter_rejected_avg_score'))}",
@@ -192,6 +194,7 @@ def _feature_record(trade: dict[str, Any], entry_market: dict[str, Any] | None =
         "advance_ratio": advance_ratio,
         "sector_name": trade.get("sector_name"),
         "candlestick_signals": _json_list(trade.get("candlestick_signals")),
+        "selected_reason": trade.get("selected_reason") or trade.get("reason"),
         "total_score": _number(trade.get("total_score") or trade.get("score")),
         "technical_score": _number(trade.get("technical_score")),
         "financial_score": _number(trade.get("financial_score")),
@@ -207,6 +210,10 @@ def _feature_record(trade: dict[str, Any], entry_market: dict[str, Any] | None =
         "score_components_total": _number(trade.get("score_components_total")) or _number(score_components.get("component_total")),
         "score_components_match": _bool_or_none(trade.get("score_components_match"), score_components.get("matches_total_score")),
     }
+
+
+def _conditional_selected_trade_count(records: list[dict[str, Any]]) -> int:
+    return sum(1 for record in records if str(record.get("selected_reason") or "").startswith("conditional selected"))
 
 
 def _rsi_filter_rejection_summary(rows: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, Any]:

@@ -492,7 +492,7 @@ def test_profile_diff_analysis_compares_v2_1_and_v2_2(tmp_path) -> None:
         }
     )
     assert "## Profile Diff Analysis" in markdown
-    assert "- newly selected by v2.2: 1" in markdown
+    assert "- newly selected by target: 1" in markdown
     assert "2026-03-06 1002 Newly Selected" in markdown
 
 

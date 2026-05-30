@@ -238,6 +238,9 @@ def score_real_candidates(
                 "selection_reason": "",
                 "selected_reason": "",
                 "rejected_reason": "",
+                "conditional_selection_checked": False,
+                "conditional_selection_matched": False,
+                "conditional_selection_reason": "",
                 "market_filter_applied": False,
                 "market_regime": market_regime,
                 "advance_ratio": advance_ratio,
@@ -302,6 +305,11 @@ def _apply_selection_rules(
             item["market_filter_applied"] = True
             item["market_filter_reason"] = "risk_offのため買付抑制"
 
+        conditional_result = _conditional_selection_result(item, selection_config, market_regime)
+        item["conditional_selection_checked"] = conditional_result["checked"]
+        item["conditional_selection_matched"] = conditional_result["matched"]
+        item["conditional_selection_reason"] = conditional_result["reason"]
+
         if _meets_regular_selection(item, {**selection_config, "min_score": min_score}) and selected_count < max_selected:
             item["selected"] = True
             reason = "スコア基準を満たしたため採用"
@@ -311,8 +319,19 @@ def _apply_selection_rules(
             item["selected_reason"] = item["selection_reason"]
             item["reason"] = item["selection_reason"]
             selected_count += 1
+        elif conditional_result["matched"] and selected_count < max_selected:
+            item["selected"] = True
+            item["selection_reason"] = "conditional selected: 低スコア例外条件を満たしたため採用"
+            item["selected_reason"] = item["selection_reason"]
+            item["reason"] = item["selection_reason"]
+            selected_count += 1
         else:
-            item["rejected_reason"] = _real_rejected_reason(item, selected_count, {**selection_config, "min_score": min_score, "max_selected": max_selected})
+            if conditional_result["matched"] and selected_count >= max_selected:
+                item["rejected_reason"] = "上位候補だが最大採用数を超えたため落選"
+            elif conditional_result["checked"] and not conditional_result["matched"]:
+                item["rejected_reason"] = f"conditional rejected: {conditional_result['reason']}"
+            else:
+                item["rejected_reason"] = _real_rejected_reason(item, selected_count, {**selection_config, "min_score": min_score, "max_selected": max_selected})
             if risk_off and (item["total_score"] < min_score or selected_count >= max_selected):
                 item["rejected_reason"] = "risk_offのため買付抑制"
             item["reason"] = item["rejected_reason"]
@@ -323,7 +342,7 @@ def _apply_selection_rules(
 
     if selected_count == 0 and top_pick_allowed:
         for item in scored:
-            if _meets_top_pick_selection(item, selection_config):
+            if _meets_top_pick_selection(item, selection_config) and not _is_conditional_low_score_candidate(item, selection_config):
                 item["selected"] = True
                 item["selection_reason"] = "通常基準70点には届かなかったが、ノートレード回避ルールにより最上位候補として採用"
                 item["selected_reason"] = item["selection_reason"]
@@ -347,6 +366,9 @@ def _apply_selection_rules(
 def _selection_config(config: dict[str, Any]) -> dict[str, Any]:
     selection = config.get("selection", {})
     max_rsi = _optional_float(selection.get("max_rsi_for_new_position"))
+    conditional = selection.get("conditional_selection", {})
+    low_score_range = conditional.get("low_score_range", {}) if isinstance(conditional, dict) else {}
+    allow_if = conditional.get("allow_if", {}) if isinstance(conditional, dict) else {}
     return {
         "min_score": float(selection.get("min_score", 70)),
         "fallback_min_score": float(selection.get("fallback_min_score", 65)),
@@ -356,6 +378,20 @@ def _selection_config(config: dict[str, Any]) -> dict[str, Any]:
         "max_selected": int(selection.get("max_selected", config["portfolio"].get("max_positions", 5))),
         "max_rsi_for_new_position": max_rsi,
         "reject_overheated_rsi": bool(selection.get("reject_overheated_rsi", False)),
+        "conditional_selection": {
+            "enabled": bool(conditional.get("enabled", False)) if isinstance(conditional, dict) else False,
+            "low_score_range": {
+                "min": float(low_score_range.get("min", selection.get("fallback_min_score", 65))),
+                "max": float(low_score_range.get("max", selection.get("min_score", 70) - 1)),
+            },
+            "allow_if": {
+                "min_volume_ratio": _optional_float(allow_if.get("min_volume_ratio")) if isinstance(allow_if, dict) else None,
+                "required_candlestick_signals": list(allow_if.get("required_candlestick_signals", [])) if isinstance(allow_if, dict) else [],
+                "min_rsi": _optional_float(allow_if.get("min_rsi")) if isinstance(allow_if, dict) else None,
+                "max_rsi": _optional_float(allow_if.get("max_rsi")) if isinstance(allow_if, dict) else None,
+                "allowed_market_regimes": list(allow_if.get("allowed_market_regimes", [])) if isinstance(allow_if, dict) else [],
+            },
+        },
     }
 
 
@@ -491,6 +527,62 @@ def _meets_regular_selection(item: dict[str, Any], selection_config: dict[str, A
     if item.get("volume_filter_excluded"):
         return False
     return item["total_score"] >= selection_config["min_score"] and item["confidence"] >= selection_config["min_confidence"]
+
+
+def _conditional_selection_result(item: dict[str, Any], selection_config: dict[str, Any], market_regime: str) -> dict[str, Any]:
+    conditional = selection_config.get("conditional_selection", {})
+    if not conditional.get("enabled"):
+        return {"checked": False, "matched": False, "reason": ""}
+    if not _is_conditional_low_score_candidate(item, selection_config):
+        return {"checked": False, "matched": False, "reason": ""}
+    if item.get("rsi_selection_excluded"):
+        return {"checked": True, "matched": False, "reason": "RSI過熱のため新規買付見送り"}
+    if item.get("volume_filter_excluded"):
+        return {"checked": True, "matched": False, "reason": "出来高倍率不足のため新規買付見送り"}
+    if item["confidence"] < selection_config["min_confidence"]:
+        return {"checked": True, "matched": False, "reason": "信頼度基準を満たさないため落選"}
+
+    allow_if = conditional.get("allow_if", {})
+    failures = []
+    volume_ratio = _optional_float(item.get("volume_ratio"))
+    min_volume_ratio = allow_if.get("min_volume_ratio")
+    if min_volume_ratio is not None and (volume_ratio is None or volume_ratio < min_volume_ratio):
+        failures.append(f"volume_ratioが{min_volume_ratio:.1f}未満")
+
+    signals = set(str(signal) for signal in item.get("candlestick_signals", []) if signal)
+    required_signals = [str(signal) for signal in allow_if.get("required_candlestick_signals", [])]
+    missing_signals = [signal for signal in required_signals if signal not in signals]
+    if missing_signals:
+        failures.append("必要なcandlestick_signal不足")
+
+    rsi = _optional_float(item.get("rsi"))
+    min_rsi = allow_if.get("min_rsi")
+    max_rsi = allow_if.get("max_rsi")
+    if min_rsi is not None and (rsi is None or rsi < min_rsi):
+        failures.append(f"RSIが{min_rsi:.0f}未満")
+    if max_rsi is not None and (rsi is None or rsi >= max_rsi):
+        failures.append(f"RSIが{max_rsi:.0f}以上")
+
+    allowed_market_regimes = [str(value) for value in allow_if.get("allowed_market_regimes", [])]
+    if allowed_market_regimes and market_regime not in allowed_market_regimes:
+        failures.append("market_regimeが許可対象外")
+
+    if failures:
+        return {"checked": True, "matched": False, "reason": "、".join(failures)}
+    return {"checked": True, "matched": True, "reason": "低スコア例外条件をすべて満たした"}
+
+
+def _is_conditional_low_score_candidate(item: dict[str, Any], selection_config: dict[str, Any]) -> bool:
+    conditional = selection_config.get("conditional_selection", {})
+    if not conditional.get("enabled"):
+        return False
+    score = _optional_float(item.get("total_score"))
+    if score is None:
+        return False
+    low_score_range = conditional.get("low_score_range", {})
+    min_score = float(low_score_range.get("min", selection_config["fallback_min_score"]))
+    max_score = float(low_score_range.get("max", selection_config["min_score"] - 1))
+    return min_score <= score <= max_score
 
 
 def _meets_top_pick_selection(item: dict[str, Any], selection_config: dict[str, Any]) -> bool:
