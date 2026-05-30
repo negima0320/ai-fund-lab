@@ -42,6 +42,10 @@ jquants:
   rate_limit_per_minute: 5
   request_timeout_seconds: 20
 
+backtest:
+  disable_news_fetch: true
+  disable_openai: true
+
 database:
   path: storage/ai_fund_lab.sqlite3
 

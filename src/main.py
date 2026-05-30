@@ -6,6 +6,7 @@ import csv
 import json
 import os
 import sqlite3
+import sys
 import time
 from argparse import ArgumentParser
 from datetime import date, datetime, timedelta
@@ -66,10 +67,12 @@ from technical_indicators import TechnicalIndicatorDependencyError
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config" / "rookie_dealer.yaml"
 ACTIVE_PROFILE_ID = DEFAULT_PROFILE_ID
+BACKTEST_MODE_ACTIVE = False
 
 
 def main() -> None:
     global ACTIVE_PROFILE_ID
+    _enable_line_buffered_output()
     args = parse_args()
     ACTIVE_PROFILE_ID = args.profile
     if args.mode == "help":
@@ -1820,6 +1823,14 @@ def run_score(provider_name: str, target_date_text: str) -> None:
 
 def run_ai_decision_if_enabled(scoring_log: dict[str, Any], config: dict[str, Any], target_date_text: str) -> dict[str, Any] | None:
     ai_config = config.get("ai_decision", {})
+    if BACKTEST_MODE_ACTIVE and _backtest_disable_openai(config):
+        scoring_log["ai_decision"] = {
+            "enabled": False,
+            "provider": "rule_based",
+            "fallback_used": False,
+            "reason": "backtest.disable_openai is true",
+        }
+        return None
     if not ai_config.get("enabled", False):
         scoring_log["ai_decision"] = {
             "enabled": False,
@@ -1913,6 +1924,9 @@ def _latest_portfolio_summary_for_ai_decision() -> dict[str, Any]:
 
 
 def fetch_candidate_news(candidates: list[dict[str, Any]], target_date_text: str, config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    if BACKTEST_MODE_ACTIVE and _backtest_disable_news(config):
+        print(f"news fetch skipped for backtest: candidates={len(candidates)}")
+        return {}
     if not bool(config.get("features", {}).get("news", config.get("news", {}).get("enabled", True))):
         return {}
     provider = build_news_provider(config, ROOT)
@@ -2461,12 +2475,14 @@ def run_daily(provider_name: str, target_date_text: str) -> None:
 
 
 def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -> None:
+    global BACKTEST_MODE_ACTIVE
     if provider_name != "jquants":
         raise SystemExit("backtest mode currently supports --provider jquants only.")
     start_date = date.fromisoformat(start_date_text)
     end_date = date.fromisoformat(end_date_text)
     range_key = f"{start_date_text}_to_{end_date_text}"
     config = load_config(CONFIG_PATH)
+    BACKTEST_MODE_ACTIVE = True
     profile_id = profile_id_from(config)
     backtest_dir = ROOT / "logs" / "backtests" / profile_id / range_key
     report_dir = ROOT / "reports" / "backtests" / profile_id / range_key
@@ -2486,40 +2502,66 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
             raise SystemExit("No cached trading days found for the backtest period. The period may be weekend, holiday, or unavailable.")
 
         print(f"backtest trading_days: {len(trading_dates)}")
+        print(f"backtest news fetch: {'disabled' if _backtest_disable_news(config) else 'enabled'}")
+        print(f"backtest OpenAI: {'disabled' if _backtest_disable_openai(config) else 'configured by profile'}")
         for index, trading_date in enumerate(trading_dates, start=1):
             target_date_text = trading_date.isoformat()
             print(f"[day {index}/{len(trading_dates)}] {target_date_text} start")
-            ensure_indicators(provider_name, target_date_text)
-            ensure_market_context(provider_name, target_date_text)
-            run_screen(provider_name, target_date_text)
-            scoring_log = score_for_date(provider_name, target_date_text)
-            scored_candidates = enrich_candidates_with_position_prices(scoring_log.get("scores", []), state, target_date_text)
-            state, portfolio_summary, trades = execute_real_data_paper_trade(scored_candidates, state, config, target_date_text)
-            attach_config_version(portfolio_summary, config)
-            for trade in trades:
-                trade.setdefault("config_version", config_version_from(config))
-            scoring_log.setdefault("config_version", config_version_from(config))
-            attach_commentary(portfolio_summary, trades, scored_candidates, config)
-            safety_events = portfolio_summary.get("safety_events", [])
-            trade_result = {
-                "state": state,
-                "portfolio_summary": portfolio_summary,
-                "trades": trades,
-                "safety_events": safety_events,
-                "candidate_count": scoring_log.get("candidate_count", len(scoring_log.get("scores", []))),
-                "selected_count": len(scoring_log.get("selected", [])),
-            }
-            reflection_path = write_backtest_reflections(backtest_dir, target_date_text, trade_result)
-            report_path, article_path = write_backtest_daily_markdown(report_dir, article_dir, target_date_text, trade_result, scoring_log)
+            _run_backtest_day_step(index, len(trading_dates), target_date_text, "calculate-indicators", lambda: ensure_indicators(provider_name, target_date_text), lambda: _backtest_indicator_metrics(target_date_text))
+            _run_backtest_day_step(index, len(trading_dates), target_date_text, "market-context", lambda: ensure_market_context(provider_name, target_date_text), lambda: _backtest_market_context_metrics(target_date_text))
+            _run_backtest_day_step(index, len(trading_dates), target_date_text, "screen", lambda: run_screen(provider_name, target_date_text), lambda: _backtest_screen_metrics(config, target_date_text))
+            scoring_log = _run_backtest_day_step(index, len(trading_dates), target_date_text, "score", lambda: score_for_date(provider_name, target_date_text), lambda: _backtest_score_metrics(config, target_date_text))
+            _run_backtest_day_step(index, len(trading_dates), target_date_text, "ai-decision", lambda: _backtest_ai_decision_status(scoring_log, config), lambda: _backtest_ai_decision_metrics(scoring_log))
 
-            write_json(backtest_dir / f"trades_{target_date_text}.json", {"date": target_date_text, "provider": provider_name, "config_version": config_version_from(config), "trades": trades})
-            write_json(backtest_dir / f"portfolio_{target_date_text}.json", portfolio_summary)
-            write_json(backtest_dir / f"safety_{target_date_text}.json", {"date": target_date_text, "config_version": config_version_from(config), "safety_events": trade_result.get("safety_events", [])})
-            write_json(backtest_dir / f"scoring_{target_date_text}.json", scoring_log)
-            save_portfolio_snapshot(config, ROOT, portfolio_summary)
-            save_trades(config, ROOT, target_date_text, trades)
-            save_pending_orders(config, ROOT, state.get("pending_orders", []))
-            save_safety_events(config, ROOT, target_date_text, trade_result.get("safety_events", []))
+            trade_context: dict[str, Any] = {}
+
+            def run_trade_step() -> dict[str, Any]:
+                nonlocal state
+                scored_candidates = enrich_candidates_with_position_prices(scoring_log.get("scores", []), state, target_date_text)
+                state, portfolio_summary, trades = execute_real_data_paper_trade(scored_candidates, state, config, target_date_text)
+                attach_config_version(portfolio_summary, config)
+                for trade in trades:
+                    trade.setdefault("config_version", config_version_from(config))
+                scoring_log.setdefault("config_version", config_version_from(config))
+                attach_commentary(portfolio_summary, trades, scored_candidates, config)
+                safety_events = portfolio_summary.get("safety_events", [])
+                trade_result = {
+                    "state": state,
+                    "portfolio_summary": portfolio_summary,
+                    "trades": trades,
+                    "safety_events": safety_events,
+                    "candidate_count": scoring_log.get("candidate_count", len(scoring_log.get("scores", []))),
+                    "selected_count": len(scoring_log.get("selected", [])),
+                }
+                trade_context.update({"portfolio_summary": portfolio_summary, "trades": trades, "trade_result": trade_result})
+                return trade_result
+
+            trade_result = _run_backtest_day_step(index, len(trading_dates), target_date_text, "trade", run_trade_step, lambda: _backtest_trade_metrics(trade_context))
+
+            report_context: dict[str, Any] = {}
+
+            def run_reports_step() -> tuple[Path, Path, Path]:
+                reflection_path = write_backtest_reflections(backtest_dir, target_date_text, trade_result)
+                report_path, article_path = write_backtest_daily_markdown(report_dir, article_dir, target_date_text, trade_result, scoring_log)
+                report_context.update({"reflection_path": reflection_path, "report_path": report_path, "article_path": article_path})
+                return reflection_path, report_path, article_path
+
+            reflection_path, report_path, article_path = _run_backtest_day_step(index, len(trading_dates), target_date_text, "reports/articles", run_reports_step, lambda: _backtest_report_metrics(report_context))
+
+            portfolio_summary = trade_context["portfolio_summary"]
+            trades = trade_context["trades"]
+
+            def run_db_save_step() -> None:
+                write_json(backtest_dir / f"trades_{target_date_text}.json", {"date": target_date_text, "provider": provider_name, "config_version": config_version_from(config), "trades": trades})
+                write_json(backtest_dir / f"portfolio_{target_date_text}.json", portfolio_summary)
+                write_json(backtest_dir / f"safety_{target_date_text}.json", {"date": target_date_text, "config_version": config_version_from(config), "safety_events": trade_result.get("safety_events", [])})
+                write_json(backtest_dir / f"scoring_{target_date_text}.json", scoring_log)
+                save_portfolio_snapshot(config, ROOT, portfolio_summary)
+                save_trades(config, ROOT, target_date_text, trades)
+                save_pending_orders(config, ROOT, state.get("pending_orders", []))
+                save_safety_events(config, ROOT, target_date_text, trade_result.get("safety_events", []))
+
+            _run_backtest_day_step(index, len(trading_dates), target_date_text, "db-save", run_db_save_step, lambda: _backtest_db_save_metrics(trades, trade_result))
             daily_summaries.append(portfolio_summary)
             all_trades.extend(trades)
             processed_dates.append(target_date_text)
@@ -2540,15 +2582,18 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
         )
     except SystemExit as exc:
         print(f"backtest failed during step: {getattr(exc, 'step_name', 'unknown')}")
+        BACKTEST_MODE_ACTIVE = False
         raise
     except KeyboardInterrupt as exc:
         print("")
         print("backtest interrupted by Ctrl+C")
         print("No live orders were sent. Partial cache and logs remain on disk.")
+        BACKTEST_MODE_ACTIVE = False
         raise SystemExit(130) from exc
     except Exception as exc:
         print(f"backtest failed during step: {getattr(exc, 'step_name', 'unknown')}")
         print(f"reason: {exc}")
+        BACKTEST_MODE_ACTIVE = False
         raise SystemExit(1) from exc
 
     print("backtest completed")
@@ -2571,6 +2616,7 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
         print(f"- max_drawdown: {summary.get('max_drawdown')}")
         print(f"- total_trades: {summary.get('total_trades')}")
         print(f"- report_path: {Path(summary['rule_based_90d_report_path']).relative_to(ROOT)}")
+    BACKTEST_MODE_ACTIVE = False
 
 
 def _run_daily_step(step_number: int, total_steps: int, step_name: str, action: Any) -> Any:
@@ -2587,6 +2633,141 @@ def _run_daily_step(step_number: int, total_steps: int, step_name: str, action: 
         raise
     print(f"[{step_number}/{total_steps}] {step_name} done")
     return result
+
+
+def _enable_line_buffered_output() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except AttributeError:
+            pass
+
+
+def _run_backtest_day_step(
+    day_number: int,
+    total_days: int,
+    target_date_text: str,
+    step_name: str,
+    action: Any,
+    metrics: Any | None = None,
+) -> Any:
+    prefix = f"[day {day_number}/{total_days}] {target_date_text} {step_name}"
+    print(f"{prefix} start")
+    started_at = time.perf_counter()
+    try:
+        result = action()
+    except KeyboardInterrupt:
+        elapsed = time.perf_counter() - started_at
+        print(f"{prefix} interrupted after {elapsed:.1f}s")
+        raise
+    except Exception:
+        elapsed = time.perf_counter() - started_at
+        print(f"{prefix} failed after {elapsed:.1f}s")
+        raise
+    elapsed = time.perf_counter() - started_at
+    print(f"{prefix} done in {elapsed:.1f}s")
+    if metrics:
+        for line in metrics() or []:
+            print(f"  {line}")
+    return result
+
+
+def _backtest_indicator_metrics(target_date_text: str) -> list[str]:
+    path = ROOT / "data" / "processed" / f"indicators_{target_date_text}.json"
+    if not path.exists():
+        return ["indicators file: missing"]
+    payload = read_json(path)
+    return [
+        f"indicators input rows: {payload.get('input_rows', 'N/A')}",
+        f"indicators calculated: {payload.get('calculated_count', len(payload.get('indicators', [])))}",
+        f"indicators excluded: {payload.get('excluded_count', 'N/A')}",
+    ]
+
+
+def _backtest_market_context_metrics(target_date_text: str) -> list[str]:
+    context = load_market_context_for_date(target_date_text, "jquants")
+    return [
+        f"market regime: {context.get('market_regime', 'N/A')}",
+        f"advance ratio: {_format_optional_percent(context.get('advance_ratio'))}",
+        f"sector count: {len(context.get('sector_momentum', []))}",
+    ]
+
+
+def _backtest_screen_metrics(config: dict[str, Any], target_date_text: str) -> list[str]:
+    indicator_path = ROOT / "data" / "processed" / f"indicators_{target_date_text}.json"
+    indicators = read_json(indicator_path).get("indicators", []) if indicator_path.exists() else []
+    candidates_path = processed_profile_path(config, f"candidates_{target_date_text}.json")
+    candidates = read_json(candidates_path).get("candidates", []) if candidates_path.exists() else []
+    return [
+        f"screen target stocks: {len(indicators)}",
+        f"screen candidates: {len(candidates)}",
+    ]
+
+
+def _backtest_score_metrics(config: dict[str, Any], target_date_text: str) -> list[str]:
+    path = processed_profile_path(config, f"scored_candidates_{target_date_text}.json")
+    payload = read_json(path) if path.exists() else {}
+    scores = payload.get("scores", [])
+    return [
+        f"scoring candidates: {payload.get('candidate_count', len(scores))}",
+        f"scored candidates: {payload.get('scored_count', len(scores))}",
+        f"selected candidates: {payload.get('selected_count', sum(1 for item in scores if item.get('selected')))}",
+    ]
+
+
+def _backtest_ai_decision_status(scoring_log: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    if _backtest_disable_openai(config):
+        scoring_log["ai_decision"] = {
+            "enabled": False,
+            "provider": "rule_based",
+            "fallback_used": False,
+            "reason": "backtest.disable_openai is true",
+        }
+    return scoring_log.get("ai_decision", {})
+
+
+def _backtest_ai_decision_metrics(scoring_log: dict[str, Any]) -> list[str]:
+    decision = scoring_log.get("ai_decision", {})
+    return [
+        f"ai_decision enabled: {str(bool(decision.get('enabled', False))).lower()}",
+        f"ai_decision provider: {decision.get('provider', 'rule_based')}",
+        f"ai_decision fallback: {str(bool(decision.get('fallback_used', False))).lower()}",
+    ]
+
+
+def _backtest_trade_metrics(context: dict[str, Any]) -> list[str]:
+    trades = context.get("trades", [])
+    summary = context.get("portfolio_summary", {})
+    return [
+        f"trade input scores: {context.get('trade_result', {}).get('candidate_count', 'N/A')}",
+        f"buy orders: {sum(1 for trade in trades if trade.get('action') == 'BUY')}",
+        f"sell orders: {sum(1 for trade in trades if trade.get('action') == 'SELL')}",
+        f"total assets: {summary.get('total_assets', 'N/A')}",
+    ]
+
+
+def _backtest_report_metrics(context: dict[str, Any]) -> list[str]:
+    return [
+        f"report: {_relative_path_text(context.get('report_path'))}",
+        f"article: {_relative_path_text(context.get('article_path'))}",
+        f"reflections: {_relative_path_text(context.get('reflection_path'))}",
+    ]
+
+
+def _backtest_db_save_metrics(trades: list[dict[str, Any]], trade_result: dict[str, Any]) -> list[str]:
+    return [
+        f"trades saved: {len(trades)}",
+        f"safety events saved: {len(trade_result.get('safety_events', []))}",
+        f"selected count saved: {trade_result.get('selected_count', 0)}",
+    ]
+
+
+def _backtest_disable_news(config: dict[str, Any]) -> bool:
+    return bool(config.get("backtest", {}).get("disable_news_fetch", True))
+
+
+def _backtest_disable_openai(config: dict[str, Any]) -> bool:
+    return bool(config.get("backtest", {}).get("disable_openai", True))
 
 
 def ensure_prices(provider_name: str, target_date_text: str) -> None:
