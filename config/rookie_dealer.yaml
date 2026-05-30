@@ -40,6 +40,7 @@ kabu_station:
 jquants:
   plan: free
   rate_limit_per_minute: 5
+  request_timeout_seconds: 20
 
 database:
   path: storage/ai_fund_lab.sqlite3

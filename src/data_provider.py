@@ -113,7 +113,7 @@ class JQuantsDataProvider(BaseDataProvider):
     Real API fetches are intentionally left as TODO for the next phase.
     """
 
-    def __init__(self, env_path: Optional[Path] = None) -> None:
+    def __init__(self, env_path: Optional[Path] = None, timeout_seconds: int = 20) -> None:
         _load_env(env_path)
         api_key = os.getenv("JQUANTS_API_KEY")
         if not api_key:
@@ -122,6 +122,7 @@ class JQuantsDataProvider(BaseDataProvider):
         self.api_key = api_key
         self.base_url = "https://api.jquants.com/v2"
         self.default_headers = {"x-api-key": self.api_key}
+        self.timeout_seconds = timeout_seconds
 
     def get_listed_stocks(self) -> list[dict[str, Any]]:
         payload = self._get_json("/equities/master")
@@ -157,7 +158,7 @@ class JQuantsDataProvider(BaseDataProvider):
     def _get_json(self, path: str) -> Any:
         request = self._build_request(path)
         try:
-            with urlopen(request, timeout=20) as response:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
                 body = response.read().decode("utf-8")
         except HTTPError as exc:
             if exc.code in {401, 403}:

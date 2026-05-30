@@ -1588,18 +1588,29 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
         raise SystemExit("Prime stock list is empty. Re-run list-stocks and check the result.")
 
     config = load_config(CONFIG_PATH)
+    fetch_dates = previous_business_dates(target_date, 60)
     try:
-        provider = JQuantsDataProvider(ROOT / ".env")
+        provider = JQuantsDataProvider(
+            ROOT / ".env",
+            timeout_seconds=int(config.get("jquants", {}).get("request_timeout_seconds", 20)),
+        )
         price_rows = fetch_price_history(
             provider,
             target_date,
             prime_codes,
             lookback_business_days=60,
             rate_limit_per_minute=int(config.get("jquants", {}).get("rate_limit_per_minute", 5)),
+            fetch_dates=fetch_dates,
+            continue_on_error=True,
+            verbose=False,
         )
     except RuntimeError as exc:
-        print(f"J-Quants indicator source fetch failed: {exc}")
-        raise SystemExit(1) from exc
+        price_rows = load_cached_price_history(fetch_dates)
+        if price_rows:
+            print(f"J-Quants indicator source fetch failed; using cached price history. reason={exc}")
+        else:
+            print(f"J-Quants indicator source fetch failed: {exc}")
+            raise SystemExit(1) from exc
 
     if not price_rows:
         raise SystemExit(f"No price history found for {target_date_text}. The date may be weekend, holiday, or not updated yet.")
@@ -2530,6 +2541,11 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
     except SystemExit as exc:
         print(f"backtest failed during step: {getattr(exc, 'step_name', 'unknown')}")
         raise
+    except KeyboardInterrupt as exc:
+        print("")
+        print("backtest interrupted by Ctrl+C")
+        print("No live orders were sent. Partial cache and logs remain on disk.")
+        raise SystemExit(130) from exc
     except Exception as exc:
         print(f"backtest failed during step: {getattr(exc, 'step_name', 'unknown')}")
         print(f"reason: {exc}")
@@ -3066,13 +3082,26 @@ def ensure_price_history_for_backtest(provider_name: str, start_date: date, end_
         raise SystemExit("backtest mode currently supports --provider jquants only.")
 
     target_dates = business_dates_between(start_date, end_date)
+    print(f"fetch-period-prices target period: {start_date.isoformat()} to {end_date.isoformat()}")
+    print(f"fetch-period-prices target business days: {len(target_dates)}")
     if target_dates and all((ROOT / "data" / "processed" / f"indicators_{target.isoformat()}.json").exists() for target in target_dates):
         print("backtest price history: using cached indicator files")
         return
 
     prime_path = ROOT / "data" / "raw" / "prime_stocks_jquants.json"
     if not prime_path.exists():
-        run_list_stocks(provider_name)
+        print("fetch-period-prices prime stock cache: missing; fetching J-Quants master")
+        try:
+            run_list_stocks(provider_name)
+        except (RuntimeError, SystemExit) as exc:
+            cached_dates = available_cached_price_dates(start_date, end_date)
+            if cached_dates:
+                print(
+                    "fetch-period-prices warning: prime stock master fetch failed; "
+                    f"continuing with {len(cached_dates)} cached backtest day(s). reason={exc}"
+                )
+                return
+            raise
 
     prime_payload = read_json(prime_path)
     prime_codes = {stock["code"] for stock in prime_payload.get("stocks", [])}
@@ -3082,18 +3111,56 @@ def ensure_price_history_for_backtest(provider_name: str, start_date: date, end_
     config = load_config(CONFIG_PATH)
     lookback_start = previous_business_dates(start_date, 30)[0]
     fetch_dates = business_dates_between(lookback_start, end_date)
-    if fetch_dates and all(load_cached_prime_prices(fetch_date) is not None for fetch_date in fetch_dates):
+    cached_dates = [fetch_date for fetch_date in fetch_dates if load_cached_prime_prices(fetch_date) is not None]
+    missing_dates = [fetch_date for fetch_date in fetch_dates if load_cached_prime_prices(fetch_date) is None]
+    print(
+        "fetch-period-prices price cache: "
+        f"cached={len(cached_dates)} missing={len(missing_dates)} total={len(fetch_dates)} "
+        f"lookback_start={lookback_start.isoformat()}"
+    )
+    for fetch_date in cached_dates:
+        print(f"fetch-period-prices cache hit: {fetch_date.isoformat()}")
+    if fetch_dates and not missing_dates:
         print("backtest price history: using cached price files")
         return
 
-    provider = JQuantsDataProvider(ROOT / ".env")
-    fetch_price_history(
-        provider,
-        end_date,
-        prime_codes,
-        lookback_business_days=len(fetch_dates),
-        rate_limit_per_minute=int(config.get("jquants", {}).get("rate_limit_per_minute", 5)),
-    )
+    try:
+        provider = JQuantsDataProvider(
+            ROOT / ".env",
+            timeout_seconds=int(config.get("jquants", {}).get("request_timeout_seconds", 20)),
+        )
+    except RuntimeError as exc:
+        usable_dates = available_cached_price_dates(start_date, end_date)
+        if usable_dates:
+            print(
+                "fetch-period-prices warning: J-Quants provider unavailable; "
+                f"continuing with {len(usable_dates)} cached backtest day(s). reason={exc}"
+            )
+            return
+        raise
+    try:
+        fetch_price_history(
+            provider,
+            end_date,
+            prime_codes,
+            lookback_business_days=len(fetch_dates),
+            rate_limit_per_minute=int(config.get("jquants", {}).get("rate_limit_per_minute", 5)),
+            fetch_dates=fetch_dates,
+            continue_on_error=True,
+            verbose=True,
+        )
+    except KeyboardInterrupt:
+        print("fetch-period-prices interrupted. Existing cache is preserved.")
+        raise
+
+    usable_dates = available_cached_price_dates(start_date, end_date)
+    if usable_dates:
+        print(
+            "fetch-period-prices completed with cached usable days: "
+            f"{len(usable_dates)}/{len(target_dates)}"
+        )
+        return
+    print("fetch-period-prices completed, but no usable cached dates were found for the target period.")
 
 
 def available_cached_price_dates(start_date: date, end_date: date) -> list[date]:
@@ -3611,19 +3678,48 @@ def fetch_price_history(
     prime_codes: set[str],
     lookback_business_days: int,
     rate_limit_per_minute: int,
+    fetch_dates: list[date] | None = None,
+    continue_on_error: bool = False,
+    verbose: bool = False,
 ) -> list[dict[str, Any]]:
     rows = []
     api_requests = 0
     request_interval = 60 / max(rate_limit_per_minute, 1)
-    for fetch_date in previous_business_dates(target_date, lookback_business_days):
+    target_fetch_dates = fetch_dates or previous_business_dates(target_date, lookback_business_days)
+    total_dates = len(target_fetch_dates)
+    for index, fetch_date in enumerate(target_fetch_dates, start=1):
         cached_rows = load_cached_prime_prices(fetch_date)
         if cached_rows is not None:
+            if verbose:
+                print(
+                    f"fetch-period-prices [{index}/{total_dates}] "
+                    f"{fetch_date.isoformat()} cache ({len(cached_rows)} prime rows)"
+                )
             rows.extend(cached_rows)
             continue
 
         if api_requests > 0:
+            if verbose:
+                print(f"fetch-period-prices waiting {request_interval:.1f}s for rate limit")
             time.sleep(request_interval)
-        daily_prices = provider.get_daily_prices(fetch_date)
+        if verbose:
+            print(
+                f"fetch-period-prices [{index}/{total_dates}] "
+                f"{fetch_date.isoformat()} fetching J-Quants API"
+            )
+        try:
+            daily_prices = provider.get_daily_prices(fetch_date)
+        except KeyboardInterrupt:
+            if verbose:
+                print(f"fetch-period-prices {fetch_date.isoformat()} interrupted by Ctrl+C")
+            raise
+        except RuntimeError as exc:
+            if verbose:
+                print(f"fetch-period-prices {fetch_date.isoformat()} failed: {exc}")
+            if continue_on_error:
+                api_requests += 1
+                continue
+            raise
         prime_prices = [
             _normalize_daily_price(record)
             for record in daily_prices
@@ -3632,6 +3728,13 @@ def fetch_price_history(
         if prime_prices:
             cache_price_snapshot(fetch_date, len(daily_prices), prime_prices)
             rows.extend(prime_prices)
+            if verbose:
+                print(
+                    f"fetch-period-prices {fetch_date.isoformat()} saved "
+                    f"{len(prime_prices)} prime rows from {len(daily_prices)} rows"
+                )
+        elif verbose:
+            print(f"fetch-period-prices {fetch_date.isoformat()} no prime rows; not cached")
         api_requests += 1
     return rows
 
@@ -3642,6 +3745,15 @@ def load_cached_prime_prices(fetch_date: date) -> Any:
         return None
     payload = read_json(path)
     return payload.get("prices", [])
+
+
+def load_cached_price_history(fetch_dates: list[date]) -> list[dict[str, Any]]:
+    rows = []
+    for fetch_date in fetch_dates:
+        cached_rows = load_cached_prime_prices(fetch_date)
+        if cached_rows:
+            rows.extend(cached_rows)
+    return rows
 
 
 def cache_price_snapshot(fetch_date: date, total_count: int, prime_prices: list[dict[str, Any]]) -> None:
