@@ -103,7 +103,7 @@ def main() -> None:
         run_init_db(config)
         return
     if args.mode == "analyze":
-        run_analyze(config)
+        run_analyze(config, args.start_date, args.end_date)
         return
     if args.mode == "release-notes":
         run_release_notes(args.since, args.until)
@@ -345,6 +345,16 @@ def parse_args() -> Any:
         parser.error(f"--date YYYY-MM-DD is required for {args.mode} mode.")
     if args.mode == "publish-article" and not args.note_url:
         parser.error("--note-url URL is required for publish-article mode.")
+    if args.mode == "analyze" and (args.start_date or args.end_date):
+        if not args.start_date or not args.end_date:
+            parser.error("--start-date and --end-date must be specified together for analyze mode.")
+        try:
+            start_date = date.fromisoformat(args.start_date)
+            end_date = date.fromisoformat(args.end_date)
+        except ValueError:
+            parser.error("--start-date and --end-date must be in YYYY-MM-DD format.")
+        if start_date > end_date:
+            parser.error("--start-date must be earlier than or equal to --end-date.")
     if args.mode in {"backtest", "full-paper-run", "export-ai-dataset", "export-ai-summary", "compare-profiles"}:
         if args.mode == "compare-profiles" and not args.profiles:
             parser.error("--profiles PROFILE_ID [PROFILE_ID ...] is required for compare-profiles mode.")
@@ -517,7 +527,7 @@ def run_init_db(config: dict[str, Any]) -> None:
     print(f"path: {db_path.relative_to(ROOT)}")
 
 
-def run_analyze(config: dict[str, Any]) -> None:
+def run_analyze(config: dict[str, Any], start_date: str | None = None, end_date: str | None = None) -> None:
     try:
         analysis = analyze_operation_data(config, ROOT)
     except FileNotFoundError as exc:
@@ -537,7 +547,7 @@ def run_analyze(config: dict[str, Any]) -> None:
     feature_markdown_path = output_dir / "feature_analysis.md"
     selection_quality_json_path = output_dir / "selection_quality.json"
     selection_quality_markdown_path = output_dir / "selection_quality.md"
-    feature_analysis = build_feature_analysis(config, ROOT)
+    feature_analysis = build_feature_analysis(config, ROOT, start_date, end_date)
     selection_quality_analysis = build_selection_quality_analysis(config, ROOT)
     analysis["selection_quality_analysis"] = selection_quality_analysis
     write_json(json_path, analysis)

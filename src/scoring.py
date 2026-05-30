@@ -396,7 +396,9 @@ def _score_components(
     rsi_score = float(technical_parts.get("rsi_score") or 0)
     volume_score = float(technical_parts.get("volume_score") or 0)
     candlestick_score = float(technical_parts.get("candlestick_score") or 0)
-    sector_score = float(technical_parts.get("sector_adjustment") or 0)
+    base_technical_score = ma_score + rsi_score + volume_score + candlestick_score
+    adjusted_technical_score = float(technical_parts.get("technical_score") or base_technical_score)
+    sector_score = adjusted_technical_score - base_technical_score
     components = {
         "ma_score": ma_score,
         "rsi_score": rsi_score,

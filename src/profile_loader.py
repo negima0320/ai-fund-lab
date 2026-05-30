@@ -16,6 +16,7 @@ DEFAULT_PROFILE_ID = "rookie_dealer_01"
 PROFILE_ALIASES = {
     "rookie_dealer_02_v2.1": "rookie_dealer_02_v2_1",
     "rookie_dealer_02_v2.2": "rookie_dealer_02_v2_2",
+    "rookie_dealer_02_v2.3": "rookie_dealer_02_v2_3",
 }
 
 

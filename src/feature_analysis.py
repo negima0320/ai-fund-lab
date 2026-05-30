@@ -17,7 +17,12 @@ COMPONENT_SCORE_BUCKET_ORDER = ["0-5", "5-10", "10-15", "15-20", "20-30", "30-40
 COMPONENT_DETAIL_BUCKET_ORDER = ["<0", "0", "0-3", "3-5", "5-8", "8-10", "10-15", "15+"]
 
 
-def build_feature_analysis(config: dict[str, Any], root: Path) -> dict[str, Any]:
+def build_feature_analysis(
+    config: dict[str, Any],
+    root: Path,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict[str, Any]:
     db_path = get_database_path(config, root)
     if not db_path.exists():
         raise FileNotFoundError(f"SQLite DB not found: {db_path}")
@@ -25,35 +30,50 @@ def build_feature_analysis(config: dict[str, Any], root: Path) -> dict[str, Any]
     profile_id = _profile_id(config)
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
+        trade_where = "profile_id = ?"
+        trade_params: list[Any] = [profile_id]
+        if start_date and end_date:
+            trade_where += " AND entry_date BETWEEN ? AND ?"
+            trade_params.extend([start_date, end_date])
         trade_rows = _rows(
             connection,
-            """
+            f"""
             SELECT *
             FROM trades
-            WHERE profile_id = ?
+            WHERE {trade_where}
             ORDER BY entry_date, exit_date, id
             """,
-            (profile_id,),
+            tuple(trade_params),
         )
+        market_where = "profile_id = ?"
+        market_params: list[Any] = [profile_id]
+        if start_date and end_date:
+            market_where += " AND date BETWEEN ? AND ?"
+            market_params.extend([start_date, end_date])
         market_rows = _rows(
             connection,
-            """
+            f"""
             SELECT date, market_regime, advance_ratio
             FROM market_contexts
-            WHERE profile_id = ?
+            WHERE {market_where}
             ORDER BY date, id
             """,
-            (profile_id,),
+            tuple(market_params),
         )
+        scoring_where = "profile_id = ?"
+        scoring_params: list[Any] = [profile_id]
+        if start_date and end_date:
+            scoring_where += " AND date BETWEEN ? AND ?"
+            scoring_params.extend([start_date, end_date])
         scoring_rows = _rows(
             connection,
-            """
+            f"""
             SELECT *
             FROM scoring_results
-            WHERE profile_id = ?
+            WHERE {scoring_where}
             ORDER BY date, rank, id
             """,
-            (profile_id,),
+            tuple(scoring_params),
         )
     closed = [row for row in trade_rows if is_closed_trade_for_metrics(row)]
     market_by_date = {row.get("date"): row for row in market_rows}
@@ -64,6 +84,8 @@ def build_feature_analysis(config: dict[str, Any], root: Path) -> dict[str, Any]
     return {
         "profile_id": profile_id,
         "profile_name": _profile_name(config),
+        "start_date": start_date,
+        "end_date": end_date,
         "closed_trade_count": len(records),
         "missing_feature_counts": _missing_feature_counts(records),
         "rsi_filter_rejected_count": rsi_filter["count"],
@@ -100,6 +122,8 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "",
         f"- profile_id: {analysis.get('profile_id')}",
         f"- profile_name: {analysis.get('profile_name')}",
+        f"- start_date: {analysis.get('start_date') or 'all'}",
+        f"- end_date: {analysis.get('end_date') or 'all'}",
         f"- closed_trade_count: {analysis.get('closed_trade_count')}",
         f"- missing_feature_counts: {json.dumps(analysis.get('missing_feature_counts', {}), ensure_ascii=False)}",
         f"- rsi_filter_rejected_count: {analysis.get('rsi_filter_rejected_count')}",
