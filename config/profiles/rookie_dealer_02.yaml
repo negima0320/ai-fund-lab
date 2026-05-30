@@ -1,7 +1,14 @@
+# AI Fund Lab profile YAML
+# このファイルはAIファンド人格ごとの差分設定です。
+# 共通のDB、Broker、安全設定、J-Quants設定などは config/rookie_dealer.yaml をベースにし、
+# ここでは profile_id / character / features / trading / selection / risk_margin を上書きします。
+# 秘密情報は書かず、APIキーや口座情報は .env に置きます。
+
 profile_id: rookie_dealer_02
 profile_name: 新人ディーラー2号
 description: 1号より少し慎重に、地合いと業種を重視する新人ディーラー
 
+# 人格設定。記事、コメント、AI Decisionの説明文で参照する。
 character:
   role: 新人ディーラー
   personality:
@@ -14,6 +21,8 @@ character:
     - 弱い業種は避けます
     - ルール外の期待は持ちません
 
+# profileごとの機能ON/OFF。
+# falseにしても共通ロジックは残り、実行時に使わないだけにする。
 features:
   market_context: true
   sector_analysis: true
@@ -41,6 +50,8 @@ ai_commentary:
 
 initial_capital: 1000000
 
+# 売買ルールのprofile差分。
+# 共通configの portfolio / risk / trading に変換される。
 trading:
   max_positions: 4
   position_size_ratio: 0.18
@@ -50,6 +61,7 @@ trading:
   use_round_lot: true
   round_lot_size: 100
 
+# 選定ルールのprofile差分。
 selection:
   min_score: 72
   fallback_min_score: 67
@@ -58,6 +70,7 @@ selection:
   top_pick_min_score: 67
   max_selected: 4
 
+# 安全余力のprofile差分。
 risk_margin:
   max_daily_buy_amount: 250000
   max_single_order_amount: 180000

@@ -15,6 +15,30 @@ AI Fund Lab は、日本株の短期売買を行うAIファンドマネージャ
 
 現在はPaperBrokerによる仮想売買が中心です。ダミーデータでのデモに加えて、J-Quants実データ連携の準備と一部実装があります。実売買は未実装で、証券会社APIへの実発注は行いません。
 
+## 実装ステータス
+
+README内では、実装済み、部分実装、準備中、将来予定を以下の意味で使います。
+
+- 実装済み: ローカルで動作確認でき、通常フローから利用する機能
+- 部分実装: コードとCLIはあるが、外部API、データ条件、運用検証に制約がある機能
+- 準備中: 設計、設定、スタブ、ドキュメントはあるが、実運用機能としては未完成の機能
+- 将来予定: 今後の構想であり、現時点では未実装の機能
+
+| 対象 | ステータス | 現状 |
+| --- | --- | --- |
+| J-Quants取得 | 部分実装 | `healthcheck`、銘柄一覧、価格取得、指標計算、run-daily/backtest連携のコードあり。外部APIキー、ネットワーク、Freeプラン遅延データ前提で検証が必要 |
+| PaperBroker | 実装済み | 仮想売買のみ実行。実注文は送信しない |
+| SQLite | 実装済み | portfolio、trades、screening、scoring、AI Decision、market_context、AI改善用export履歴を保存 |
+| profile切替 | 実装済み | `--profile` で `config/profiles/*.yaml` を切替。`profile_id` / `profile_name` / `config_version` を保存 |
+| OpenAI任意化 | 実装済み | `OPENAI_API_KEY` 未設定でも動作。rule_basedへフォールバック |
+| AI Decision | 部分実装 | 任意機能。OpenAI有効時は候補をまとめて最終判断。未設定・失敗時はrule_basedへフォールバック |
+| market_context | 部分実装 | 東証プライム全体の地合いを計算・保存。欠損時は中立扱い |
+| sector_momentum | 部分実装 | 業種別モメンタムを計算し、候補銘柄とスコア補正に利用。データ欠損時は中立扱い |
+| candlestick analysis | 実装済み | ローソク足特徴量と短期シグナルを計算し、scoringや記事表示に利用 |
+| pandas-ta | 部分実装 | Python 3.12以上で利用。MA、RSI、MACD、ボリンジャーバンド、ATR計算に使用 |
+| Tachibana API | 準備中 | 設定確認、認証情報チェック、Brokerスタブあり。実API発注は未実装 |
+| 実売買 | 将来予定 | 未実装。安全ロックとスタブにより現時点では実注文しない |
+
 ## なぜ作るのか
 
 AI Fund Lab は、AIに売買を任せることそのものよりも、AIが何を見て、なぜ判断し、その結果から何を学ぶのかを記録するために作ります。
@@ -369,14 +393,14 @@ articles:
 
 ## 現在の開発フェーズ
 
-現在は Phase1 です。
+現在は、PaperBrokerによる仮想売買を中心に、J-Quants実データ連携と分析ログを拡張している段階です。
 
-- Phase1: ローカルMacでの仮想売買シミュレーション
-- Phase2: J-Quants API連携
-- Phase3: 立花証券 e支店 API デモ環境での検証
-- Phase4: AIファンド複数運用
+- 実装済み: ダミーデータdemo、PaperBroker、SQLite保存、profile切替、OpenAI任意化
+- 部分実装: J-Quants連携、market_context、sector_momentum、AI Decision、pandas-ta指標計算
+- 準備中: 立花証券 e支店 API デモ環境の接続準備、実売買前チェック
+- 将来予定: 実売買、AIファンド2号/3号の本格比較、コンテンツ収益化
 
-Phase1では、実API接続も実売買も行いません。ダミーデータで、短期売買ルール、ログ設計、日報生成、note記事生成の流れを検証します。
+実売買は未実装です。現在の売買処理はPaperBrokerによる仮想売買であり、証券会社APIへの実発注は行いません。
 
 将来的にはJ-Quants APIで株価データを取得し、Mac/Linuxから利用しやすい立花証券 e支店 API を第一候補として注文連携を検討します。kabuステーションAPIは候補から後退し、代替候補として設計とスタブだけ残します。ただし、AIが直接売買執行やルール変更を行うのではなく、Python側のルールエンジンを必ず通します。
 
