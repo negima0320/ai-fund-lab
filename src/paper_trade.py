@@ -204,6 +204,7 @@ def execute_paper_trade_day(
                     "shares": updated["quantity"],
                     "exit_reason": exit_reason,
                     "buy_reason": updated["buy_reason"],
+                    **_position_feature_snapshot(updated),
                     **stop_loss_fields,
                 },
                 entry_notional,
@@ -279,6 +280,7 @@ def execute_paper_trade_day(
             "use_round_lot": _use_round_lot(config),
             "skipped_reason": "",
             "dealer_comment": generate_buy_comment(item, config),
+            **_technical_snapshot(item),
         }
         validation = can_trade(order, _safety_portfolio(state, order_attempts + day_closed_trades, order), config)
         if not validation["allowed"]:
@@ -307,6 +309,7 @@ def execute_paper_trade_day(
                 "unrealized_return_pct": 0.0,
                 "holding_business_days": 1,
                 "buy_reason": filled["reason"],
+                **_technical_snapshot(item),
             }
         )
 
@@ -505,8 +508,15 @@ def _round_lot_size(config: dict[str, Any]) -> int:
 
 
 def _technical_snapshot(item: dict[str, Any]) -> dict[str, Any]:
+    selected_reason = item.get("selection_reason") or item.get("selected_reason") or item.get("reason", "")
     return {
+        "rsi": item.get("rsi"),
+        "volume_ratio": item.get("volume_ratio"),
+        "total_score": item.get("total_score"),
         "technical_score": item.get("technical_score"),
+        "news_score": item.get("news_score"),
+        "financial_score": item.get("financial_score"),
+        "selected_reason": selected_reason,
         "sector_name": item.get("sector_name"),
         "sector_momentum_score": item.get("sector_momentum_score"),
         "sector_rank": item.get("sector_rank"),
@@ -520,7 +530,6 @@ def _technical_snapshot(item: dict[str, Any]) -> dict[str, Any]:
         "candlestick_signals": item.get("candlestick_signals", []),
         "ma5": item.get("ma5"),
         "ma25": item.get("ma25"),
-        "volume_ratio": item.get("volume_ratio"),
         "macd_hist": item.get("macd_hist"),
         "bb_position": item.get("bb_position"),
         "atr": item.get("atr"),
@@ -528,6 +537,38 @@ def _technical_snapshot(item: dict[str, Any]) -> dict[str, Any]:
         "market_regime": item.get("market_regime"),
         "market_filter_reason": item.get("market_filter_reason", ""),
     }
+
+
+def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "rsi",
+        "volume_ratio",
+        "total_score",
+        "technical_score",
+        "news_score",
+        "financial_score",
+        "selected_reason",
+        "sector_name",
+        "sector_momentum_score",
+        "sector_rank",
+        "sector_comment",
+        "sector_score_adjustment",
+        "trend_score",
+        "volume_score",
+        "rsi_score",
+        "candlestick_score",
+        "candle_type",
+        "candlestick_signals",
+        "ma5",
+        "ma25",
+        "macd_hist",
+        "bb_position",
+        "atr",
+        "market_filter_applied",
+        "market_regime",
+        "market_filter_reason",
+    ]
+    return {key: position.get(key) for key in keys if key in position}
 
 
 def initial_live_paper_state(config: dict[str, Any]) -> dict[str, Any]:
@@ -629,6 +670,7 @@ def execute_real_data_paper_trade(
                     "holding_days": 1,
                     "score": pending.get("score"),
                     "reason": pending.get("reason", ""),
+                    **_position_feature_snapshot(pending),
                     "unrealized_profit": 0.0,
                     "unrealized_profit_rate": 0.0,
                 }
@@ -654,6 +696,7 @@ def execute_real_data_paper_trade(
                     "actual_exit_price": executed_price,
                     "shares": position["shares"],
                     "buy_reason": position.get("reason", ""),
+                    **_position_feature_snapshot(position),
                     **_slippage_fields(float(pending["intended_price"]), executed_price),
                     **_pending_stop_loss_execution_fields(pending, executed_price),
                 },
@@ -727,6 +770,7 @@ def execute_real_data_paper_trade(
                     "shares": position["shares"],
                     "exit_reason": exit_reason,
                     "buy_reason": position.get("reason", ""),
+                    **_position_feature_snapshot(position),
                     **_stop_loss_trade_fields(exit_plan, planned_exit_price),
                 },
                 entry_notional,

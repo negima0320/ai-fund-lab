@@ -81,6 +81,15 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
                 exit_reason TEXT,
                 result TEXT,
                 score REAL,
+                rsi REAL,
+                volume_ratio REAL,
+                total_score REAL,
+                technical_score REAL,
+                news_score REAL,
+                financial_score REAL,
+                market_regime TEXT,
+                candlestick_signals TEXT,
+                selected_reason TEXT,
                 reason TEXT,
                 round_lot_size INTEGER,
                 use_round_lot INTEGER,
@@ -372,6 +381,15 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
         _add_column_if_missing(connection, "trades", "net_profit_rate", "REAL")
         _add_column_if_missing(connection, "trades", "dealer_comment", "TEXT")
         _add_column_if_missing(connection, "trades", "sector_name", "TEXT")
+        _add_column_if_missing(connection, "trades", "rsi", "REAL")
+        _add_column_if_missing(connection, "trades", "volume_ratio", "REAL")
+        _add_column_if_missing(connection, "trades", "total_score", "REAL")
+        _add_column_if_missing(connection, "trades", "technical_score", "REAL")
+        _add_column_if_missing(connection, "trades", "news_score", "REAL")
+        _add_column_if_missing(connection, "trades", "financial_score", "REAL")
+        _add_column_if_missing(connection, "trades", "market_regime", "TEXT")
+        _add_column_if_missing(connection, "trades", "candlestick_signals", "TEXT")
+        _add_column_if_missing(connection, "trades", "selected_reason", "TEXT")
         _add_column_if_missing(connection, "trades", "broker_provider", "TEXT")
         _add_column_if_missing(connection, "trades", "order_status", "TEXT")
         _add_column_if_missing(connection, "trades", "live_trading", "INTEGER")
@@ -636,6 +654,15 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                     trade.get("exit_reason"),
                     trade.get("result"),
                     trade.get("score"),
+                    trade.get("rsi"),
+                    trade.get("volume_ratio"),
+                    trade.get("total_score", trade.get("score")),
+                    trade.get("technical_score"),
+                    trade.get("news_score"),
+                    trade.get("financial_score"),
+                    trade.get("market_regime"),
+                    _json(trade.get("candlestick_signals", [])),
+                    trade.get("selected_reason") or trade.get("reason") or trade.get("buy_reason"),
                     trade.get("reason") or trade.get("buy_reason"),
                     trade.get("round_lot_size"),
                     1 if trade.get("use_round_lot") else 0,
@@ -674,7 +701,9 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
             INSERT INTO trades (
                 trade_id, profile_id, profile_name, action, code, name, sector_name, entry_date, exit_date, holding_days,
                 entry_price, exit_price, shares, amount, profit, profit_rate,
-                exit_reason, result, score, reason, round_lot_size,
+                exit_reason, result, score, rsi, volume_ratio, total_score,
+                technical_score, news_score, financial_score, market_regime,
+                candlestick_signals, selected_reason, reason, round_lot_size,
                 use_round_lot, skipped_reason, intended_price, executed_price,
                 slippage_amount, slippage_rate, stop_loss_rate,
                 stop_loss_trigger_price, stop_loss_triggered_date,
@@ -684,7 +713,7 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                 estimated_tax, net_profit, net_profit_rate, dealer_comment,
                 broker_provider, order_status, live_trading, safety_checked,
                 config_version, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )

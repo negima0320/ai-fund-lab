@@ -30,47 +30,19 @@ def build_feature_analysis(config: dict[str, Any], root: Path) -> dict[str, Any]
             """,
             (profile_id,),
         )
-        scoring_rows = _rows(
-            connection,
-            """
-            SELECT *
-            FROM scoring_results
-            WHERE profile_id = ?
-            ORDER BY date, rank, id
-            """,
-            (profile_id,),
-        )
-        screening_rows = _rows(
-            connection,
-            """
-            SELECT *
-            FROM screening_results
-            WHERE profile_id = ?
-            ORDER BY date, id
-            """,
-            (profile_id,),
-        )
-
-    scoring_by_key = {(row.get("date"), row.get("code")): row for row in scoring_rows}
-    screening_by_key = {(row.get("date"), row.get("code")): row for row in screening_rows}
     closed = [row for row in trade_rows if is_closed_trade_for_metrics(row)]
-    records = []
-    for trade in closed:
-        key = (trade.get("entry_date"), trade.get("code"))
-        scoring = scoring_by_key.get(key, {})
-        screening = screening_by_key.get(key, {})
-        records.append(_feature_record(trade, scoring, screening))
+    records = [_feature_record(trade) for trade in closed]
 
     return {
         "profile_id": profile_id,
         "profile_name": _profile_name(config),
         "closed_trade_count": len(records),
-        "rsi": _group_by(records, lambda item: _rsi_bucket(item.get("rsi"))),
-        "volume_ratio": _group_by(records, lambda item: _volume_bucket(item.get("volume_ratio"))),
-        "market_regime": _group_by(records, lambda item: item.get("market_regime") or "unknown"),
+        "rsi": _group_by(records, lambda item: _rsi_bucket(item.get("rsi")), ["0-30", "30-40", "40-50", "50-60", "60-70", "70+"]),
+        "volume_ratio": _group_by(records, lambda item: _volume_bucket(item.get("volume_ratio")), ["<1", "1-2", "2-3", "3+"]),
+        "market_regime": _group_by(records, lambda item: item.get("market_regime") or "unknown", ["risk_on", "neutral", "risk_off"]),
         "sector": _group_by(records, lambda item: item.get("sector_name") or "未分類"),
         "candlestick_signal": _group_by_signals(records),
-        "score": _group_by(records, lambda item: _score_bucket(item.get("total_score"))),
+        "score": _group_by(records, lambda item: _score_bucket(item.get("total_score")), ["60-65", "65-70", "70-75", "75-80", "80+"]),
         "records_used": records,
     }
 
@@ -110,7 +82,7 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _feature_record(trade: dict[str, Any], scoring: dict[str, Any], screening: dict[str, Any]) -> dict[str, Any]:
+def _feature_record(trade: dict[str, Any]) -> dict[str, Any]:
     profit = _number(trade.get("net_profit")) or _number(trade.get("profit")) or _number(trade.get("gross_profit")) or 0.0
     profit_rate = _number(trade.get("net_profit_rate")) or _number(trade.get("profit_rate")) or _number(trade.get("gross_profit_rate"))
     return {
@@ -122,19 +94,21 @@ def _feature_record(trade: dict[str, Any], scoring: dict[str, Any], screening: d
         "result": trade.get("result"),
         "profit": profit,
         "profit_rate": profit_rate,
-        "rsi": _number(screening.get("rsi")),
-        "volume_ratio": _number(screening.get("volume_ratio")),
-        "market_regime": scoring.get("market_regime"),
-        "sector_name": scoring.get("sector_name") or screening.get("sector_name") or trade.get("sector_name"),
-        "candlestick_signals": _json_list(scoring.get("candlestick_signals") or screening.get("candlestick_signals")),
-        "total_score": _number(scoring.get("total_score") or trade.get("score")),
+        "rsi": _number(trade.get("rsi")),
+        "volume_ratio": _number(trade.get("volume_ratio")),
+        "market_regime": trade.get("market_regime"),
+        "sector_name": trade.get("sector_name"),
+        "candlestick_signals": _json_list(trade.get("candlestick_signals")),
+        "total_score": _number(trade.get("total_score") or trade.get("score")),
     }
 
 
-def _group_by(records: list[dict[str, Any]], bucket_fn: Any) -> list[dict[str, Any]]:
+def _group_by(records: list[dict[str, Any]], bucket_fn: Any, bucket_order: list[str] | None = None) -> list[dict[str, Any]]:
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
         groups[str(bucket_fn(record))].append(record)
+    if bucket_order:
+        return [_group_stats(name, groups.get(name, [])) for name in bucket_order]
     return sorted((_group_stats(name, items) for name, items in groups.items()), key=lambda item: item["bucket"])
 
 
@@ -181,15 +155,17 @@ def _rsi_bucket(value: Any) -> str:
     value = _number(value)
     if value is None:
         return "unknown"
+    if value < 30:
+        return "0-30"
     if value < 40:
-        return "rsi_under_40"
+        return "30-40"
     if value < 50:
-        return "rsi_40_49"
-    if value < 65:
-        return "rsi_50_64"
+        return "40-50"
+    if value < 60:
+        return "50-60"
     if value < 70:
-        return "rsi_65_69"
-    return "rsi_70_plus"
+        return "60-70"
+    return "70+"
 
 
 def _volume_bucket(value: Any) -> str:
@@ -197,12 +173,12 @@ def _volume_bucket(value: Any) -> str:
     if value is None:
         return "unknown"
     if value < 1:
-        return "volume_under_1x"
-    if value < 1.5:
-        return "volume_1_1.49x"
+        return "<1"
     if value < 2:
-        return "volume_1.5_1.99x"
-    return "volume_2x_plus"
+        return "1-2"
+    if value < 3:
+        return "2-3"
+    return "3+"
 
 
 def _score_bucket(value: Any) -> str:
@@ -211,13 +187,15 @@ def _score_bucket(value: Any) -> str:
         return "unknown"
     if value < 60:
         return "under_60"
+    if value < 65:
+        return "60-65"
     if value < 70:
-        return "60s"
+        return "65-70"
+    if value < 75:
+        return "70-75"
     if value < 80:
-        return "70s"
-    if value < 90:
-        return "80s"
-    return "90_or_more"
+        return "75-80"
+    return "80+"
 
 
 def _rows(connection: sqlite3.Connection, query: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
