@@ -133,6 +133,7 @@ def score_real_candidates(
     scored = []
     financial_score = 10
     selection_config = _selection_config(config)
+    volume_filter = _volume_filter_config(config)
     market_filter = _market_filter_config(config)
     market_regime = str((market_context or {}).get("market_regime") or "neutral")
     advance_ratio = _optional_float((market_context or {}).get("advance_ratio"))
@@ -148,6 +149,7 @@ def score_real_candidates(
         news_score = news["news_score"]
         total_before_selection_adjustment = technical + news_score + financial_score
         rsi_selection = _rsi_selection_adjustment(candidate.get("rsi"), selection_config)
+        volume_selection = _volume_selection_adjustment(candidate.get("volume_ratio"), volume_filter)
         total = max(0, total_before_selection_adjustment - rsi_selection["penalty"])
         confidence = _real_confidence(candidate, technical)
         score_reason = _real_score_reason(candidate, technical_parts, total)
@@ -155,6 +157,8 @@ def score_real_candidates(
             score_reason = f"{score_reason}、RSIが{selection_config['max_rsi_for_new_position']:.0f}を超えたため減点{rsi_selection['penalty']:.0f}点"
         if rsi_selection["excluded"]:
             score_reason = f"{score_reason}、RSI過熱のため新規買付見送り"
+        if volume_selection["excluded"]:
+            score_reason = f"{score_reason}、出来高倍率が{volume_selection['threshold']:.1f}未満のため新規買付見送り"
         scored.append(
             {
                 "code": candidate["code"],
@@ -200,6 +204,8 @@ def score_real_candidates(
                 "rsi_selection_penalty": rsi_selection["penalty"],
                 "rsi_selection_excluded": rsi_selection["excluded"],
                 "rsi_filter_threshold": rsi_selection["threshold"],
+                "volume_filter_excluded": volume_selection["excluded"],
+                "volume_filter_threshold": volume_selection["threshold"],
                 "technical_score": technical,
                 "news_score": news_score,
                 "news_reason": news["news_reason"],
@@ -248,6 +254,8 @@ def score_real_candidates(
             "max_selected": selection_config["max_selected"],
             "max_rsi_for_new_position": selection_config["max_rsi_for_new_position"],
             "reject_overheated_rsi": selection_config["reject_overheated_rsi"],
+            "volume_filter_enabled": volume_filter["enabled"],
+            "min_volume_ratio": volume_filter["min_volume_ratio"],
         },
         "selection_config": selection_config,
         "market_context": market_context or {},
@@ -347,6 +355,14 @@ def _market_filter_config(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _volume_filter_config(config: dict[str, Any]) -> dict[str, Any]:
+    volume_filter = config.get("volume_filter", {})
+    return {
+        "enabled": bool(volume_filter.get("enabled", False)),
+        "min_volume_ratio": float(volume_filter.get("min_volume_ratio", 0.0)),
+    }
+
+
 def _optional_float(value: Any) -> float | None:
     if value is None or value == "":
         return None
@@ -422,11 +438,15 @@ def _neutral_news_score(reason: str, limitation: str = "", provider: str = "") -
 def _meets_regular_selection(item: dict[str, Any], selection_config: dict[str, Any]) -> bool:
     if item.get("rsi_selection_excluded"):
         return False
+    if item.get("volume_filter_excluded"):
+        return False
     return item["total_score"] >= selection_config["min_score"] and item["confidence"] >= selection_config["min_confidence"]
 
 
 def _meets_top_pick_selection(item: dict[str, Any], selection_config: dict[str, Any]) -> bool:
     if item.get("rsi_selection_excluded"):
+        return False
+    if item.get("volume_filter_excluded"):
         return False
     return item["total_score"] >= selection_config["top_pick_min_score"] and item["confidence"] >= selection_config["min_confidence"]
 
@@ -446,6 +466,20 @@ def _rsi_selection_adjustment(rsi_value: Any, selection_config: dict[str, Any]) 
         "penalty": round(penalty, 2),
         "excluded": bool(selection_config.get("reject_overheated_rsi")) and rsi > max_rsi,
         "threshold": max_rsi,
+    }
+
+
+def _volume_selection_adjustment(volume_ratio_value: Any, volume_filter: dict[str, Any]) -> dict[str, Any]:
+    threshold = volume_filter.get("min_volume_ratio")
+    if not volume_filter.get("enabled"):
+        return {"excluded": False, "threshold": threshold}
+    try:
+        volume_ratio = float(volume_ratio_value)
+    except (TypeError, ValueError):
+        return {"excluded": True, "threshold": threshold}
+    return {
+        "excluded": volume_ratio < float(threshold),
+        "threshold": threshold,
     }
 
 
@@ -582,6 +616,8 @@ def _real_rejected_reason(
 ) -> str:
     if item.get("rsi_selection_excluded"):
         return "RSI過熱のため新規買付見送り"
+    if item.get("volume_filter_excluded"):
+        return "出来高倍率不足のため新規買付見送り"
     if item["confidence"] < selection_config["min_confidence"]:
         return "信頼度基準を満たさないため落選"
     if item["total_score"] < selection_config["top_pick_min_score"]:

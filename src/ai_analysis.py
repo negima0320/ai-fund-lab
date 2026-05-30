@@ -114,7 +114,6 @@ def build_decision_records(config: dict[str, Any], root: Path, start_date: str, 
     for scoring in scoring_rows:
         key = (scoring.get("date"), scoring.get("code"))
         screening = screening_by_key.get(key, {})
-        market = market_by_date.get(scoring.get("date"), {})
         ai = ai_by_date.get(scoring.get("date"), {})
         buy_trade = buy_by_key.get(key)
         if not buy_trade and scoring.get("selected"):
@@ -122,6 +121,8 @@ def build_decision_records(config: dict[str, Any], root: Path, start_date: str, 
         closed_trade = closed_by_key.get(key) or (closed_by_key.get((scoring.get("code"), buy_trade.get("entry_date"))) if buy_trade else None)
         if not closed_trade and scoring.get("selected"):
             closed_trade = _first_trade_on_or_after(closed_by_code.get(scoring.get("code"), []), (buy_trade or {}).get("entry_date") or scoring.get("date"))
+        entry_date = (buy_trade or closed_trade or {}).get("entry_date") or scoring.get("date")
+        market = market_by_date.get(entry_date) or market_by_date.get(scoring.get("date"), {})
         records.append(
             build_decision_record(
                 config=config,
@@ -152,9 +153,19 @@ def build_decision_record(
     selected = bool(scoring.get("selected"))
     action = _decision_action(selected, buy_trade)
     safety_rejected_reason = _safety_rejected_reason(buy_trade)
-    entry_date = (buy_trade or {}).get("entry_date") or scoring.get("date")
+    entry_date = (buy_trade or closed_trade or {}).get("entry_date") or scoring.get("date")
     entry_price = _number((buy_trade or {}).get("entry_price")) or _number(screening.get("close"))
     future = _future_result(closed_trade, prices, entry_date, entry_price)
+    market_regime = (
+        (buy_trade or {}).get("market_regime")
+        or (closed_trade or {}).get("market_regime")
+        or market.get("market_regime")
+    )
+    advance_ratio = _number((buy_trade or {}).get("advance_ratio"))
+    if advance_ratio is None:
+        advance_ratio = _number((closed_trade or {}).get("advance_ratio"))
+    if advance_ratio is None:
+        advance_ratio = _number(market.get("advance_ratio"))
     return {
         "schema_version": SCHEMA_VERSION,
         "profile_id": scoring.get("profile_id") or _profile_id(config),
@@ -164,8 +175,8 @@ def build_decision_record(
         "code": scoring.get("code"),
         "name": scoring.get("name"),
         "market_context": {
-            "market_regime": market.get("market_regime"),
-            "advance_ratio": _number(market.get("advance_ratio")),
+            "market_regime": market_regime,
+            "advance_ratio": advance_ratio,
             "average_change_rate": _number(market.get("average_change_rate")),
             "turnover_value_total": _number(market.get("turnover_value_total")),
             "topix_change_rate": _number(market.get("topix_change_rate")),
@@ -235,7 +246,7 @@ def build_decision_record(
             "action": action,
             "rejected_reason": scoring.get("rejected_reason"),
             "market_filter_applied": bool(scoring.get("market_filter_applied")),
-            "market_regime": scoring.get("market_regime") or market.get("market_regime"),
+            "market_regime": scoring.get("market_regime") or market_regime,
             "market_filter_reason": scoring.get("market_filter_reason"),
             "safety_passed": safety_rejected_reason is None,
             "safety_rejected_reason": safety_rejected_reason,

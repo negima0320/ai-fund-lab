@@ -45,6 +45,21 @@ def test_rookie_dealer_02_v2_profile_uses_rsi_filter() -> None:
     assert profile["selection"]["reject_overheated_rsi"] is True
 
 
+def test_rookie_dealer_02_v3_profile_uses_score_and_volume_filters() -> None:
+    profile = load_profile("rookie_dealer_02_v3")
+
+    assert profile["profile_id"] == "rookie_dealer_02_v3"
+    assert profile["profile_name"] == "新人ディーラー2号 v3"
+    assert profile["execution"]["stop_loss_execution"] == "intraday_stop"
+    assert profile["selection"]["min_score"] == 74
+    assert profile["selection"]["max_rsi_for_new_position"] == 65
+    assert profile["selection"]["reject_overheated_rsi"] is True
+    assert profile["volume_filter"]["enabled"] is True
+    assert profile["volume_filter"]["min_volume_ratio"] == 3.0
+    assert profile["broker"]["provider"] == "paper"
+    assert profile["broker"]["live_trading_enabled"] is False
+
+
 def test_rookie_dealer_03_profile_uses_fast_take_profit() -> None:
     profile = load_profile("rookie_dealer_03")
 

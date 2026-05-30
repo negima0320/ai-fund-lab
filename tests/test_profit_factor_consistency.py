@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from db import analyze_operation_data, get_database_path, initialize_database, save_portfolio_snapshot, save_trades
-from main import _profile_compare_row, build_profile_ranking
+from main import _profile_compare_row, build_profile_ranking, render_compare_profiles_markdown
 
 
 def test_analyze_and_compare_profiles_profit_factor_match(config_copy: dict, tmp_path) -> None:
@@ -47,6 +47,7 @@ def test_analyze_and_compare_profiles_profit_factor_match(config_copy: dict, tmp
                 "holding_days": 2,
                 "result": "WIN",
                 "order_status": "FILLED",
+                "total_score": 76,
             },
             {
                 "trade_id": "loss",
@@ -61,6 +62,7 @@ def test_analyze_and_compare_profiles_profit_factor_match(config_copy: dict, tmp
                 "holding_days": 4,
                 "result": "LOSS",
                 "order_status": "FILLED",
+                "total_score": 72,
             },
             {
                 "trade_id": "pending",
@@ -98,6 +100,22 @@ def test_analyze_and_compare_profiles_profit_factor_match(config_copy: dict, tmp
     assert compare_row["average_loss_profit_rate"] == -0.04
     assert compare_row["average_holding_days"] == 3.0
     assert compare_row["expectancy"] == 0.03
+    score_detail_by_bucket = {item["bucket"]: item for item in compare_row["score_detail"]}
+    assert score_detail_by_bucket["72-73"]["count"] == 1
+    assert score_detail_by_bucket["72-73"]["win_rate"] == 0.0
+    assert score_detail_by_bucket["76-79"]["count"] == 1
+    assert score_detail_by_bucket["76-79"]["win_rate"] == 1.0
+    markdown = render_compare_profiles_markdown(
+        {
+            "start_date": "2026-03-01",
+            "end_date": "2026-03-06",
+            "profiles": [compare_row],
+            "ranking": [],
+        }
+    )
+    assert "## Score Detail" in markdown
+    assert "| 72-73 | 1 | 0.00% | -4.00% | -4,000円 |" in markdown
+    assert "| 76-79 | 1 | 100.00% | 10.00% | 10,000円 |" in markdown
 
 
 def test_profile_ranking_uses_profit_factor_drawdown_profit_and_expectancy() -> None:

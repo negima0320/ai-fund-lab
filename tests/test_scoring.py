@@ -166,3 +166,42 @@ def test_rsi_at_configured_max_is_evaluated_normally(config_copy: dict) -> None:
 
     assert result["scores"][0]["rsi_selection_excluded"] is False
     assert len(result["selected"]) == 1
+
+
+def test_volume_filter_excludes_low_volume_ratio_candidate(config_copy: dict) -> None:
+    config_copy["volume_filter"] = {"enabled": True, "min_volume_ratio": 3.0}
+    result = score_real_candidates(
+        [candidate("1001", volume_ratio=2.99, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02)],
+        "2026-03-06",
+        config_copy,
+        "test",
+    )
+
+    assert len(result["selected"]) == 0
+    assert result["scores"][0]["volume_filter_excluded"] is True
+    assert result["scores"][0]["volume_filter_threshold"] == 3.0
+    assert result["scores"][0]["rejected_reason"] == "出来高倍率不足のため新規買付見送り"
+
+
+def test_volume_filter_allows_candidate_at_threshold(config_copy: dict) -> None:
+    config_copy["volume_filter"] = {"enabled": True, "min_volume_ratio": 3.0}
+    result = score_real_candidates(
+        [candidate("1001", volume_ratio=3.0, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02)],
+        "2026-03-06",
+        config_copy,
+        "test",
+    )
+
+    assert result["scores"][0]["volume_filter_excluded"] is False
+    assert len(result["selected"]) == 1
+
+
+def test_existing_profile_keeps_volume_filter_disabled(config_copy: dict) -> None:
+    result = score_real_candidates(
+        [candidate("1001", volume_ratio=2.0, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02)],
+        "2026-03-06",
+        config_copy,
+        "test",
+    )
+
+    assert result["scores"][0]["volume_filter_excluded"] is False

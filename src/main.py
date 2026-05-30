@@ -47,7 +47,7 @@ from db import (
     save_screening_results,
     save_trades,
 )
-from feature_analysis import build_feature_analysis, render_feature_analysis_markdown
+from feature_analysis import build_feature_analysis, render_feature_analysis_markdown, score_detail_groups
 from indicators import calculate_indicators
 from market_context import build_market_context, neutral_market_context
 from news_provider import build_news_provider
@@ -692,6 +692,7 @@ def _profile_compare_row(config: dict[str, Any], db_path: Path, start_date_text:
                 if row.get("profit_rate") is not None and float(row["profit_rate"]) < float(config.get("risk", {}).get("stop_loss_pct", -0.03))
             ]
         ),
+        "score_detail": score_detail_groups(closed),
     }
 
 
@@ -792,6 +793,26 @@ def render_compare_profiles_markdown(payload: dict[str, Any]) -> str:
                 "",
             ]
         )
+    lines.extend(["", "## Score Detail", ""])
+    for row in payload["profiles"]:
+        lines.extend(
+            [
+                f"### {row['profile_id']} {row['profile_name']}",
+                "",
+                "| score | count | win_rate | average_profit_rate | total_profit |",
+                "|---|---:|---:|---:|---:|",
+            ]
+        )
+        for item in row.get("score_detail", []):
+            lines.append(
+                "| "
+                f"{item.get('bucket')} | "
+                f"{item.get('count')} | "
+                f"{_format_optional_percent(item.get('win_rate'))} | "
+                f"{_format_optional_percent(item.get('average_profit_rate'))} | "
+                f"{_format_optional_yen(item.get('total_profit'))} |"
+            )
+        lines.append("")
     lines.append("")
     return "\n".join(lines)
 

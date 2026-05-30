@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from db import initialize_database, save_scoring_results, save_trades
+from db import initialize_database, save_market_context, save_scoring_results, save_trades
 from feature_analysis import build_feature_analysis, render_feature_analysis_markdown
 from paper_trade import execute_real_data_paper_trade, initial_live_paper_state
 
@@ -96,6 +96,12 @@ def test_feature_analysis_groups_closed_trade_results(config_copy: dict, tmp_pat
     assert rsi_by_bucket["50-60"]["average_profit_rate"] == 0.1
     assert rsi_by_bucket["70+"]["win_rate"] == 0.0
     assert rsi_by_bucket["70+"]["average_profit_rate"] == -0.03
+    score_detail_by_bucket = {item["bucket"]: item for item in analysis["score_detail"]}
+    assert list(score_detail_by_bucket) == ["65-69", "70-71", "72-73", "74-75", "76-79", "80+"]
+    assert score_detail_by_bucket["65-69"]["count"] == 1
+    assert score_detail_by_bucket["65-69"]["win_rate"] == 0.0
+    assert score_detail_by_bucket["80+"]["count"] == 1
+    assert score_detail_by_bucket["80+"]["win_rate"] == 1.0
     market_by_bucket = {item["bucket"]: item for item in analysis["market_regime"]}
     assert list(market_by_bucket) == ["risk_on", "neutral", "risk_off"]
     assert market_by_bucket["risk_on"]["win_rate"] == 1.0
@@ -105,6 +111,7 @@ def test_feature_analysis_groups_closed_trade_results(config_copy: dict, tmp_pat
         "long_upper_shadow_warning",
     }
     assert "RSI別勝率" in render_feature_analysis_markdown(analysis)
+    assert "score詳細分析" in render_feature_analysis_markdown(analysis)
 
 
 def test_sell_trade_inherits_buy_time_features(config_copy: dict) -> None:
@@ -150,3 +157,84 @@ def test_sell_trade_inherits_buy_time_features(config_copy: dict) -> None:
     assert sell["advance_ratio"] == 0.62
     assert sell["candlestick_signals"] == ["bullish_candle"]
     assert sell["selected_reason"] == "test buy"
+
+
+def test_feature_analysis_fills_market_regime_from_entry_market_context(config_copy: dict, tmp_path) -> None:
+    config_copy["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    initialize_database(config_copy, tmp_path)
+    save_market_context(
+        config_copy,
+        tmp_path,
+        {
+            "date": "2026-03-01",
+            "provider": "test",
+            "market_regime": "risk_on",
+            "advance_ratio": 0.71,
+        },
+    )
+    save_trades(
+        config_copy,
+        tmp_path,
+        "2026-03-06",
+        [
+            {
+                "trade_id": "closed-without-trade-market",
+                "action": "SELL",
+                "code": "1001",
+                "name": "Fallback",
+                "entry_date": "2026-03-01",
+                "exit_date": "2026-03-06",
+                "profit": 5000,
+                "profit_rate": 0.05,
+                "gross_profit": 5000,
+                "result": "WIN",
+                "order_status": "FILLED",
+                "rsi": 55,
+                "volume_ratio": 1.5,
+                "total_score": 74,
+            }
+        ],
+    )
+
+    analysis = build_feature_analysis(config_copy, tmp_path)
+
+    market_by_bucket = {item["bucket"]: item for item in analysis["market_regime"]}
+    assert market_by_bucket["risk_on"]["count"] == 1
+    assert analysis["missing_feature_counts"]["market_regime"] == 0
+    assert analysis["missing_feature_counts"]["advance_ratio"] == 0
+    assert analysis["records_used"][0]["market_regime"] == "risk_on"
+    assert analysis["records_used"][0]["advance_ratio"] == 0.71
+
+
+def test_feature_analysis_uses_unknown_only_without_trade_or_context_market(config_copy: dict, tmp_path) -> None:
+    config_copy["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    initialize_database(config_copy, tmp_path)
+    save_trades(
+        config_copy,
+        tmp_path,
+        "2026-03-06",
+        [
+            {
+                "trade_id": "closed-without-market",
+                "action": "SELL",
+                "code": "1001",
+                "name": "Unknown",
+                "entry_date": "2026-03-01",
+                "exit_date": "2026-03-06",
+                "profit": -1000,
+                "profit_rate": -0.01,
+                "gross_profit": -1000,
+                "result": "LOSS",
+                "order_status": "FILLED",
+                "rsi": 55,
+                "volume_ratio": 1.5,
+                "total_score": 74,
+            }
+        ],
+    )
+
+    analysis = build_feature_analysis(config_copy, tmp_path)
+
+    market_by_bucket = {item["bucket"]: item for item in analysis["market_regime"]}
+    assert market_by_bucket["unknown"]["count"] == 1
+    assert analysis["missing_feature_counts"]["market_regime"] == 1

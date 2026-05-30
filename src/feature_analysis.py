@@ -12,6 +12,9 @@ from db import get_database_path
 from trade_metrics import is_closed_trade_for_metrics
 
 
+SCORE_DETAIL_BUCKET_ORDER = ["65-69", "70-71", "72-73", "74-75", "76-79", "80+"]
+
+
 def build_feature_analysis(config: dict[str, Any], root: Path) -> dict[str, Any]:
     db_path = get_database_path(config, root)
     if not db_path.exists():
@@ -30,6 +33,16 @@ def build_feature_analysis(config: dict[str, Any], root: Path) -> dict[str, Any]
             """,
             (profile_id,),
         )
+        market_rows = _rows(
+            connection,
+            """
+            SELECT date, market_regime, advance_ratio
+            FROM market_contexts
+            WHERE profile_id = ?
+            ORDER BY date, id
+            """,
+            (profile_id,),
+        )
         scoring_rows = _rows(
             connection,
             """
@@ -41,7 +54,8 @@ def build_feature_analysis(config: dict[str, Any], root: Path) -> dict[str, Any]
             (profile_id,),
         )
     closed = [row for row in trade_rows if is_closed_trade_for_metrics(row)]
-    records = [_feature_record(trade) for trade in closed]
+    market_by_date = {row.get("date"): row for row in market_rows}
+    records = [_feature_record(trade, market_by_date.get(trade.get("entry_date"), {})) for trade in closed]
     rsi_filter = _rsi_filter_rejection_summary(scoring_rows, config)
 
     return {
@@ -58,6 +72,7 @@ def build_feature_analysis(config: dict[str, Any], root: Path) -> dict[str, Any]
         "sector": _group_by(records, lambda item: item.get("sector_name") or "未分類"),
         "candlestick_signal": _group_by_signals(records),
         "score": _group_by(records, lambda item: _score_bucket(item.get("total_score")), ["60-65", "65-70", "70-75", "75-80", "80+"]),
+        "score_detail": score_detail_groups(records),
         "records_used": records,
     }
 
@@ -82,6 +97,10 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "",
         *_group_lines(analysis.get("score", [])),
         "",
+        "## score詳細分析",
+        "",
+        *_group_lines(analysis.get("score_detail", [])),
+        "",
         "## market_regime別勝率",
         "",
         *_group_lines(analysis.get("market_regime", [])),
@@ -101,9 +120,13 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _feature_record(trade: dict[str, Any]) -> dict[str, Any]:
+def _feature_record(trade: dict[str, Any], entry_market: dict[str, Any] | None = None) -> dict[str, Any]:
+    entry_market = entry_market or {}
     profit = _number(trade.get("net_profit")) or _number(trade.get("profit")) or _number(trade.get("gross_profit")) or 0.0
     profit_rate = _number(trade.get("net_profit_rate")) or _number(trade.get("profit_rate")) or _number(trade.get("gross_profit_rate"))
+    advance_ratio = _number(trade.get("advance_ratio"))
+    if advance_ratio is None:
+        advance_ratio = _number(entry_market.get("advance_ratio"))
     return {
         "trade_id": trade.get("trade_id"),
         "code": trade.get("code"),
@@ -115,8 +138,8 @@ def _feature_record(trade: dict[str, Any]) -> dict[str, Any]:
         "profit_rate": profit_rate,
         "rsi": _number(trade.get("rsi")),
         "volume_ratio": _number(trade.get("volume_ratio")),
-        "market_regime": trade.get("market_regime"),
-        "advance_ratio": _number(trade.get("advance_ratio")),
+        "market_regime": trade.get("market_regime") or entry_market.get("market_regime"),
+        "advance_ratio": advance_ratio,
         "sector_name": trade.get("sector_name"),
         "candlestick_signals": _json_list(trade.get("candlestick_signals")),
         "total_score": _number(trade.get("total_score") or trade.get("score")),
@@ -156,9 +179,10 @@ def _group_by_signals(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _group_stats(name: str, items: list[dict[str, Any]]) -> dict[str, Any]:
-    wins = [item for item in items if item.get("result") == "WIN" or float(item.get("profit") or 0) > 0]
-    profit_values = [float(item.get("profit") or 0) for item in items]
-    profit_rates = [float(item["profit_rate"]) for item in items if item.get("profit_rate") is not None]
+    wins = [item for item in items if item.get("result") == "WIN" or (_record_profit(item) or 0) > 0]
+    profit_values = [_record_profit(item) or 0.0 for item in items]
+    profit_rates = [_record_profit_rate(item) for item in items]
+    profit_rates = [rate for rate in profit_rates if rate is not None]
     return {
         "bucket": name,
         "count": len(items),
@@ -169,6 +193,10 @@ def _group_stats(name: str, items: list[dict[str, Any]]) -> dict[str, Any]:
         "average_profit_rate": _average(profit_rates),
         "total_profit": round(sum(profit_values), 2),
     }
+
+
+def score_detail_groups(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return _group_by(records, lambda item: _score_detail_bucket(item.get("total_score")), SCORE_DETAIL_BUCKET_ORDER)
 
 
 def _missing_feature_counts(records: list[dict[str, Any]]) -> dict[str, int]:
@@ -243,6 +271,33 @@ def _score_bucket(value: Any) -> str:
     if value < 80:
         return "75-80"
     return "80+"
+
+
+def _score_detail_bucket(value: Any) -> str:
+    value = _number(value)
+    if value is None:
+        return "unknown"
+    if value < 65:
+        return "under_65"
+    if value < 70:
+        return "65-69"
+    if value < 72:
+        return "70-71"
+    if value < 74:
+        return "72-73"
+    if value < 76:
+        return "74-75"
+    if value < 80:
+        return "76-79"
+    return "80+"
+
+
+def _record_profit(item: dict[str, Any]) -> float | None:
+    return _number(item.get("net_profit")) or _number(item.get("profit")) or _number(item.get("gross_profit"))
+
+
+def _record_profit_rate(item: dict[str, Any]) -> float | None:
+    return _number(item.get("net_profit_rate")) or _number(item.get("profit_rate")) or _number(item.get("gross_profit_rate"))
 
 
 def _rows(connection: sqlite3.Connection, query: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
