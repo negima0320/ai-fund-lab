@@ -190,3 +190,202 @@ def test_selection_quality_compares_selected_and_rejected_future_returns(config_
     assert "False Rejection Check" in markdown
     assert "Top Missed Opportunities" in markdown
     assert "Top False Positives" in markdown
+
+
+def test_sector_lift_analysis_suggests_positive_and_negative_sector_filters(config_copy: dict, tmp_path) -> None:
+    config_copy["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    initialize_database(config_copy, tmp_path)
+    raw_dir = tmp_path / "data" / "raw"
+    raw_dir.mkdir(parents=True)
+    base_date = "2026-02-01"
+    future_dates = [f"2026-02-{day:02d}" for day in range(2, 12)]
+    prices_by_code = {
+        "2001": [102, 104, 106, 108, 110, 112, 114, 116, 118, 120],
+        "2002": [100, 101, 101, 102, 102, 103, 103, 104, 104, 105],
+        "2003": [99, 98, 98, 97, 97, 96, 96, 95, 95, 95],
+        "2004": [101, 102, 103, 104, 105, 106, 107, 108, 109, 110],
+    }
+    for index, target_date in enumerate(future_dates):
+        payload = {
+            "prices": [
+                {"code": code, "date": target_date, "close": closes[index]}
+                for code, closes in prices_by_code.items()
+            ]
+        }
+        (raw_dir / f"prices_{target_date}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    save_screening_results(
+        config_copy,
+        tmp_path,
+        {
+            "date": base_date,
+            "candidates": [
+                {"code": "2001", "name": "Selected Machinery", "close": 100, "sector_name": "機械"},
+                {"code": "2002", "name": "Rejected Machinery", "close": 100, "sector_name": "機械"},
+                {"code": "2003", "name": "Selected Retail", "close": 100, "sector_name": "小売業"},
+                {"code": "2004", "name": "Rejected Retail", "close": 100, "sector_name": "小売業"},
+            ],
+        },
+    )
+    save_scoring_results(
+        config_copy,
+        tmp_path,
+        {
+            "date": base_date,
+            "scores": [
+                {"code": "2001", "name": "Selected Machinery", "rank": 1, "total_score": 82, "selected": True, "sector_name": "機械"},
+                {"code": "2002", "name": "Rejected Machinery", "rank": 2, "total_score": 78, "selected": False, "sector_name": "機械", "rejected_reason": "上限超過"},
+                {"code": "2003", "name": "Selected Retail", "rank": 3, "total_score": 76, "selected": True, "sector_name": "小売業"},
+                {"code": "2004", "name": "Rejected Retail", "rank": 4, "total_score": 72, "selected": False, "sector_name": "小売業", "rejected_reason": "上限超過"},
+            ],
+        },
+    )
+
+    analysis = build_selection_quality_analysis(config_copy, tmp_path)
+    sector_lift = analysis["sector_lift_analysis"]
+    sector_by_name = {item["sector"]: item for item in sector_lift["sectors"]}
+
+    assert sector_by_name["機械"]["selected_avg10d"] == 0.2
+    assert sector_by_name["機械"]["rejected_avg10d"] == 0.05
+    assert sector_by_name["機械"]["lift"] == 0.15
+    assert sector_by_name["機械"]["selected_count"] == 1
+    assert sector_by_name["機械"]["rejected_count"] == 1
+    assert sector_by_name["機械"]["confidence"] == "reference"
+    assert sector_by_name["機械"]["sample_note"] == "参考扱い: selected/rejectedのいずれかが10件未満"
+    assert sector_by_name["小売業"]["lift"] == -0.15
+
+    assert sector_lift["positive_sector_filters"][0]["filter"] == "sector = 機械"
+    assert sector_lift["positive_sector_filters"][0]["confidence"] == "reference"
+    assert sector_lift["negative_sector_filters"][0]["filter"] == "sector = 小売業"
+    assert sector_lift["negative_sector_filters"][0]["confidence"] == "reference"
+
+    markdown = render_selection_quality_markdown(analysis)
+    assert "Sector Lift Analysis" in markdown
+    assert "Positive Sector Filters" in markdown
+    assert "Negative Sector Filters" in markdown
+    assert "sector = 機械" in markdown
+    assert "参考扱い" in markdown
+
+
+def test_low_score_deep_analysis_finds_rescue_rule_candidates(config_copy: dict, tmp_path) -> None:
+    config_copy["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    initialize_database(config_copy, tmp_path)
+    raw_dir = tmp_path / "data" / "raw"
+    raw_dir.mkdir(parents=True)
+    base_date = "2026-03-01"
+    future_dates = [f"2026-03-{day:02d}" for day in range(2, 12)]
+    prices_by_code = {
+        "3001": [102, 104, 106, 108, 110, 112, 114, 116, 118, 120],
+        "3002": [101, 103, 105, 107, 109, 111, 112, 113, 114, 115],
+        "3003": [99, 98, 97, 96, 95, 94, 93, 92, 91, 90],
+        "3004": [103, 106, 109, 112, 115, 118, 121, 124, 127, 130],
+    }
+    for index, target_date in enumerate(future_dates):
+        payload = {
+            "prices": [
+                {"code": code, "date": target_date, "close": closes[index]}
+                for code, closes in prices_by_code.items()
+            ]
+        }
+        (raw_dir / f"prices_{target_date}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    save_screening_results(
+        config_copy,
+        tmp_path,
+        {
+            "date": base_date,
+            "candidates": [
+                {"code": "3001", "name": "Low Score Breakout A", "close": 100, "rsi": 55, "volume_ratio": 3.2, "sector_name": "機械"},
+                {"code": "3002", "name": "Low Score Breakout B", "close": 100, "rsi": 58, "volume_ratio": 3.5, "sector_name": "機械"},
+                {"code": "3003", "name": "Low Score Weak", "close": 100, "rsi": 72, "volume_ratio": 1.5, "sector_name": "小売業"},
+                {"code": "3004", "name": "High Score Outside", "close": 100, "rsi": 54, "volume_ratio": 3.8, "sector_name": "機械"},
+            ],
+        },
+    )
+    save_scoring_results(
+        config_copy,
+        tmp_path,
+        {
+            "date": base_date,
+            "scores": [
+                {
+                    "code": "3001",
+                    "name": "Low Score Breakout A",
+                    "rank": 1,
+                    "total_score": 68,
+                    "selected": True,
+                    "market_regime": "neutral",
+                    "sector_name": "機械",
+                    "candlestick_signals": ["volume_confirmed_breakout"],
+                },
+                {
+                    "code": "3002",
+                    "name": "Low Score Breakout B",
+                    "rank": 2,
+                    "total_score": 66,
+                    "selected": False,
+                    "market_regime": "risk_on",
+                    "sector_name": "機械",
+                    "candlestick_signals": ["volume_confirmed_breakout", "long_lower_shadow_support"],
+                    "rejected_reason": "低スコア例外採用枠超過",
+                },
+                {
+                    "code": "3003",
+                    "name": "Low Score Weak",
+                    "rank": 3,
+                    "total_score": 67,
+                    "selected": False,
+                    "market_regime": "risk_off",
+                    "sector_name": "小売業",
+                    "candlestick_signals": ["upper_shadow"],
+                    "rejected_reason": "低スコア例外条件不足",
+                },
+                {
+                    "code": "3004",
+                    "name": "High Score Outside",
+                    "rank": 4,
+                    "total_score": 72,
+                    "selected": True,
+                    "market_regime": "neutral",
+                    "sector_name": "機械",
+                    "candlestick_signals": ["volume_confirmed_breakout"],
+                },
+            ],
+        },
+    )
+
+    analysis = build_selection_quality_analysis(config_copy, tmp_path)
+    low_score = analysis["low_score_deep_analysis"]
+
+    assert low_score["score_range"] == {"min": 65, "max": 69}
+    assert low_score["low_score_count"] == 3
+    assert low_score["winner_count"] == 2
+    assert low_score["loser_count"] == 1
+    assert [item["code"] for item in low_score["winners"]] == ["3001", "3002"]
+    assert [item["code"] for item in low_score["losers"]] == ["3003"]
+    separation_by_feature_value = {
+        (item["feature"], item["value"]): item
+        for item in low_score["feature_separation"]
+    }
+    assert separation_by_feature_value[("volume_ratio", "3+")] == {
+        "feature": "volume_ratio",
+        "value": "3+",
+        "winner_count": 2,
+        "loser_count": 0,
+        "winner_share": 1.0,
+        "loser_share": 0.0,
+        "separation": 1.0,
+    }
+    assert separation_by_feature_value[("volume_confirmed_breakout", "yes")]["separation"] == 1.0
+    assert separation_by_feature_value[("long_lower_shadow_support", "yes")]["winner_count"] == 1
+    assert all(item["code"] != "3004" for item in low_score["winners"] + low_score["losers"])
+    assert low_score["candidate_rescue_rules"][0]["rule"] == (
+        "total_score 65-69 でも volume_ratio >= 3 かつ volume_confirmed_breakout なら採用候補"
+    )
+
+    markdown = render_selection_quality_markdown(analysis)
+    assert "Low Score Deep Analysis" in markdown
+    assert "Winners in 65-69" in markdown
+    assert "Losers in 65-69" in markdown
+    assert "Features with highest separation" in markdown
+    assert "Candidate Rescue Rules" in markdown

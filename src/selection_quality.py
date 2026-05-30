@@ -33,7 +33,12 @@ DEEP_ANALYSIS_FEATURES = [
 ]
 
 MIN_RULE_SAMPLE_SIZE = 5
+MIN_SECTOR_SAMPLE_SIZE = 10
 POSITIVE_LIFT_THRESHOLD = 0.005
+LOW_SCORE_MIN = 65
+LOW_SCORE_MAX = 69
+LOW_SCORE_RECORD_LIMIT = 20
+LOW_SCORE_SEPARATION_LIMIT = 20
 
 
 def build_selection_quality_analysis(config: dict[str, Any], root: Path) -> dict[str, Any]:
@@ -97,6 +102,8 @@ def build_selection_quality_analysis(config: dict[str, Any], root: Path) -> dict
         },
         "selection_lift_optimization_analysis": _selection_lift_optimization_analysis(selected_records, rejected_records),
         "selection_lift_deep_analysis": _selection_lift_deep_analysis(selected_records, rejected_records),
+        "sector_lift_analysis": _sector_lift_analysis(selected_records, rejected_records),
+        "low_score_deep_analysis": _low_score_deep_analysis(score_records),
         "rejected_reason_analysis": _rejected_reason_analysis(selected_records, rejected_records),
         "missed_opportunity_by_reason": _missed_opportunity_by_reason(rejected_records),
         "top_missed_opportunities": _top_records(
@@ -172,6 +179,22 @@ def render_selection_quality_markdown(analysis: dict[str, Any]) -> str:
         "### Candidate New Rules",
         "",
         *_candidate_rule_lines(analysis.get("selection_lift_deep_analysis", {}).get("candidate_new_rules", [])),
+        "",
+        "## Sector Lift Analysis",
+        "",
+        *_sector_lift_lines(analysis.get("sector_lift_analysis", {}).get("sectors", [])),
+        "",
+        "### Positive Sector Filters",
+        "",
+        *_sector_filter_lines(analysis.get("sector_lift_analysis", {}).get("positive_sector_filters", [])),
+        "",
+        "### Negative Sector Filters",
+        "",
+        *_sector_filter_lines(analysis.get("sector_lift_analysis", {}).get("negative_sector_filters", [])),
+        "",
+        "## Low Score Deep Analysis",
+        "",
+        *_low_score_deep_analysis_lines(analysis.get("low_score_deep_analysis", {})),
         "",
         "## Stage Comparison",
         "",
@@ -252,6 +275,304 @@ def _conditional_selected_count(records: list[dict[str, Any]]) -> int:
 
 def _conditional_rejected_count(records: list[dict[str, Any]]) -> int:
     return sum(1 for record in records if str(record.get("rejected_reason") or "").startswith("conditional rejected"))
+
+
+def _sector_lift_analysis(selected_records: list[dict[str, Any]], rejected_records: list[dict[str, Any]]) -> dict[str, Any]:
+    rows = _sector_lift_rows(selected_records, rejected_records)
+    positive = [
+        row for row in rows
+        if _number(row.get("lift")) is not None
+        and float(row.get("lift") or 0.0) >= POSITIVE_LIFT_THRESHOLD
+        and _number(row.get("selected_avg10d")) is not None
+        and float(row.get("selected_avg10d") or 0.0) > 0
+    ]
+    negative = [
+        row for row in rows
+        if _number(row.get("lift")) is not None
+        and (float(row.get("lift") or 0.0) <= 0 or float(row.get("selected_avg10d") or 0.0) <= 0)
+        and int(row.get("selected_count") or 0) > 0
+        and int(row.get("rejected_count") or 0) > 0
+    ]
+    positive.sort(key=_sector_lift_sort_key, reverse=True)
+    negative.sort(key=lambda row: (float(row.get("lift") or 999), float(row.get("selected_avg10d") or 999)))
+    return {
+        "sectors": rows,
+        "positive_sector_filters": [_sector_filter_candidate(row, "positive") for row in positive[:20]],
+        "negative_sector_filters": [_sector_filter_candidate(row, "negative") for row in negative[:20]],
+    }
+
+
+def _sector_lift_rows(selected_records: list[dict[str, Any]], rejected_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    selected_groups = _group_records_by_deep_feature(selected_records, "sector")
+    rejected_groups = _group_records_by_deep_feature(rejected_records, "sector")
+    sectors = sorted(set(selected_groups) | set(rejected_groups))
+    rows = []
+    for sector in sectors:
+        selected_summary = _future_return_summary(selected_groups.get(sector, []))
+        rejected_summary = _future_return_summary(rejected_groups.get(sector, []))
+        lift = _difference(selected_summary["average_future_return_10d"], rejected_summary["average_future_return_10d"])
+        row = {
+            "sector": sector,
+            "selected_avg10d": selected_summary["average_future_return_10d"],
+            "rejected_avg10d": rejected_summary["average_future_return_10d"],
+            "lift": lift,
+            "selected_count": selected_summary["count"],
+            "rejected_count": rejected_summary["count"],
+            "confidence": _sector_lift_confidence(selected_summary["count"], rejected_summary["count"], lift),
+        }
+        row["sample_note"] = _sector_sample_note(row)
+        rows.append(row)
+    return sorted(rows, key=lambda row: (float(row.get("lift") or -999), int(row.get("selected_count") or 0) + int(row.get("rejected_count") or 0)), reverse=True)
+
+
+def _sector_lift_sort_key(row: dict[str, Any]) -> tuple[float, int]:
+    return (
+        float(row.get("lift") or 0.0),
+        int(row.get("selected_count") or 0) + int(row.get("rejected_count") or 0),
+    )
+
+
+def _sector_lift_confidence(selected_count: int, rejected_count: int, lift: float | None) -> str:
+    if lift is None:
+        return "unknown"
+    if selected_count < MIN_SECTOR_SAMPLE_SIZE or rejected_count < MIN_SECTOR_SAMPLE_SIZE:
+        return "reference"
+    lift_abs = abs(lift)
+    if lift_abs >= 0.02:
+        return "strong"
+    if lift_abs >= POSITIVE_LIFT_THRESHOLD:
+        return "moderate"
+    return "weak"
+
+
+def _sector_sample_note(row: dict[str, Any]) -> str:
+    if int(row.get("selected_count") or 0) < MIN_SECTOR_SAMPLE_SIZE or int(row.get("rejected_count") or 0) < MIN_SECTOR_SAMPLE_SIZE:
+        return f"参考扱い: selected/rejectedのいずれかが{MIN_SECTOR_SAMPLE_SIZE}件未満"
+    return ""
+
+
+def _sector_filter_candidate(row: dict[str, Any], direction: str) -> dict[str, Any]:
+    return {
+        "filter": f"sector = {row.get('sector')}",
+        "sector": row.get("sector"),
+        "selected_avg10d": row.get("selected_avg10d"),
+        "rejected_avg10d": row.get("rejected_avg10d"),
+        "lift": row.get("lift"),
+        "selected_count": row.get("selected_count"),
+        "rejected_count": row.get("rejected_count"),
+        "confidence": "reference" if row.get("sample_note") else direction,
+        "sample_note": row.get("sample_note"),
+    }
+
+
+def _low_score_deep_analysis(records: list[dict[str, Any]]) -> dict[str, Any]:
+    low_score_records = [
+        record for record in records
+        if _is_low_score_record(record) and _number(record.get("return_10d")) is not None
+    ]
+    winners = [
+        record for record in low_score_records
+        if float(record.get("return_10d") or 0.0) > 0
+    ]
+    losers = [
+        record for record in low_score_records
+        if float(record.get("return_10d") or 0.0) <= 0
+    ]
+    winners.sort(key=lambda record: float(record.get("return_10d") or 0.0), reverse=True)
+    losers.sort(key=lambda record: float(record.get("return_10d") or 0.0))
+    separations = _low_score_feature_separations(winners, losers)
+    return {
+        "score_range": {"min": LOW_SCORE_MIN, "max": LOW_SCORE_MAX},
+        "low_score_count": len(low_score_records),
+        "winner_count": len(winners),
+        "loser_count": len(losers),
+        "winners": _low_score_record_summaries(winners),
+        "losers": _low_score_record_summaries(losers),
+        "feature_separation": separations[:LOW_SCORE_SEPARATION_LIMIT],
+        "candidate_rescue_rules": _low_score_candidate_rescue_rules(separations, winners, losers),
+    }
+
+
+def _is_low_score_record(record: dict[str, Any]) -> bool:
+    total_score = _number(record.get("total_score"))
+    return total_score is not None and LOW_SCORE_MIN <= total_score <= LOW_SCORE_MAX
+
+
+def _low_score_record_summaries(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "date": record.get("date"),
+            "code": record.get("code"),
+            "name": record.get("name"),
+            "rank": record.get("rank"),
+            "total_score": record.get("total_score"),
+            "return_10d": record.get("return_10d"),
+            "rsi": record.get("rsi"),
+            "volume_ratio": record.get("volume_ratio"),
+            "market_regime": record.get("market_regime"),
+            "sector": record.get("sector"),
+            "candlestick_signals": record.get("candlestick_signals", []),
+        }
+        for record in records[:LOW_SCORE_RECORD_LIMIT]
+    ]
+
+
+def _low_score_feature_separations(
+    winners: list[dict[str, Any]],
+    losers: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    winner_counts = _low_score_feature_counts(winners)
+    loser_counts = _low_score_feature_counts(losers)
+    rows = []
+    for feature in sorted(set(winner_counts) | set(loser_counts)):
+        winner_count = winner_counts.get(feature, 0)
+        loser_count = loser_counts.get(feature, 0)
+        winner_share = _share(winner_count, len(winners))
+        loser_share = _share(loser_count, len(losers))
+        separation = _difference(winner_share, loser_share)
+        rows.append(
+            {
+                "feature": feature[0],
+                "value": feature[1],
+                "winner_count": winner_count,
+                "loser_count": loser_count,
+                "winner_share": winner_share,
+                "loser_share": loser_share,
+                "separation": separation,
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda row: (
+            abs(float(row.get("separation") or 0.0)),
+            int(row.get("winner_count") or 0) + int(row.get("loser_count") or 0),
+            str(row.get("feature")),
+            str(row.get("value")),
+        ),
+        reverse=True,
+    )
+
+
+def _low_score_feature_counts(records: list[dict[str, Any]]) -> dict[tuple[str, str], int]:
+    counts: dict[tuple[str, str], int] = defaultdict(int)
+    for record in records:
+        for feature in set(_low_score_features(record)):
+            counts[feature] += 1
+    return counts
+
+
+def _low_score_features(record: dict[str, Any]) -> list[tuple[str, str]]:
+    signals = set(_candlestick_signal_values(record))
+    features = [
+        ("RSI", _rsi_bucket(record.get("rsi"))),
+        ("volume_ratio", _volume_bucket(record.get("volume_ratio"))),
+        ("market_regime", str(record.get("market_regime") or "unknown")),
+        ("sector", str(record.get("sector") or "未分類")),
+        ("volume_confirmed_breakout", "yes" if "volume_confirmed_breakout" in signals else "no"),
+        ("long_lower_shadow_support", "yes" if "long_lower_shadow_support" in signals else "no"),
+    ]
+    features.extend(("candlestick_signal", signal) for signal in signals)
+    return [(name, value) for name, value in features if value]
+
+
+def _low_score_candidate_rescue_rules(
+    rows: list[dict[str, Any]],
+    winners: list[dict[str, Any]],
+    losers: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    positive_rows = [
+        row for row in rows
+        if _number(row.get("separation")) is not None
+        and float(row.get("separation") or 0.0) > 0
+        and int(row.get("winner_count") or 0) > 0
+        and str(row.get("value") or "") not in {"no", "unknown", "no_signal"}
+    ]
+    rules = []
+    rule_texts = set()
+    volume_rule = _find_low_score_row(positive_rows, "volume_ratio", "3+")
+    breakout_rule = _find_low_score_row(positive_rows, "volume_confirmed_breakout", "yes")
+    if volume_rule and breakout_rule:
+        combined = _combined_low_score_rule(winners, losers)
+        rules.append(combined)
+        rule_texts.add(str(combined["rule"]))
+
+    for row in positive_rows:
+        condition = _low_score_condition_text(row)
+        if not condition:
+            continue
+        rule_text = f"total_score {LOW_SCORE_MIN}-{LOW_SCORE_MAX} でも {condition} なら採用候補"
+        if rule_text in rule_texts:
+            continue
+        rule_texts.add(rule_text)
+        rules.append(_low_score_rule_candidate(row, rule_text))
+        if len(rules) >= 10:
+            break
+    return rules[:10]
+
+
+def _find_low_score_row(rows: list[dict[str, Any]], feature: str, value: str) -> dict[str, Any] | None:
+    for row in rows:
+        if row.get("feature") == feature and row.get("value") == value:
+            return row
+    return None
+
+
+def _combined_low_score_rule(winners: list[dict[str, Any]], losers: list[dict[str, Any]]) -> dict[str, Any]:
+    winner_count = _combined_low_score_count(winners)
+    loser_count = _combined_low_score_count(losers)
+    winner_share = _share(winner_count, len(winners))
+    loser_share = _share(loser_count, len(losers))
+    return {
+        "rule": f"total_score {LOW_SCORE_MIN}-{LOW_SCORE_MAX} でも volume_ratio >= 3 かつ volume_confirmed_breakout なら採用候補",
+        "feature": "combined",
+        "value": "volume_ratio >= 3 AND volume_confirmed_breakout",
+        "winner_count": winner_count,
+        "loser_count": loser_count,
+        "winner_share": winner_share,
+        "loser_share": loser_share,
+        "separation": _difference(winner_share, loser_share),
+        "confidence": "candidate",
+    }
+
+
+def _combined_low_score_count(records: list[dict[str, Any]]) -> int:
+    return sum(
+        1 for record in records
+        if (_number(record.get("volume_ratio")) or 0.0) >= 3
+        and "volume_confirmed_breakout" in set(_candlestick_signal_values(record))
+    )
+
+
+def _low_score_rule_candidate(row: dict[str, Any], rule_text: str) -> dict[str, Any]:
+    return {
+        "rule": rule_text,
+        "feature": row.get("feature"),
+        "value": row.get("value"),
+        "winner_count": row.get("winner_count"),
+        "loser_count": row.get("loser_count"),
+        "winner_share": row.get("winner_share"),
+        "loser_share": row.get("loser_share"),
+        "separation": row.get("separation"),
+        "confidence": "candidate",
+    }
+
+
+def _low_score_condition_text(row: dict[str, Any]) -> str:
+    feature = str(row.get("feature") or "")
+    value = str(row.get("value") or "")
+    if feature == "RSI":
+        return _bucket_rule("RSI", value)
+    if feature == "volume_ratio":
+        return _bucket_rule("volume_ratio", value)
+    if feature == "market_regime":
+        return f"market_regime = {value}"
+    if feature == "sector":
+        return f"sector = {value}"
+    if feature == "candlestick_signal":
+        return f"candlestick_signal = {value}"
+    if feature in {"volume_confirmed_breakout", "long_lower_shadow_support"} and value == "yes":
+        return feature
+    return ""
 
 
 def _selection_lift_deep_analysis(
@@ -971,6 +1292,122 @@ def _candidate_rule_lines(items: list[dict[str, Any]]) -> list[str]:
         )
         for item in items
     ]
+
+
+def _sector_lift_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- データなし"]
+    return [
+        (
+            f"- {item.get('sector')}: "
+            f"selected avg10d {_format_percent(item.get('selected_avg10d'))}, "
+            f"rejected avg10d {_format_percent(item.get('rejected_avg10d'))}, "
+            f"lift {_format_signed_percent(item.get('lift'))}, "
+            f"selected count {item.get('selected_count')}, "
+            f"rejected count {item.get('rejected_count')}, "
+            f"confidence {item.get('confidence')}"
+            f"{_sample_note_suffix(item)}"
+        )
+        for item in items
+    ]
+
+
+def _sector_filter_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- データなし"]
+    return [
+        (
+            f"- {item.get('filter')}: "
+            f"selected avg10d {_format_percent(item.get('selected_avg10d'))}, "
+            f"rejected avg10d {_format_percent(item.get('rejected_avg10d'))}, "
+            f"lift {_format_signed_percent(item.get('lift'))}, "
+            f"selected count {item.get('selected_count')}, "
+            f"rejected count {item.get('rejected_count')}, "
+            f"confidence {item.get('confidence')}"
+            f"{_sample_note_suffix(item)}"
+        )
+        for item in items
+    ]
+
+
+def _low_score_deep_analysis_lines(analysis: dict[str, Any]) -> list[str]:
+    if not analysis:
+        return ["- データなし"]
+    score_range = analysis.get("score_range", {})
+    return [
+        f"- target_score_range: {score_range.get('min', LOW_SCORE_MIN)}-{score_range.get('max', LOW_SCORE_MAX)}",
+        f"- low_score_count: {analysis.get('low_score_count', 0)}",
+        f"- winner_count: {analysis.get('winner_count', 0)}",
+        f"- loser_count: {analysis.get('loser_count', 0)}",
+        "",
+        "### Winners in 65-69",
+        "",
+        *_low_score_record_lines(analysis.get("winners", [])),
+        "",
+        "### Losers in 65-69",
+        "",
+        *_low_score_record_lines(analysis.get("losers", [])),
+        "",
+        "### Features with highest separation",
+        "",
+        *_low_score_separation_lines(analysis.get("feature_separation", [])),
+        "",
+        "### Candidate Rescue Rules",
+        "",
+        *_low_score_rule_lines(analysis.get("candidate_rescue_rules", [])),
+    ]
+
+
+def _low_score_record_lines(records: list[dict[str, Any]]) -> list[str]:
+    if not records:
+        return ["- データなし"]
+    return [
+        (
+            f"- {record.get('date')} {record.get('code')} {record.get('name')}: "
+            f"score {_format_number(record.get('total_score'))}, "
+            f"10d {_format_percent(record.get('return_10d'))}, "
+            f"RSI {_format_number(record.get('rsi'))}, "
+            f"volume_ratio {_format_number(record.get('volume_ratio'))}, "
+            f"market_regime {record.get('market_regime')}, "
+            f"sector {record.get('sector')}, "
+            f"signals {_signal_text(record.get('candlestick_signals', []))}"
+        )
+        for record in records
+    ]
+
+
+def _low_score_separation_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- データなし"]
+    return [
+        (
+            f"- {item.get('feature')}={item.get('value')}: "
+            f"winners {_format_percent(item.get('winner_share'))} ({item.get('winner_count')}件), "
+            f"losers {_format_percent(item.get('loser_share'))} ({item.get('loser_count')}件), "
+            f"separation {_format_signed_percent(item.get('separation'))}"
+        )
+        for item in items
+    ]
+
+
+def _low_score_rule_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- データなし"]
+    return [
+        (
+            f"- {item.get('rule')}: "
+            f"winners {_format_percent(item.get('winner_share'))} ({item.get('winner_count')}件), "
+            f"losers {_format_percent(item.get('loser_share'))} ({item.get('loser_count')}件), "
+            f"separation {_format_signed_percent(item.get('separation'))}, "
+            f"confidence {item.get('confidence')}"
+        )
+        for item in items
+    ]
+
+
+def _signal_text(signals: Any) -> str:
+    values = [str(signal) for signal in signals if signal]
+    return ", ".join(values) if values else "no_signal"
 
 
 def _sample_note_suffix(item: dict[str, Any]) -> str:

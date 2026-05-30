@@ -83,9 +83,11 @@ def test_trade_analysis_includes_extended_metrics(config_copy: dict) -> None:
     assert analysis["loss_over_stop_rate"] == 1.0
     assert analysis["best_trade"]["code"] == "1001"
     assert analysis["worst_trade"]["code"] == "1002"
+    assert analysis["sold_before_take_profit_rate"] == 0.5
     assert analysis["exit_reason_analysis"] == [
-        {"exit_reason": "利確", "count": 1, "average_profit_rate": 0.1},
-        {"exit_reason": "損切り", "count": 1, "average_profit_rate": -0.04},
+        {"exit_reason": "利確", "count": 1, "win_rate": 1.0, "average_profit_rate": 0.1, "total_profit": 10000.0},
+        {"exit_reason": "損切り", "count": 1, "win_rate": 0.0, "average_profit_rate": -0.04, "total_profit": -4000.0},
+        {"exit_reason": "最大保有期間到達", "count": 0, "win_rate": None, "average_profit_rate": None, "total_profit": 0.0},
     ]
 
 
@@ -240,7 +242,12 @@ def test_analysis_markdown_includes_yearly_and_monthly_sections() -> None:
             "max_slippage": 0,
             "gap_up_count": 0,
             "gap_down_count": 0,
-            "exit_reason_analysis": [],
+            "sold_before_take_profit_rate": 0.5,
+            "exit_reason_analysis": [
+                {"exit_reason": "利確", "count": 1, "win_rate": 1.0, "average_profit_rate": 0.04, "total_profit": 12000},
+                {"exit_reason": "損切り", "count": 1, "win_rate": 0.0, "average_profit_rate": -0.02, "total_profit": -2000},
+                {"exit_reason": "最大保有期間到達", "count": 0, "win_rate": None, "average_profit_rate": None, "total_profit": 0},
+            ],
         },
         "score_analysis": {
             "selected_count": 0,
@@ -273,3 +280,6 @@ def test_analysis_markdown_includes_yearly_and_monthly_sections() -> None:
     assert "## Monthly Performance" in markdown
     assert "### 2026-03" in markdown
     assert "- trades: 2" in markdown
+    assert "利確到達前に売った取引の割合: 50.00%" in markdown
+    assert "利確: 件数 1件, 勝率 100.00%, 平均利益率 4.00%, 合計利益 12,000円" in markdown
+    assert "最大保有期間到達: 件数 0件" in markdown

@@ -4426,6 +4426,7 @@ def render_analysis_markdown(analysis: dict[str, Any]) -> str:
         f"- 最大スリッページ: {_format_optional_percent(trades.get('max_slippage'))}",
         f"- ギャップアップ回数: {trades.get('gap_up_count', 0)}",
         f"- ギャップダウン回数: {trades.get('gap_down_count', 0)}",
+        f"- 利確到達前に売った取引の割合: {_format_optional_percent(trades.get('sold_before_take_profit_rate'))}",
         "",
         "### exit_reason別集計",
         "",
@@ -4638,7 +4639,9 @@ def _exit_reason_analysis_lines(items: list[dict[str, Any]]) -> list[str]:
     return [
         (
             f"- {item['exit_reason']}: 件数 {item['count']}件, "
-            f"平均損益率 {_format_optional_percent(item.get('average_profit_rate'))}"
+            f"勝率 {_format_optional_percent(item.get('win_rate'))}, "
+            f"平均利益率 {_format_optional_percent(item.get('average_profit_rate'))}, "
+            f"合計利益 {_format_optional_yen(item.get('total_profit'))}"
         )
         for item in items
     ]

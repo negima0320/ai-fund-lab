@@ -1258,6 +1258,7 @@ def _trade_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> dict[
         "best_trade": _trade_summary(best_trade),
         "worst_trade": _trade_summary(worst_trade),
         "exit_reason_analysis": _exit_reason_analysis(closed),
+        "sold_before_take_profit_rate": _sold_before_take_profit_rate(closed),
         "average_holding_days": _average(holding_days),
         "take_profit_count": sum(1 for row in closed if row.get("exit_reason") == "利確"),
         "stop_loss_count": sum(1 for row in closed if row.get("exit_reason") == "損切り"),
@@ -1285,19 +1286,60 @@ def _trade_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> dict[
 
 
 def _exit_reason_analysis(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    reasons = sorted({str(row.get("exit_reason") or "unknown") for row in rows})
+    primary_reasons = ["利確", "損切り", "最大保有期間到達"]
+    reasons = primary_reasons + sorted({str(row.get("exit_reason") or "unknown") for row in rows} - set(primary_reasons))
     summaries = []
     for reason in reasons:
         reason_rows = [row for row in rows if str(row.get("exit_reason") or "unknown") == reason]
         profit_rates = [float(row["profit_rate"]) for row in reason_rows if row.get("profit_rate") is not None]
+        profits = [_trade_profit(row) for row in reason_rows]
+        profits = [profit for profit in profits if profit is not None]
         summaries.append(
             {
                 "exit_reason": reason,
                 "count": len(reason_rows),
+                "win_rate": _win_rate(reason_rows),
                 "average_profit_rate": _average(profit_rates),
+                "total_profit": round(sum(profits), 2) if profits else 0.0,
             }
         )
     return summaries
+
+
+def _sold_before_take_profit_rate(rows: list[dict[str, Any]]) -> float | None:
+    if not rows:
+        return None
+    before_take_profit = [row for row in rows if row.get("exit_reason") != "利確"]
+    return round(len(before_take_profit) / len(rows), 4)
+
+
+def _win_rate(rows: list[dict[str, Any]]) -> float | None:
+    if not rows:
+        return None
+    wins = 0
+    evaluated = 0
+    for row in rows:
+        profit_rate = row.get("profit_rate")
+        if profit_rate is not None:
+            evaluated += 1
+            if float(profit_rate) > 0:
+                wins += 1
+            continue
+        result = row.get("result")
+        if result in {"WIN", "LOSS"}:
+            evaluated += 1
+            if result == "WIN":
+                wins += 1
+    if evaluated == 0:
+        return None
+    return round(wins / evaluated, 4)
+
+
+def _trade_profit(row: dict[str, Any]) -> float | None:
+    for key in ["net_profit", "gross_profit", "profit"]:
+        if row.get(key) is not None:
+            return float(row[key])
+    return None
 
 
 def _yearly_performance_analysis(portfolio_rows: list[dict[str, Any]], trade_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
