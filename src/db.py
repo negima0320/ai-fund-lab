@@ -151,6 +151,9 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
                 trend_score REAL,
                 volume_score REAL,
                 rsi_score REAL,
+                market_filter_applied INTEGER,
+                market_regime TEXT,
+                market_filter_reason TEXT,
                 source_provider TEXT,
                 config_version TEXT,
                 created_at TEXT NOT NULL
@@ -406,6 +409,9 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
         _add_column_if_missing(connection, "scoring_results", "trend_score", "REAL")
         _add_column_if_missing(connection, "scoring_results", "volume_score", "REAL")
         _add_column_if_missing(connection, "scoring_results", "rsi_score", "REAL")
+        _add_column_if_missing(connection, "scoring_results", "market_filter_applied", "INTEGER")
+        _add_column_if_missing(connection, "scoring_results", "market_regime", "TEXT")
+        _add_column_if_missing(connection, "scoring_results", "market_filter_reason", "TEXT")
         _add_column_if_missing(connection, "scoring_results", "config_version", "TEXT")
         _add_column_if_missing(connection, "screening_results", "candle_type", "TEXT")
         _add_column_if_missing(connection, "screening_results", "candle_body_rate", "REAL")
@@ -675,9 +681,10 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
                 bb_lower, atr, candle_type, candle_body_rate, upper_shadow_rate,
                 lower_shadow_rate, close_position_in_range, gap_rate,
                 candlestick_signals, candlestick_score, trend_score, volume_score,
-                rsi_score, source_provider, ai_reason, ai_risk, ai_confidence,
+                rsi_score, market_filter_applied, market_regime, market_filter_reason,
+                source_provider, ai_reason, ai_risk, ai_confidence,
                 ai_score, config_version, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -725,6 +732,9 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
                     item.get("trend_score"),
                     item.get("volume_score"),
                     item.get("rsi_score"),
+                    1 if item.get("market_filter_applied") else 0,
+                    item.get("market_regime"),
+                    item.get("market_filter_reason"),
                     item.get("source_provider") or scoring_log.get("source_provider"),
                     item.get("ai_reason"),
                     item.get("ai_risk"),

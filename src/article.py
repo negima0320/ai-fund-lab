@@ -230,11 +230,18 @@ def _technical_detail_lines(item: dict[str, Any]) -> list[str]:
     warning_signals = [signal for signal in signals if "warning" in signal or signal == "overheated_warning"]
     return [
         f"  - 業種: {item.get('sector_name') or 'N/A'} / sector_score={item.get('sector_momentum_score', 'N/A')} / rank={item.get('sector_rank', 'N/A')}",
+        f"  - market_filter: {_market_filter_state(item)}",
         f"  - ローソク足タイプ: {item.get('candle_type') or 'N/A'}",
         f"  - 移動平均線の状態: {_ma_state(item)}",
         f"  - 出来高確認: {_volume_state(item)}",
         f"  - 注意シグナル: {', '.join(warning_signals) if warning_signals else 'なし'}",
     ]
+
+
+def _market_filter_state(item: dict[str, Any]) -> str:
+    if not item.get("market_filter_applied"):
+        return f"{item.get('market_regime') or 'neutral'} / not applied"
+    return f"{item.get('market_regime') or 'unknown'} / {item.get('market_filter_reason') or 'applied'}"
 
 
 def _ma_state(item: dict[str, Any]) -> str:

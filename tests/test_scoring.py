@@ -74,3 +74,52 @@ def test_no_selection_below_top_pick_threshold(config_copy: dict) -> None:
     )
     assert result["scores"][0]["total_score"] < config_copy["selection"]["top_pick_min_score"]
     assert len(result["selected"]) == 0
+
+
+def test_risk_off_blocks_low_score_candidate(config_copy: dict) -> None:
+    result = score_real_candidates(
+        [candidate("1001", volume_ratio=3.0, turnover_value=1_250_000_000, rsi=57.5, volatility=0.08)],
+        "2026-03-06",
+        config_copy,
+        "test",
+        market_context={"market_regime": "risk_off"},
+    )
+
+    assert len(result["selected"]) == 0
+    assert result["scores"][0]["market_filter_applied"] is True
+    assert result["scores"][0]["market_regime"] == "risk_off"
+    assert result["scores"][0]["rejected_reason"] == "risk_offのため買付抑制"
+
+
+def test_risk_off_disables_top_pick(config_copy: dict) -> None:
+    result = score_real_candidates(
+        [
+            candidate("1001", volume_ratio=3.0, turnover_value=1_250_000_000, rsi=57.5, volatility=0.08),
+            candidate("1002", volume_ratio=2.0, turnover_value=800_000_000, rsi=50, volatility=0.10),
+        ],
+        "2026-03-06",
+        config_copy,
+        "test",
+        market_context={"market_regime": "risk_off"},
+    )
+
+    assert max(item["total_score"] for item in result["scores"]) >= config_copy["selection"]["top_pick_min_score"]
+    assert max(item["total_score"] for item in result["scores"]) < config_copy["market_filter"]["risk_off_min_score"]
+    assert len(result["selected"]) == 0
+    assert all(item["rejected_reason"] == "risk_offのため買付抑制" for item in result["scores"])
+
+
+def test_neutral_keeps_existing_top_pick_behavior(config_copy: dict) -> None:
+    result = score_real_candidates(
+        [
+            candidate("1001", volume_ratio=3.0, turnover_value=1_250_000_000, rsi=57.5, volatility=0.08),
+            candidate("1002", volume_ratio=2.0, turnover_value=800_000_000, rsi=50, volatility=0.10),
+        ],
+        "2026-03-06",
+        config_copy,
+        "test",
+        market_context={"market_regime": "neutral"},
+    )
+
+    assert len(result["selected"]) == 1
+    assert result["selected"][0]["market_filter_applied"] is False

@@ -514,6 +514,9 @@ def _technical_snapshot(item: dict[str, Any]) -> dict[str, Any]:
         "macd_hist": item.get("macd_hist"),
         "bb_position": item.get("bb_position"),
         "atr": item.get("atr"),
+        "market_filter_applied": item.get("market_filter_applied", False),
+        "market_regime": item.get("market_regime"),
+        "market_filter_reason": item.get("market_filter_reason", ""),
     }
 
 

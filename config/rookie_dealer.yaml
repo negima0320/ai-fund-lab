@@ -47,6 +47,13 @@ backtest:
   disable_openai: true
   indicator_mode: fast
 
+market_filter:
+  enabled: true
+  risk_off_buy_policy: conservative
+  risk_off_max_buy_orders: 1
+  risk_off_min_score: 75
+  risk_off_disable_top_pick: true
+
 database:
   path: storage/ai_fund_lab.sqlite3
 

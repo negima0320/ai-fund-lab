@@ -1821,8 +1821,16 @@ def run_score(provider_name: str, target_date_text: str) -> None:
     if not candidates:
         raise SystemExit(f"No candidates found in {candidates_path.relative_to(ROOT)}.")
 
+    market_context = load_market_context_for_date(target_date_text, provider_name)
     news_by_code = fetch_candidate_news(candidates, target_date_text, config)
-    scoring_log = score_real_candidates(candidates, target_date_text, config, provider_name, news_by_code=news_by_code)
+    scoring_log = score_real_candidates(
+        candidates,
+        target_date_text,
+        config,
+        provider_name,
+        news_by_code=news_by_code,
+        market_context=market_context,
+    )
     attach_config_version(scoring_log, config)
     ai_decision_log = run_ai_decision_if_enabled(scoring_log, config, target_date_text)
     scores = scoring_log["scores"]
@@ -1846,6 +1854,8 @@ def run_score(provider_name: str, target_date_text: str) -> None:
             "scored_count": len(scores),
             "selected_count": len(selected),
             "selection_config": scoring_log.get("selection_config", {}),
+            "market_context": scoring_log.get("market_context", {}),
+            "market_filter": scoring_log.get("market_filter", {}),
             "news_config": config.get("news", {}),
             "ai_decision": scoring_log.get("ai_decision", {}),
             "scores": scores,
@@ -2655,7 +2665,7 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
     print(f"summary_json: {Path(summary['report_json_path']).relative_to(ROOT)}")
     if _is_rule_based_backtest(config):
         print("")
-        print("Rule-based 90d backtest completed")
+        print(_rule_based_backtest_completed_label(start_date, end_date))
         print("")
         print(f"- final_assets: {summary['final_assets']}")
         print(f"- net_cumulative_profit: {summary.get('net_cumulative_profit')}")
@@ -2824,6 +2834,13 @@ def _backtest_disable_openai(config: dict[str, Any]) -> bool:
 def _backtest_indicator_mode(config: dict[str, Any]) -> str:
     mode = str(config.get("backtest", {}).get("indicator_mode", "fast"))
     return mode if mode in {"full", "fast", "minimal"} else "fast"
+
+
+def _rule_based_backtest_completed_label(start_date: date, end_date: date) -> str:
+    days = (end_date - start_date).days + 1
+    if 80 <= days <= 100:
+        return "Rule-based 90d backtest completed"
+    return "Rule-based backtest completed"
 
 
 def ensure_prices(provider_name: str, target_date_text: str) -> None:
@@ -3116,6 +3133,9 @@ def write_real_daily_markdown(
                 "atr": item.get("atr"),
                 "news_reason": item.get("news_reason", "ニュース材料は中立です"),
                 "confidence": item["confidence"],
+                "market_filter_applied": item.get("market_filter_applied", False),
+                "market_regime": item.get("market_regime"),
+                "market_filter_reason": item.get("market_filter_reason", ""),
                 "dealer_comment": generate_buy_comment(item, config) if item.get("selected") else "",
             }
             for item in scoring_log.get("scores", [])
@@ -3190,6 +3210,9 @@ def write_backtest_daily_markdown(
                 "atr": item.get("atr"),
                 "news_reason": item.get("news_reason", "ニュース材料は中立です"),
                 "confidence": item["confidence"],
+                "market_filter_applied": item.get("market_filter_applied", False),
+                "market_regime": item.get("market_regime"),
+                "market_filter_reason": item.get("market_filter_reason", ""),
                 "dealer_comment": generate_buy_comment(item, config) if item.get("selected") else "",
             }
             for item in scoring_log.get("scores", [])

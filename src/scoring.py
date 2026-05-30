@@ -99,6 +99,9 @@ def build_trade_decisions(scoring_log: dict[str, Any], config: dict[str, Any]) -
                 "bb_position": item.get("bb_position"),
                 "atr": item.get("atr"),
                 "news_reason": item.get("news_reason", "ニュース材料は中立です"),
+                "market_filter_applied": item.get("market_filter_applied", False),
+                "market_regime": item.get("market_regime"),
+                "market_filter_reason": item.get("market_filter_reason", ""),
                 "confidence": item["confidence"],
                 "rule_snapshot": {
                     "max_positions": config["portfolio"]["max_positions"],
@@ -125,10 +128,13 @@ def score_real_candidates(
     config: dict[str, Any],
     source_provider: str,
     news_by_code: dict[str, dict[str, Any]] | None = None,
+    market_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     scored = []
     financial_score = 10
     selection_config = _selection_config(config)
+    market_filter = _market_filter_config(config)
+    market_regime = str((market_context or {}).get("market_regime") or "neutral")
     news_by_code = news_by_code or {}
 
     for candidate in candidates:
@@ -201,35 +207,16 @@ def score_real_candidates(
                 "selection_reason": "",
                 "selected_reason": "",
                 "rejected_reason": "",
+                "market_filter_applied": False,
+                "market_regime": market_regime,
+                "market_filter_reason": "",
                 "source_provider": source_provider,
                 "fallback": candidate.get("fallback", False),
             }
         )
 
     scored.sort(key=lambda item: (item["total_score"], item["confidence"]), reverse=True)
-    selected_count = 0
-    for index, item in enumerate(scored, start=1):
-        item["rank"] = index
-        if _meets_regular_selection(item, selection_config) and selected_count < selection_config["max_selected"]:
-            item["selected"] = True
-            item["selection_reason"] = "スコア基準を満たしたため採用"
-            item["selected_reason"] = item["selection_reason"]
-            item["reason"] = item["selection_reason"]
-            selected_count += 1
-        else:
-            item["rejected_reason"] = _real_rejected_reason(item, selected_count, selection_config)
-            item["reason"] = item["rejected_reason"]
-
-    if selected_count == 0 and selection_config["allow_top_pick_when_no_selection"]:
-        for item in scored:
-            if _meets_top_pick_selection(item, selection_config):
-                item["selected"] = True
-                item["selection_reason"] = "通常基準70点には届かなかったが、ノートレード回避ルールにより最上位候補として採用"
-                item["selected_reason"] = item["selection_reason"]
-                item["rejected_reason"] = ""
-                item["reason"] = item["selection_reason"]
-                selected_count = 1
-                break
+    market_filter_summary = _apply_selection_rules(scored, selection_config, market_filter, market_regime)
 
     return {
         "date": target_date,
@@ -250,9 +237,74 @@ def score_real_candidates(
             "max_selected": selection_config["max_selected"],
         },
         "selection_config": selection_config,
+        "market_context": market_context or {},
+        "market_filter": market_filter_summary,
         "scores": scored,
         "selected": [item for item in scored if item["selected"]],
         "rejected": [item for item in scored if not item["selected"]],
+    }
+
+
+def _apply_selection_rules(
+    scored: list[dict[str, Any]],
+    selection_config: dict[str, Any],
+    market_filter: dict[str, Any],
+    market_regime: str,
+) -> dict[str, Any]:
+    risk_off = market_filter["enabled"] and market_regime == "risk_off"
+    selected_count = 0
+    max_selected = selection_config["max_selected"]
+    min_score = selection_config["min_score"]
+    if risk_off:
+        max_selected = min(max_selected, market_filter["risk_off_max_buy_orders"])
+        min_score = max(min_score, market_filter["risk_off_min_score"])
+
+    for index, item in enumerate(scored, start=1):
+        item["rank"] = index
+        item["market_regime"] = market_regime
+        if risk_off:
+            item["market_filter_applied"] = True
+            item["market_filter_reason"] = "risk_offのため買付抑制"
+
+        if _meets_regular_selection(item, {**selection_config, "min_score": min_score}) and selected_count < max_selected:
+            item["selected"] = True
+            reason = "スコア基準を満たしたため採用"
+            if risk_off:
+                reason = f"{reason}（risk_offだが高スコアのため限定採用）"
+            item["selection_reason"] = reason
+            item["selected_reason"] = item["selection_reason"]
+            item["reason"] = item["selection_reason"]
+            selected_count += 1
+        else:
+            item["rejected_reason"] = _real_rejected_reason(item, selected_count, {**selection_config, "min_score": min_score, "max_selected": max_selected})
+            if risk_off and (item["total_score"] < min_score or selected_count >= max_selected):
+                item["rejected_reason"] = "risk_offのため買付抑制"
+            item["reason"] = item["rejected_reason"]
+
+    top_pick_allowed = selection_config["allow_top_pick_when_no_selection"]
+    if risk_off and market_filter["risk_off_disable_top_pick"]:
+        top_pick_allowed = False
+
+    if selected_count == 0 and top_pick_allowed:
+        for item in scored:
+            if _meets_top_pick_selection(item, selection_config):
+                item["selected"] = True
+                item["selection_reason"] = "通常基準70点には届かなかったが、ノートレード回避ルールにより最上位候補として採用"
+                item["selected_reason"] = item["selection_reason"]
+                item["rejected_reason"] = ""
+                item["reason"] = item["selection_reason"]
+                selected_count = 1
+                break
+
+    return {
+        "enabled": market_filter["enabled"],
+        "applied": risk_off,
+        "market_regime": market_regime,
+        "risk_off_buy_policy": market_filter["risk_off_buy_policy"],
+        "risk_off_max_buy_orders": market_filter["risk_off_max_buy_orders"],
+        "risk_off_min_score": market_filter["risk_off_min_score"],
+        "risk_off_disable_top_pick": market_filter["risk_off_disable_top_pick"],
+        "reason": "risk_offのため買付抑制" if risk_off else "",
     }
 
 
@@ -265,6 +317,17 @@ def _selection_config(config: dict[str, Any]) -> dict[str, Any]:
         "allow_top_pick_when_no_selection": bool(selection.get("allow_top_pick_when_no_selection", True)),
         "top_pick_min_score": float(selection.get("top_pick_min_score", 65)),
         "max_selected": int(selection.get("max_selected", config["portfolio"].get("max_positions", 5))),
+    }
+
+
+def _market_filter_config(config: dict[str, Any]) -> dict[str, Any]:
+    market_filter = config.get("market_filter", {})
+    return {
+        "enabled": bool(market_filter.get("enabled", True)),
+        "risk_off_buy_policy": str(market_filter.get("risk_off_buy_policy", "conservative")),
+        "risk_off_max_buy_orders": int(market_filter.get("risk_off_max_buy_orders", 1)),
+        "risk_off_min_score": float(market_filter.get("risk_off_min_score", 75)),
+        "risk_off_disable_top_pick": bool(market_filter.get("risk_off_disable_top_pick", True)),
     }
 
 
