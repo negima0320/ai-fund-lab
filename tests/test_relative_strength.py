@@ -329,6 +329,70 @@ def test_stale_relative_strength_indicator_cache_is_recalculated(monkeypatch, tm
     assert refreshed["indicators"][0]["relative_strength_5d"] is not None
 
 
+def test_v2_6_indicator_cache_hit_still_checks_topix_cache(monkeypatch, tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_6")
+    config.setdefault("jquants", {})["plan"] = "light"
+    config.setdefault("backtest", {})["indicator_mode"] = "minimal"
+    target = date(2026, 1, 26)
+    profile_path = tmp_path / "data" / "processed" / "rookie_dealer_02_v2_6" / "indicators_2026-01-26.json"
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(
+        json.dumps(
+            {
+                "indicator_mode": "minimal",
+                "relative_strength_enabled": True,
+                "benchmark_source": "topix",
+                "indicators": [
+                    {
+                        "code": "1001",
+                        "benchmark_source": "topix",
+                        "stock_return_5d": 0.05,
+                        "stock_return_10d": 0.08,
+                        "stock_return_20d": 0.12,
+                        "benchmark_return_5d": 0.01,
+                        "benchmark_return_10d": 0.02,
+                        "benchmark_return_20d": 0.03,
+                        "relative_strength_5d": 0.04,
+                        "relative_strength_10d": 0.06,
+                        "relative_strength_20d": 0.09,
+                        "relative_strength_score": 10,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls = {"count": 0}
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def fetch_topix_prices_cached(self, *_args, **_kwargs):
+            calls["count"] += 1
+            return {
+                "records": _topix_rows(latest_close=102),
+                "cache_path": str(tmp_path / "data" / "cache" / "jquants" / "topix_prices" / "x.json"),
+                "from_cache": False,
+                "fallback_used": False,
+                "warning": "",
+                "available": True,
+                "saved": True,
+                "usable": True,
+                "api_status": "200",
+            }
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "load_config", lambda _path: config)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+    monkeypatch.setattr(main_module, "BACKTEST_MODE_ACTIVE", True)
+
+    main_module.ensure_indicators("jquants", target.isoformat())
+
+    assert calls["count"] == 1
+    assert "endpoint=topix_prices" in (tmp_path / "logs" / "jquants_api.log").read_text(encoding="utf-8")
+
+
 def test_light_topix_benchmark_payload_does_not_emit_fallback_warning(monkeypatch, capsys) -> None:
     config = load_profile("rookie_dealer_02_v2_6")
     config.setdefault("jquants", {})["plan"] = "light"

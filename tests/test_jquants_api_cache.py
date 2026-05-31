@@ -39,14 +39,50 @@ def test_financial_statements_api_success_creates_cache_file(monkeypatch, tmp_pa
     assert (tmp_path / "jquants" / "financial_statements" / "2026-01-01_to_2026-03-06.json").exists()
 
 
+def test_records_zero_cache_is_not_usable_or_cache_hit(monkeypatch, tmp_path) -> None:
+    provider = _provider_without_init("light")
+    cache_path = tmp_path / "jquants" / "investor_types" / "2026-02-01_to_2026-03-06.json"
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_text('{"records":[]}', encoding="utf-8")
+    calls = {"count": 0}
+
+    def fake_fetch(*_args, **_kwargs):
+        calls["count"] += 1
+        return [{"date": "2026-03-06", "overseas_net_buy": 100}]
+
+    monkeypatch.setattr(provider, "fetch_investor_types", fake_fetch)
+
+    payload = provider.fetch_investor_types_cached(tmp_path, date(2026, 2, 1), date(2026, 3, 6))
+
+    assert calls["count"] == 1
+    assert payload["from_cache"] is False
+    assert payload["usable"] is True
+    assert provider.fetch_stats["cache_hits"] == 0
+
+
+def test_records_zero_api_response_is_saved_but_unusable(monkeypatch, tmp_path) -> None:
+    provider = _provider_without_init("light")
+    monkeypatch.setattr(provider, "fetch_investor_types", lambda *_args, **_kwargs: [])
+
+    payload = provider.fetch_investor_types_cached(tmp_path, date(2026, 2, 1), date(2026, 3, 6))
+    retry = provider.fetch_investor_types_cached(tmp_path, date(2026, 2, 1), date(2026, 3, 6))
+
+    assert payload["saved"] is True
+    assert payload["usable"] is False
+    assert payload["available"] is False
+    assert payload["reason"] == "empty_response"
+    assert retry["from_cache"] is False
+
+
 def test_preflight_cache_status_reports_missing_cache_as_false(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(main_module, "ROOT", tmp_path)
 
     status = main_module._jquants_endpoint_cache_status("investor_types", date(2026, 5, 31))
 
-    assert status["path"] == "data/cache/jquants/investor_types/2026-04-16_to_2026-05-31.json"
+    assert status["path"] == "data/cache/jquants/investor_types/2025-11-14_to_2026-05-15.json"
     assert status["exists"] is False
     assert status["records"] == 0
+    assert status["usable"] is False
 
 
 def test_jquants_api_summary_uses_cache_files_and_api_log(monkeypatch, tmp_path) -> None:
@@ -67,4 +103,7 @@ def test_jquants_api_summary_uses_cache_files_and_api_log(monkeypatch, tmp_path)
     assert topix["cache_files"] == 1
     assert topix["total_records"] == 1
     assert topix["latest_cache_date"] == "2026-01-26"
-    assert topix["last_api_status"] == "200"
+    assert topix["usable_cache_files"] == 1
+    assert topix["empty_cache_files"] == 0
+    assert topix["last_status"] == "200"
+    assert topix["last_records"] == "1"

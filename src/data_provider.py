@@ -217,17 +217,10 @@ class JQuantsDataProvider(BaseDataProvider):
     ) -> dict[str, Any]:
         cache_path = cache_root / "jquants" / "topix_prices" / f"{start_date.isoformat()}_to_{end_date.isoformat()}.json"
         if cache_path.exists() and not force_refresh:
-            _increment_fetch_stat(self, "cache_hits")
             records = _read_cached_json(cache_path).get("records", [])
-            return {
-                "records": records,
-                "cache_path": str(cache_path),
-                "from_cache": True,
-                "fallback_used": False,
-                "warning": "",
-                "available": True,
-                "saved": False,
-            }
+            if _records_usable(records):
+                _increment_fetch_stat(self, "cache_hits")
+                return _cache_payload(records, cache_path, from_cache=True, available=True)
         if not self.has_capability("topix_prices"):
             return {
                 "records": [],
@@ -237,31 +230,27 @@ class JQuantsDataProvider(BaseDataProvider):
                 "warning": "topix_prices disabled for current J-Quants plan",
                 "available": False,
                 "saved": False,
+                "usable": False,
             }
         try:
             _increment_fetch_stat(self, "cache_misses")
             records = self.fetch_topix_prices(start_date, end_date)
         except Exception as exc:
             if cache_path.exists():
-                _increment_fetch_stat(self, "cache_hits")
                 records = _read_cached_json(cache_path).get("records", [])
-                return {
-                    "records": records,
-                    "cache_path": str(cache_path),
-                    "from_cache": True,
-                    "fallback_used": True,
-                    "warning": str(exc),
-                    "available": True,
-                    "saved": False,
-                }
+                if _records_usable(records):
+                    _increment_fetch_stat(self, "cache_hits")
+                    return _cache_payload(records, cache_path, from_cache=True, fallback_used=True, warning=str(exc), available=True)
             return {
                 "records": [],
                 "cache_path": str(cache_path),
                 "from_cache": False,
                 "fallback_used": False,
-                "warning": str(exc),
+                "warning": f"{exc}; empty_cache" if cache_path.exists() else str(exc),
                 "available": False,
                 "saved": False,
+                "usable": False,
+                "reason": "empty_cache" if cache_path.exists() else "api_error",
             }
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         _write_cached_json(
@@ -271,14 +260,18 @@ class JQuantsDataProvider(BaseDataProvider):
                 "records": records,
             },
         )
+        available = _records_usable(records)
         return {
             "records": records,
             "cache_path": str(cache_path),
             "from_cache": False,
             "fallback_used": False,
-            "warning": "",
-            "available": True,
+            "warning": "" if available else "api_success_but_empty",
+            "available": available,
             "saved": True,
+            "usable": available,
+            "api_status": "200",
+            "reason": "" if available else "empty_response",
         }
 
     def get_investor_breakdown(self, start_date: date, end_date: Optional[date] = None) -> list[dict[str, Any]]:
@@ -312,17 +305,10 @@ class JQuantsDataProvider(BaseDataProvider):
     ) -> dict[str, Any]:
         cache_path = cache_root / "jquants" / "investor_types" / f"{start_date.isoformat()}_to_{end_date.isoformat()}.json"
         if cache_path.exists() and not force_refresh:
-            _increment_fetch_stat(self, "cache_hits")
             records = _read_cached_json(cache_path).get("records", [])
-            return {
-                "records": records,
-                "cache_path": str(cache_path),
-                "from_cache": True,
-                "fallback_used": False,
-                "warning": "",
-                "available": True,
-                "saved": False,
-            }
+            if _records_usable(records):
+                _increment_fetch_stat(self, "cache_hits")
+                return _cache_payload(records, cache_path, from_cache=True, available=True)
         if not self.has_capability("investor_types"):
             return {
                 "records": [],
@@ -332,31 +318,27 @@ class JQuantsDataProvider(BaseDataProvider):
                 "warning": "investor_types disabled for current J-Quants plan",
                 "available": False,
                 "saved": False,
+                "usable": False,
             }
         try:
             _increment_fetch_stat(self, "cache_misses")
             records = self.fetch_investor_types(start_date, end_date)
         except Exception as exc:
             if cache_path.exists():
-                _increment_fetch_stat(self, "cache_hits")
                 records = _read_cached_json(cache_path).get("records", [])
-                return {
-                    "records": records,
-                    "cache_path": str(cache_path),
-                    "from_cache": True,
-                    "fallback_used": True,
-                    "warning": str(exc),
-                    "available": True,
-                    "saved": False,
-                }
+                if _records_usable(records):
+                    _increment_fetch_stat(self, "cache_hits")
+                    return _cache_payload(records, cache_path, from_cache=True, fallback_used=True, warning=str(exc), available=True)
             return {
                 "records": [],
                 "cache_path": str(cache_path),
                 "from_cache": False,
                 "fallback_used": False,
-                "warning": str(exc),
+                "warning": f"{exc}; empty_cache" if cache_path.exists() else str(exc),
                 "available": False,
                 "saved": False,
+                "usable": False,
+                "reason": "empty_cache" if cache_path.exists() else "api_error",
             }
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         _write_cached_json(
@@ -366,14 +348,18 @@ class JQuantsDataProvider(BaseDataProvider):
                 "records": records,
             },
         )
+        available = _records_usable(records)
         return {
             "records": records,
             "cache_path": str(cache_path),
             "from_cache": False,
             "fallback_used": False,
-            "warning": "",
-            "available": True,
+            "warning": "" if available else "api_success_but_empty",
+            "available": available,
             "saved": True,
+            "usable": available,
+            "api_status": "200",
+            "reason": "" if available else "empty_response",
         }
 
     def fetch_earnings_calendar(self) -> list[dict[str, Any]]:
@@ -389,47 +375,31 @@ class JQuantsDataProvider(BaseDataProvider):
         cache_date = target_date or date.today()
         cache_path = cache_root / "jquants" / "earnings_calendar" / f"{cache_date.isoformat()}.json"
         if cache_path.exists() and not force_refresh:
-            _increment_fetch_stat(self, "cache_hits")
             records = _read_cached_json(cache_path).get("records", [])
-            return {
-                "records": records,
-                "cache_path": str(cache_path),
-                "cache_date": cache_date.isoformat(),
-                "from_cache": True,
-                "fallback_used": False,
-                "warning": "",
-                "filter_available": True,
-                "available": True,
-                "saved": False,
-            }
+            if _records_usable(records):
+                _increment_fetch_stat(self, "cache_hits")
+                return _cache_payload(records, cache_path, from_cache=True, available=True, cache_date=cache_date)
         try:
             _increment_fetch_stat(self, "cache_misses")
             records = self.fetch_earnings_calendar()
         except Exception as exc:
             if cache_path.exists():
-                _increment_fetch_stat(self, "cache_hits")
                 records = _read_cached_json(cache_path).get("records", [])
-                return {
-                    "records": records,
-                    "cache_path": str(cache_path),
-                    "cache_date": cache_date.isoformat(),
-                    "from_cache": True,
-                    "fallback_used": True,
-                    "warning": str(exc),
-                    "filter_available": True,
-                    "available": True,
-                    "saved": False,
-                }
+                if _records_usable(records):
+                    _increment_fetch_stat(self, "cache_hits")
+                    return _cache_payload(records, cache_path, from_cache=True, fallback_used=True, warning=str(exc), available=True, cache_date=cache_date)
             return {
                 "records": [],
                 "cache_path": str(cache_path),
                 "cache_date": cache_date.isoformat(),
                 "from_cache": False,
                 "fallback_used": False,
-                "warning": str(exc),
+                "warning": f"{exc}; empty_cache" if cache_path.exists() else str(exc),
                 "filter_available": False,
                 "available": False,
                 "saved": False,
+                "usable": False,
+                "reason": "empty_cache" if cache_path.exists() else "api_error",
             }
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         _write_cached_json(
@@ -439,16 +409,20 @@ class JQuantsDataProvider(BaseDataProvider):
                 "records": records,
             },
         )
+        available = _records_usable(records)
         return {
             "records": records,
             "cache_path": str(cache_path),
             "cache_date": cache_date.isoformat(),
             "from_cache": False,
             "fallback_used": False,
-            "warning": "",
-            "filter_available": True,
-            "available": True,
+            "warning": "" if available else "api_success_but_empty",
+            "filter_available": available,
+            "available": available,
             "saved": True,
+            "usable": available,
+            "api_status": "200",
+            "reason": "" if available else "empty_response",
         }
 
     def fetch_financial_statements(self, start_date: date, end_date: date) -> list[dict[str, Any]]:
@@ -472,17 +446,10 @@ class JQuantsDataProvider(BaseDataProvider):
     ) -> dict[str, Any]:
         cache_path = cache_root / "jquants" / "financial_statements" / f"{start_date.isoformat()}_to_{end_date.isoformat()}.json"
         if cache_path.exists() and not force_refresh:
-            _increment_fetch_stat(self, "cache_hits")
             records = _read_cached_json(cache_path).get("records", [])
-            return {
-                "records": records,
-                "cache_path": str(cache_path),
-                "from_cache": True,
-                "fallback_used": False,
-                "warning": "",
-                "available": True,
-                "saved": False,
-            }
+            if _records_usable(records):
+                _increment_fetch_stat(self, "cache_hits")
+                return _cache_payload(records, cache_path, from_cache=True, available=True)
         if not self.has_capability("financial_statements"):
             return {
                 "records": [],
@@ -492,31 +459,27 @@ class JQuantsDataProvider(BaseDataProvider):
                 "warning": "financial_statements disabled for current J-Quants plan",
                 "available": False,
                 "saved": False,
+                "usable": False,
             }
         try:
             _increment_fetch_stat(self, "cache_misses")
             records = self.fetch_financial_statements(start_date, end_date)
         except Exception as exc:
             if cache_path.exists():
-                _increment_fetch_stat(self, "cache_hits")
                 records = _read_cached_json(cache_path).get("records", [])
-                return {
-                    "records": records,
-                    "cache_path": str(cache_path),
-                    "from_cache": True,
-                    "fallback_used": True,
-                    "warning": str(exc),
-                    "available": True,
-                    "saved": False,
-                }
+                if _records_usable(records):
+                    _increment_fetch_stat(self, "cache_hits")
+                    return _cache_payload(records, cache_path, from_cache=True, fallback_used=True, warning=str(exc), available=True)
             return {
                 "records": [],
                 "cache_path": str(cache_path),
                 "from_cache": False,
                 "fallback_used": False,
-                "warning": str(exc),
+                "warning": f"{exc}; empty_cache" if cache_path.exists() else str(exc),
                 "available": False,
                 "saved": False,
+                "usable": False,
+                "reason": "empty_cache" if cache_path.exists() else "api_error",
             }
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         _write_cached_json(
@@ -526,14 +489,18 @@ class JQuantsDataProvider(BaseDataProvider):
                 "records": records,
             },
         )
+        available = _records_usable(records)
         return {
             "records": records,
             "cache_path": str(cache_path),
             "from_cache": False,
             "fallback_used": False,
-            "warning": "",
-            "available": True,
+            "warning": "" if available else "api_success_but_empty",
+            "available": available,
             "saved": True,
+            "usable": available,
+            "api_status": "200",
+            "reason": "" if available else "empty_response",
         }
 
     def get_stock_fundamentals(self, code: str) -> dict[str, Any]:
@@ -679,6 +646,36 @@ def _write_cached_json(path: Path, payload: dict[str, Any]) -> None:
     with path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
         file.write("\n")
+
+
+def _records_usable(records: Any) -> bool:
+    return isinstance(records, list) and len(records) > 0
+
+
+def _cache_payload(
+    records: list[dict[str, Any]],
+    cache_path: Path,
+    from_cache: bool,
+    fallback_used: bool = False,
+    warning: str = "",
+    available: bool = True,
+    cache_date: date | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "records": records,
+        "cache_path": str(cache_path),
+        "from_cache": from_cache,
+        "fallback_used": fallback_used,
+        "warning": warning,
+        "available": available,
+        "saved": False,
+        "usable": _records_usable(records),
+        "reason": "" if _records_usable(records) else "empty_cache",
+    }
+    if cache_date is not None:
+        payload["cache_date"] = cache_date.isoformat()
+        payload["filter_available"] = available
+    return payload
 
 
 def _increment_fetch_stat(provider: Any, key: str, amount: float = 1.0) -> None:

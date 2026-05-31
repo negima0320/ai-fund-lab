@@ -110,6 +110,46 @@ def test_investor_types_api_success_creates_cache_file(monkeypatch, tmp_path) ->
     assert (tmp_path / "jquants" / "investor_types" / "2026-02-01_to_2026-03-06.json").exists()
 
 
+def test_investor_context_expands_range_when_first_response_is_empty(monkeypatch, tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_8")
+    config.setdefault("jquants", {})["plan"] = "light"
+    calls: list[tuple[date, date]] = []
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def fetch_investor_types_cached(self, _cache_root, start_date, end_date, force_refresh=False):
+            calls.append((start_date, end_date))
+            records = [] if len(calls) == 1 else _investor_records()
+            return {
+                "records": records,
+                "cache_path": str(tmp_path / f"{start_date.isoformat()}_to_{end_date.isoformat()}.json"),
+                "from_cache": False,
+                "fallback_used": False,
+                "warning": "" if records else "api_success_but_empty",
+                "available": bool(records),
+                "saved": True,
+                "usable": bool(records),
+                "api_status": "200",
+                "reason": "" if records else "empty_response",
+            }
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    payload = main_module._load_investor_context_for_date(date(2026, 5, 31), config)
+    api_log = (tmp_path / "logs" / "jquants_api.log").read_text(encoding="utf-8")
+
+    assert calls == [
+        (date(2025, 11, 14), date(2026, 5, 15)),
+        (date(2025, 5, 16), date(2026, 5, 15)),
+    ]
+    assert payload["metadata"]["investor_context_source"] == "investor_types"
+    assert "reason=empty_response" in api_log
+    assert "retry_range=2025-05-16_to_2026-05-15" in api_log
+
+
 def test_investor_context_score_range_and_unavailable() -> None:
     context = build_investor_context(_investor_records(), "2026-03-06")
     unavailable = build_investor_context([], "2026-03-06")

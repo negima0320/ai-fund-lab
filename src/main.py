@@ -913,8 +913,10 @@ def run_jquants_api_summary() -> None:
     for row in summary["endpoints"]:
         print(
             f"- {row['endpoint']}: cache_files={row['cache_files']} "
-            f"total_records={row['total_records']} latest_cache_date={row['latest_cache_date'] or 'N/A'} "
-            f"last_api_status={row['last_api_status'] or 'N/A'} last_error={row['last_error'] or 'N/A'}"
+            f"total_records={row['total_records']} usable_cache_files={row['usable_cache_files']} "
+            f"empty_cache_files={row['empty_cache_files']} latest_cache_date={row['latest_cache_date'] or 'N/A'} "
+            f"last_status={row['last_status'] or 'N/A'} last_records={row['last_records'] or 'N/A'} "
+            f"last_error={row['last_error'] or 'N/A'}"
         )
 
 
@@ -928,7 +930,8 @@ def build_jquants_api_summary() -> dict[str, Any]:
             {
                 "endpoint": endpoint,
                 **cache,
-                "last_api_status": event.get("status"),
+                "last_status": event.get("status"),
+                "last_records": event.get("records"),
                 "last_error": event.get("error"),
             }
         )
@@ -939,10 +942,16 @@ def _jquants_cache_directory_summary(endpoint: str) -> dict[str, Any]:
     directory = ROOT / "data" / "cache" / "jquants" / endpoint
     files = sorted(directory.glob("*.json")) if directory.exists() else []
     total_records = 0
+    usable_cache_files = 0
+    empty_cache_files = 0
     latest_dates = []
     for path in files:
         state = _cache_file_state(str(path))
         total_records += int(state.get("records") or 0)
+        if state.get("usable"):
+            usable_cache_files += 1
+        else:
+            empty_cache_files += 1
         if state.get("latest_date"):
             latest_dates.append(str(state["latest_date"]))
         else:
@@ -950,6 +959,8 @@ def _jquants_cache_directory_summary(endpoint: str) -> dict[str, Any]:
     return {
         "cache_files": len(files),
         "total_records": total_records,
+        "usable_cache_files": usable_cache_files,
+        "empty_cache_files": empty_cache_files,
         "latest_cache_date": max(latest_dates) if latest_dates else None,
     }
 
@@ -4093,8 +4104,8 @@ def _check_jquants_plan_capabilities(results: list[dict[str, Any]], config: dict
         cache_status = _jquants_endpoint_cache_status(endpoint, date.today())
         _preflight_add(
             results,
-            "OK" if cache_status["exists"] else "WARN",
-            f"{endpoint} cache: exists={str(cache_status['exists']).lower()} records={cache_status['records']}",
+            "OK" if cache_status["usable"] else "WARN",
+            f"{endpoint} cache: exists={str(cache_status['exists']).lower()} records={cache_status['records']} usable={str(cache_status['usable']).lower()} status={cache_status['status']}",
             cache_status,
         )
     missing = compatibility["missing_capabilities"]
@@ -4120,18 +4131,25 @@ def _check_jquants_plan_capabilities(results: list[dict[str, Any]], config: dict
 def _jquants_endpoint_cache_status(endpoint: str, reference_date: date) -> dict[str, Any]:
     cache_path = _jquants_expected_cache_path(endpoint, reference_date)
     state = _cache_file_state(str(cache_path))
+    status = "missing"
+    if state["exists"]:
+        status = "usable" if state["usable"] else "empty_cache"
     return {
         "endpoint": endpoint,
         "path": _relative_path_text(cache_path),
+        "status": status,
         **state,
     }
 
 
 def _jquants_expected_cache_path(endpoint: str, reference_date: date) -> Path:
     cache_root = ROOT / "data" / "cache" / "jquants"
-    if endpoint in {"topix_prices", "investor_types"}:
+    if endpoint == "topix_prices":
         start_date = reference_date - timedelta(days=45)
         return cache_root / endpoint / f"{start_date.isoformat()}_to_{reference_date.isoformat()}.json"
+    if endpoint == "investor_types":
+        start_date, end_date = _investor_types_fetch_ranges(reference_date)[0]
+        return cache_root / endpoint / f"{start_date.isoformat()}_to_{end_date.isoformat()}.json"
     if endpoint == "financial_statements":
         start_date = reference_date - timedelta(days=365)
         return cache_root / endpoint / f"{start_date.isoformat()}_to_{reference_date.isoformat()}.json"
@@ -4147,17 +4165,18 @@ def _cache_file_state(path_text: Any) -> dict[str, Any]:
     if not path.is_absolute():
         path = ROOT / path
     if not path.exists() or not path.is_file():
-        return {"exists": False, "records": 0, "latest_date": None}
+        return {"exists": False, "records": 0, "usable": False, "latest_date": None}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return {"exists": True, "records": 0, "latest_date": None}
+        return {"exists": True, "records": 0, "usable": False, "latest_date": None}
     records = payload.get("records", []) if isinstance(payload, dict) else []
     if not isinstance(records, list):
         records = []
     return {
         "exists": True,
         "records": len(records),
+        "usable": len(records) > 0,
         "latest_date": _latest_record_date(records),
     }
 
@@ -4484,6 +4503,7 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
     if BACKTEST_MODE_ACTIVE and profile_output_path.exists():
         cached_payload = read_json(profile_output_path)
         if _indicator_cache_matches_current_scoring(cached_payload, config, indicator_mode, enable_relative_strength):
+            _ensure_relative_strength_benchmark_cache(config, target_date, indicator_mode, enable_relative_strength)
             write_json(output_path, cached_payload)
             print(f"{BACKTEST_DAY_LOG_PREFIX} indicators cache hit: {profile_output_path.relative_to(ROOT)}")
             return
@@ -6178,6 +6198,22 @@ def _relative_strength_indicator_rows_are_populated(indicators: list[dict[str, A
     return False
 
 
+def _ensure_relative_strength_benchmark_cache(
+    config: dict[str, Any],
+    target_date: date,
+    indicator_mode: str,
+    enable_relative_strength: bool,
+) -> None:
+    if not enable_relative_strength:
+        return
+    if _expected_relative_strength_benchmark_source(config) != "topix":
+        return
+    lookback_days = 60 if indicator_mode == "full" else 35
+    fetch_dates = previous_business_dates(target_date, lookback_days)
+    start_date = fetch_dates[0] if fetch_dates else target_date
+    _load_topix_prices_for_period(start_date, target_date, config)
+
+
 def _rule_based_backtest_completed_label(start_date: date, end_date: date) -> str:
     days = (end_date - start_date).days + 1
     if 80 <= days <= 100:
@@ -6201,6 +6237,7 @@ def ensure_indicators(provider_name: str, target_date_text: str) -> None:
     if BACKTEST_MODE_ACTIVE and profile_path.exists():
         payload = read_json(profile_path)
         if _indicator_cache_matches_current_scoring(payload, config, indicator_mode, enable_relative_strength):
+            _ensure_relative_strength_benchmark_cache(config, date.fromisoformat(target_date_text), indicator_mode, enable_relative_strength)
             write_json(path, payload)
             print(f"{BACKTEST_DAY_LOG_PREFIX} indicators cache hit: {profile_path.relative_to(ROOT)}")
             return
@@ -6209,6 +6246,7 @@ def ensure_indicators(provider_name: str, target_date_text: str) -> None:
     if path.exists() and BACKTEST_MODE_ACTIVE:
         payload = read_json(path)
         if _indicator_cache_matches_current_scoring(payload, config, indicator_mode, enable_relative_strength):
+            _ensure_relative_strength_benchmark_cache(config, date.fromisoformat(target_date_text), indicator_mode, enable_relative_strength)
             return
     run_calculate_indicators(provider_name, target_date_text)
 
@@ -8871,6 +8909,7 @@ def _load_earnings_calendar_for_date(target_date: date, config: dict[str, Any], 
             records=len(payload.get("records", [])),
             saved=bool(payload.get("saved")),
             cache_path=payload.get("cache_path"),
+            reason=str(payload.get("reason") or ""),
         )
     except Exception as exc:
         _log_jquants_api_event(
@@ -8920,14 +8959,19 @@ def _read_earnings_calendar_cache(cache_path: Path, target_date: date) -> dict[s
             "warning": str(exc),
             "filter_available": False,
         }
+    records = payload.get("records", []) if isinstance(payload, dict) else []
+    usable = isinstance(records, list) and len(records) > 0
     return {
-        "records": payload.get("records", []) if isinstance(payload, dict) else [],
+        "records": records if isinstance(records, list) else [],
         "cache_path": str(cache_path),
         "cache_date": target_date.isoformat(),
         "from_cache": True,
         "fallback_used": False,
-        "warning": "",
-        "filter_available": True,
+        "warning": "" if usable else "empty_cache",
+        "filter_available": usable,
+        "available": usable,
+        "usable": usable,
+        "reason": "" if usable else "empty_cache",
     }
 
 
@@ -8946,7 +8990,6 @@ def _load_investor_context_for_date(target_date: date, config: dict[str, Any], f
             "context": dict(INVESTOR_CONTEXT_EMPTY),
             "metadata": {"available": False, "warning": "investor_types disabled for current J-Quants plan"},
         }
-    start_date = target_date - timedelta(days=45)
     try:
         provider = JQuantsDataProvider(
             ROOT / ".env",
@@ -8956,21 +8999,34 @@ def _load_investor_context_for_date(target_date: date, config: dict[str, Any], f
             parallel_fetch=_jquants_parallel_fetch(config),
             max_parallel_requests=_jquants_max_parallel_requests(config),
         )
-        payload = provider.fetch_investor_types_cached(
-            ROOT / "data" / "cache",
-            start_date=start_date,
-            end_date=target_date,
-            force_refresh=FORCE_REFRESH_ACTIVE if force_refresh is None else force_refresh,
-        )
-        _log_jquants_api_event(
-            endpoint="investor_types",
-            plan=_jquants_plan(config),
-            cache_hit=bool(payload.get("from_cache")),
-            status=_provider_payload_status(payload),
-            records=len(payload.get("records", [])),
-            saved=bool(payload.get("saved")),
-            cache_path=payload.get("cache_path"),
-        )
+        payload = {"records": [], "available": False, "warning": "investor_types unavailable"}
+        ranges = _investor_types_fetch_ranges(target_date)
+        for index, (start_date, end_date) in enumerate(ranges):
+            payload = provider.fetch_investor_types_cached(
+                ROOT / "data" / "cache",
+                start_date=start_date,
+                end_date=end_date,
+                force_refresh=FORCE_REFRESH_ACTIVE if force_refresh is None else force_refresh,
+            )
+            retry_range = ""
+            if not payload.get("records") and index + 1 < len(ranges):
+                retry_start, retry_end = ranges[index + 1]
+                retry_range = f"{retry_start.isoformat()}_to_{retry_end.isoformat()}"
+                payload["reason"] = payload.get("reason") or "empty_response"
+                payload["warning"] = payload.get("warning") or "api_success_but_empty"
+            _log_jquants_api_event(
+                endpoint="investor_types",
+                plan=_jquants_plan(config),
+                cache_hit=bool(payload.get("from_cache")),
+                status=_provider_payload_status(payload),
+                records=len(payload.get("records", [])),
+                saved=bool(payload.get("saved")),
+                cache_path=payload.get("cache_path"),
+                reason=str(payload.get("reason") or ""),
+                retry_range=retry_range,
+            )
+            if payload.get("records"):
+                break
     except Exception as exc:
         _log_jquants_api_event(
             endpoint="investor_types",
@@ -9010,6 +9066,21 @@ def _load_investor_context_for_date(target_date: date, config: dict[str, Any], f
     }
 
 
+def _investor_types_fetch_ranges(target_date: date) -> list[tuple[date, date]]:
+    end_date = _business_day_on_or_before(target_date - timedelta(days=14))
+    return [
+        (end_date - timedelta(weeks=26), end_date),
+        (end_date - timedelta(weeks=52), end_date),
+    ]
+
+
+def _business_day_on_or_before(value: date) -> date:
+    current = value
+    while current.weekday() >= 5:
+        current -= timedelta(days=1)
+    return current
+
+
 def _load_financial_statements_for_period(
     start_date: date,
     end_date: date,
@@ -9039,6 +9110,7 @@ def _load_financial_statements_for_period(
             records=len(payload.get("records", [])),
             saved=bool(payload.get("saved")),
             cache_path=payload.get("cache_path"),
+            reason=str(payload.get("reason") or ""),
         )
         return payload
     except Exception as exc:
@@ -9118,6 +9190,7 @@ def _load_topix_prices_for_period(start_date: date, end_date: date, config: dict
             records=len(payload.get("records", [])),
             saved=bool(payload.get("saved")),
             cache_path=payload.get("cache_path"),
+            reason=str(payload.get("reason") or ""),
         )
         return payload
     except Exception as exc:
@@ -9142,6 +9215,8 @@ def _load_topix_prices_for_period(start_date: date, end_date: date, config: dict
 
 
 def _provider_payload_status(payload: dict[str, Any]) -> str:
+    if payload.get("api_status"):
+        return str(payload.get("api_status"))
     if payload.get("available"):
         return "200"
     if payload.get("filter_available"):
@@ -9159,6 +9234,8 @@ def _log_jquants_api_event(
     saved: bool = False,
     cache_path: Any = "",
     error: str = "",
+    reason: str = "",
+    retry_range: str = "",
 ) -> None:
     path = ROOT / "logs" / "jquants_api.log"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -9168,6 +9245,10 @@ def _log_jquants_api_event(
         f"status={status} records={records} saved={str(saved).lower()} "
         f"cache_path={_relative_path_text(cache_path) if cache_path else 'N/A'}"
     )
+    if reason:
+        line = f"{line} reason={reason}"
+    if retry_range:
+        line = f"{line} retry_range={retry_range}"
     if error:
         line = f"{line} error={error}"
     with path.open("a", encoding="utf-8") as file:
