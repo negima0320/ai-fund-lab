@@ -232,6 +232,8 @@ def score_real_candidates(
                 "relative_strength_10d": candidate.get("relative_strength_10d"),
                 "relative_strength_20d": candidate.get("relative_strength_20d"),
                 "relative_strength_score": relative_strength_score,
+                "topix_records_loaded": candidate.get("topix_records_loaded"),
+                "topix_api_calls": candidate.get("topix_api_calls"),
                 "investor_context_source": investor_context.get("investor_context_source"),
                 "investor_context_week": investor_context.get("investor_context_week"),
                 "overseas_net_buy": investor_context.get("overseas_net_buy"),

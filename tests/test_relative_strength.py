@@ -419,6 +419,44 @@ def test_light_topix_benchmark_payload_does_not_emit_fallback_warning(monkeypatc
     assert "fallback benchmark" not in capsys.readouterr().out
 
 
+def test_backtest_preloaded_topix_is_reused_without_daily_api_calls(monkeypatch, tmp_path) -> None:
+    main_module._reset_jquants_api_session()
+    config = load_profile("rookie_dealer_02_v2_6")
+    config.setdefault("jquants", {})["plan"] = "light"
+    calls = {"count": 0}
+    fetch_dates = main_module.previous_business_dates(date(2026, 1, 26), 35)
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            self.last_request_metadata = {}
+
+        def fetch_topix_prices_cached(self, *_args, **_kwargs):
+            calls["count"] += 1
+            return {
+                "records": _topix_rows(latest_close=102, dates=[day.isoformat() for day in fetch_dates]),
+                "cache_path": str(tmp_path / "data" / "cache" / "jquants" / "topix_prices" / "x.json"),
+                "from_cache": False,
+                "fallback_used": False,
+                "warning": "",
+                "available": True,
+                "saved": True,
+                "usable": True,
+                "api_status": "200",
+            }
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    main_module._preload_light_api_context(config, date(2026, 1, 1), date(2026, 1, 26))
+    first = main_module._relative_strength_benchmark_payload(_relative_strength_price_rows(), date(2026, 1, 23), fetch_dates, config)
+    second = main_module._relative_strength_benchmark_payload(_relative_strength_price_rows(), date(2026, 1, 26), fetch_dates, config)
+
+    assert calls["count"] == 1
+    assert first["benchmark_source"] == "topix"
+    assert second["benchmark_source"] == "topix"
+    assert second["topix_records_loaded"] > 0
+
+
 def test_scoring_storage_keeps_relative_strength_log_fields() -> None:
     candidate = {
         "code": "1001",

@@ -262,6 +262,172 @@ def test_investor_context_uses_preloaded_records_without_daily_api(monkeypatch, 
     assert payload["metadata"]["investor_context_source"] == "investor_types"
 
 
+def test_investor_context_empty_preload_suppresses_daily_api(monkeypatch, tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_8")
+    config.setdefault("jquants", {})["plan"] = "light"
+    main_module._reset_jquants_api_session()
+    main_module._jquants_api_session().setdefault("payloads", {})["investor_types"] = {
+        "records": [],
+        "metadata": {"available": False, "reason": "empty_response", "warning": "api_success_but_empty"},
+    }
+
+    class FailProvider:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("empty preload should suppress daily investor_types API calls")
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FailProvider)
+
+    payload = main_module._load_investor_context_for_date(date(2026, 3, 6), config)
+
+    assert payload["metadata"]["from_preloaded"] is True
+    assert payload["metadata"]["available"] is False
+    assert payload["metadata"]["disabled_reason"] == "empty_response"
+
+
+def test_investor_types_period_preload_reused_by_daily_scoring(monkeypatch, tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_8")
+    config.setdefault("jquants", {})["plan"] = "light"
+    main_module._reset_jquants_api_session()
+    calls: list[tuple[date, date]] = []
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            self.last_request_metadata = {}
+
+        def fetch_investor_types_cached(self, *_args, start_date, end_date, **_kwargs):
+            calls.append((start_date, end_date))
+            return {
+                "records": _investor_records(),
+                "cache_path": "",
+                "from_cache": False,
+                "saved": True,
+                "available": True,
+                "api_status": "200",
+                "reason": "",
+            }
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    main_module._preload_light_api_context(config, date(2026, 1, 5), date(2026, 3, 6))
+    first = main_module._load_investor_context_for_date(date(2026, 2, 2), config)
+    second = main_module._load_investor_context_for_date(date(2026, 3, 6), config)
+
+    assert len(calls) == 1
+    assert calls[0][0] <= date(2025, 7, 7)
+    assert calls[0][1] <= date(2026, 2, 20)
+    assert first["metadata"]["from_preloaded"] is True
+    assert second["metadata"]["from_preloaded"] is True
+
+
+def test_investor_types_rate_limit_retries_and_continues(monkeypatch, tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_8")
+    config.setdefault("jquants", {})["plan"] = "light"
+    config["jquants"]["retry_backoff_seconds"] = [0, 0, 0]
+    main_module._reset_jquants_api_session()
+    calls = {"count": 0}
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            self.last_request_metadata = {}
+
+        def fetch_investor_types_cached(self, *_args, **_kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return {
+                    "records": [],
+                    "cache_path": "",
+                    "from_cache": False,
+                    "saved": False,
+                    "available": False,
+                    "api_status": "rate_limit",
+                    "reason": "rate_limit",
+                    "retry_after": "0",
+                }
+            return {
+                "records": _investor_records(),
+                "cache_path": "",
+                "from_cache": False,
+                "saved": True,
+                "available": True,
+                "api_status": "200",
+                "reason": "",
+            }
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    payload = main_module._load_investor_context_for_date(date(2026, 3, 6), config)
+
+    assert calls["count"] == 2
+    assert payload["metadata"]["investor_context_source"] == "investor_types"
+    assert main_module._jquants_api_session()["api_retry_count"]["investor_types"] == 1
+    assert main_module._jquants_api_session()["api_retry_success_count"]["investor_types"] == 1
+
+
+def test_investor_types_bad_request_does_not_retry(monkeypatch, tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_8")
+    config.setdefault("jquants", {})["plan"] = "light"
+    config["jquants"]["retry_backoff_seconds"] = [0, 0, 0]
+    main_module._reset_jquants_api_session()
+    calls = {"count": 0}
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            self.last_request_metadata = {}
+
+        def fetch_investor_types_cached(self, *_args, **_kwargs):
+            calls["count"] += 1
+            return {
+                "records": [],
+                "cache_path": "",
+                "from_cache": False,
+                "saved": False,
+                "available": False,
+                "api_status": "bad_request",
+                "reason": "bad_request",
+            }
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    payload = main_module._load_investor_context_for_date(date(2026, 3, 6), config)
+
+    assert calls["count"] == 1
+    assert payload["metadata"]["available"] is False
+    assert main_module._jquants_api_session().get("api_retry_count", {}) == {}
+
+
+def test_investor_types_cache_hit_suppresses_api_call_limit_consumption(monkeypatch, tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_8")
+    config.setdefault("jquants", {})["plan"] = "light"
+    main_module._reset_jquants_api_session()
+    start_date, end_date = main_module._investor_types_fetch_ranges(date(2026, 3, 20))[0]
+    cache_path = (
+        tmp_path
+        / "data"
+        / "cache"
+        / "jquants"
+        / "investor_types"
+        / f"{start_date.isoformat()}_to_{end_date.isoformat()}.json"
+    )
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_text('{"records":[{"Date":"2026-03-06","overseas_net_buy":100}]}', encoding="utf-8")
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("cache hit should not call provider")
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    payload = main_module._load_investor_context_for_date(date(2026, 3, 20), config)
+
+    assert payload["records"][0]["overseas_net_buy"] == 100
+    assert main_module._jquants_api_session()["api_calls_by_endpoint"] == {}
+
+
 def test_investor_context_score_range_and_unavailable() -> None:
     context = build_investor_context(_investor_records(), "2026-03-06")
     unavailable = build_investor_context([], "2026-03-06")

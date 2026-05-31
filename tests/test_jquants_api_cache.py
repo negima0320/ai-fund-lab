@@ -133,6 +133,106 @@ def test_topix_auth_error_disables_repeated_calls(monkeypatch, tmp_path) -> None
     assert main_module._jquants_api_session()["disabled_features_reason"]["topix_prices"] == "auth_or_plan_error"
 
 
+def test_topix_rate_limit_retries_and_continues_relative_strength(monkeypatch, tmp_path) -> None:
+    config = {"jquants": {"plan": "light", "requests_per_minute": 60, "parallel_fetch": True, "retry_backoff_seconds": [0, 0, 0]}}
+    main_module._reset_jquants_api_session()
+    calls = {"count": 0}
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            self.last_request_metadata = {}
+
+        def fetch_topix_prices_cached(self, *_args, **_kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return {
+                    "records": [],
+                    "cache_path": "",
+                    "from_cache": False,
+                    "saved": False,
+                    "available": False,
+                    "api_status": "rate_limit",
+                    "reason": "rate_limit",
+                    "retry_after": "0",
+                }
+            return {
+                "records": [{"date": "2026-01-26", "close": 102.0}],
+                "cache_path": "",
+                "from_cache": False,
+                "saved": True,
+                "available": True,
+                "api_status": "200",
+                "reason": "",
+            }
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    payload = main_module._load_topix_prices_for_period(date(2026, 1, 1), date(2026, 1, 26), config)
+
+    assert calls["count"] == 2
+    assert payload["records"]
+    assert payload["retry_success"] is True
+    assert main_module._jquants_api_session()["api_retry_count"]["topix_prices"] == 1
+    assert main_module._jquants_api_session()["api_retry_success_count"]["topix_prices"] == 1
+    assert "topix_prices" not in main_module._jquants_api_session()["disabled_features_reason"]
+
+
+def test_topix_bad_request_does_not_retry(monkeypatch, tmp_path) -> None:
+    config = {"jquants": {"plan": "light", "requests_per_minute": 60, "parallel_fetch": True, "retry_backoff_seconds": [0, 0, 0]}}
+    main_module._reset_jquants_api_session()
+    calls = {"count": 0}
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            self.last_request_metadata = {}
+
+        def fetch_topix_prices_cached(self, *_args, **_kwargs):
+            calls["count"] += 1
+            return {
+                "records": [],
+                "cache_path": "",
+                "from_cache": False,
+                "saved": False,
+                "available": False,
+                "api_status": "bad_request",
+                "reason": "bad_request",
+            }
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    payload = main_module._load_topix_prices_for_period(date(2026, 1, 1), date(2026, 1, 26), config)
+
+    assert calls["count"] == 1
+    assert payload["reason"] == "bad_request"
+    assert main_module._jquants_api_session().get("api_retry_count", {}) == {}
+
+
+def test_topix_cache_hit_suppresses_api_call_limit_consumption(monkeypatch, tmp_path) -> None:
+    config = {"jquants": {"plan": "light", "requests_per_minute": 60, "parallel_fetch": True}}
+    main_module._reset_jquants_api_session()
+    cache_path = tmp_path / "data" / "cache" / "jquants" / "topix_prices" / "2026-01-01_to_2026-01-26.json"
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_text('{"records":[{"date":"2026-01-26","close":102.0}]}', encoding="utf-8")
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def fetch_topix_prices_cached(self, *_args, **_kwargs):
+            raise AssertionError("cache hit should not call provider")
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    payload = main_module._load_topix_prices_for_period(date(2026, 1, 1), date(2026, 1, 26), config)
+
+    assert payload["from_cache"] is True
+    assert payload["records"][0]["close"] == 102.0
+    assert main_module._jquants_api_session()["api_calls_by_endpoint"] == {}
+
+
 def test_http_status_categories_are_distinct() -> None:
     assert main_module._api_error_status(JQuantsApiError("x", status_code=401, category="auth_or_plan_error")) == "auth_or_plan_error"
     assert main_module._api_error_status(JQuantsApiError("x", status_code=403, category="auth_or_plan_error")) == "auth_or_plan_error"

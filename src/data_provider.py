@@ -71,6 +71,7 @@ class JQuantsApiError(RuntimeError):
         request_url: str = "",
         request_params: dict[str, str] | None = None,
         response_body: str = "",
+        retry_after: str = "",
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -79,6 +80,7 @@ class JQuantsApiError(RuntimeError):
         self.request_url = request_url
         self.request_params = request_params or {}
         self.response_body = response_body
+        self.retry_after = retry_after
 
 
 class BaseDataProvider(ABC):
@@ -551,6 +553,7 @@ class JQuantsDataProvider(BaseDataProvider):
                 request_url=getattr(request, "full_url", str(request)),
                 request_params=_params_from_path(path),
                 response_body=body_summary,
+                retry_after=str(exc.headers.get("Retry-After") or ""),
             ) from exc
         except URLError as exc:
             raise JQuantsApiError(
@@ -783,6 +786,7 @@ def _api_error_payload_fields(exc: Exception) -> dict[str, Any]:
         "request_url": exc.request_url,
         "request_params": exc.request_params,
         "response_body": exc.response_body,
+        "retry_after": exc.retry_after,
     }
 
 

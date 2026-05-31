@@ -102,7 +102,7 @@ FORCE_REFRESH_ACTIVE = False
 BACKTEST_PROFILE_TIMINGS: dict[str, float] = {}
 RUNTIME_SETTINGS: dict[str, Any] = {}
 LIGHT_API_CALL_LIMITS = {
-    "topix_prices": 3,
+    "topix_prices": 4,
     "investor_types": 3,
     "earnings_calendar": 3,
     "financial_statements": 3,
@@ -2143,6 +2143,8 @@ def run_experiments(
     experiment_api_summary = {
         "api_calls_by_endpoint": {},
         "api_errors_by_endpoint": {},
+        "api_retry_count": {},
+        "api_retry_success_count": {},
         "disabled_features_reason": {},
     }
     try:
@@ -2496,6 +2498,8 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             "",
             f"- api_calls_by_endpoint: {_compact_json(summary.get('api_calls_by_endpoint', {}))}",
             f"- api_errors_by_endpoint: {_compact_json(summary.get('api_errors_by_endpoint', {}))}",
+            f"- api_retry_count: {_compact_json(summary.get('api_retry_count', {}))}",
+            f"- api_retry_success_count: {_compact_json(summary.get('api_retry_success_count', {}))}",
             f"- disabled_features_reason: {_compact_json(summary.get('disabled_features_reason', {}))}",
         ]
     )
@@ -4194,6 +4198,8 @@ def _reset_jquants_api_session() -> None:
         {
             "api_calls_by_endpoint": {},
             "api_errors_by_endpoint": {},
+            "api_retry_count": {},
+            "api_retry_success_count": {},
             "disabled_features_reason": {},
             "payloads": {},
         }
@@ -4221,6 +4227,16 @@ def _api_call_allowed(endpoint: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _record_api_retry(endpoint: str) -> None:
+    retries = _jquants_api_session().setdefault("api_retry_count", {})
+    retries[endpoint] = int(retries.get(endpoint, 0) or 0) + 1
+
+
+def _record_api_retry_success(endpoint: str) -> None:
+    retries = _jquants_api_session().setdefault("api_retry_success_count", {})
+    retries[endpoint] = int(retries.get(endpoint, 0) or 0) + 1
+
+
 def _record_api_error(endpoint: str, reason: str) -> None:
     session = _jquants_api_session()
     errors = session.setdefault("api_errors_by_endpoint", {})
@@ -4245,19 +4261,41 @@ def _api_unavailable_payload(endpoint: str, reason: str) -> dict[str, Any]:
 
 
 def _preload_light_api_context(config: dict[str, Any], start_date: date, end_date: date) -> None:
+    if _relative_strength_enabled_for_indicators(config) and _expected_relative_strength_benchmark_source(config) == "topix":
+        topix_start = _topix_preload_start_date(start_date)
+        payload = _load_topix_prices_for_period_with_options(topix_start, end_date, config, use_preloaded=False)
+        _jquants_api_session().setdefault("payloads", {})["topix_prices"] = {
+            "records": payload.get("records", []),
+            "metadata": {
+                "available": bool(payload.get("available")),
+                "cache_path": payload.get("cache_path"),
+                "from_cache": payload.get("from_cache"),
+                "fallback_used": payload.get("fallback_used"),
+                "warning": payload.get("warning"),
+                "reason": payload.get("reason"),
+                "topix_records_loaded": len(payload.get("records", [])),
+            },
+            "start_date": topix_start.isoformat(),
+            "end_date": end_date.isoformat(),
+        }
     if bool(config.get("features", {}).get("investor_context")) and bool(config.get("scoring", {}).get("use_investor_context_score")):
-        payload = _load_investor_context_for_date(end_date, config)
+        payload = _load_investor_types_for_period(start_date, end_date, config)
         _jquants_api_session().setdefault("payloads", {})["investor_types"] = {
             "records": payload.get("records", []),
             "metadata": payload.get("metadata", {}),
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
+            "start_date": payload.get("start_date") or start_date.isoformat(),
+            "end_date": payload.get("end_date") or end_date.isoformat(),
         }
+
+
+def _topix_preload_start_date(start_date: date) -> date:
+    dates = previous_business_dates(start_date, 35)
+    return dates[0] if dates else start_date
 
 
 def _merge_jquants_api_session_summary(target: dict[str, Any]) -> None:
     session = _jquants_api_session()
-    for key in ["api_calls_by_endpoint", "api_errors_by_endpoint"]:
+    for key in ["api_calls_by_endpoint", "api_errors_by_endpoint", "api_retry_count", "api_retry_success_count"]:
         merged = target.setdefault(key, {})
         for endpoint, count in session.get(key, {}).items():
             merged[endpoint] = int(merged.get(endpoint, 0) or 0) + int(count or 0)
@@ -4776,6 +4814,10 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
         raise SystemExit(str(exc)) from exc
     except RuntimeError as exc:
         raise SystemExit(str(exc)) from exc
+    if enable_relative_strength:
+        for item in indicators:
+            item["topix_records_loaded"] = benchmark_payload.get("topix_records_loaded", 0)
+            item["topix_api_calls"] = benchmark_payload.get("topix_api_calls", 0)
     excluded_count = len(prime_codes) - len(indicators)
     if not indicators:
         raise SystemExit(f"No indicators calculated for {target_date_text}. Price history may be insufficient or target date may have no data.")
@@ -6407,6 +6449,8 @@ def _ensure_relative_strength_benchmark_cache(
     if not enable_relative_strength:
         return
     if _expected_relative_strength_benchmark_source(config) != "topix":
+        return
+    if _preloaded_topix_payload_for(target_date):
         return
     lookback_days = 60 if indicator_mode == "full" else 35
     fetch_dates = previous_business_dates(target_date, lookback_days)
@@ -9184,19 +9228,32 @@ def _load_investor_context_for_date(target_date: date, config: dict[str, Any], f
             "metadata": {"available": False, "reason": "investor_context disabled"},
         }
     preloaded = _jquants_api_session().setdefault("payloads", {}).get("investor_types")
-    if isinstance(preloaded, dict) and preloaded.get("records"):
+    if isinstance(preloaded, dict):
         records = preloaded.get("records", [])
         context = build_investor_context(records, target_date)
+        metadata = preloaded.get("metadata", {}) if isinstance(preloaded.get("metadata"), dict) else {}
+        if records:
+            return {
+                "records": records,
+                "context": context,
+                "metadata": {
+                    **metadata,
+                    "available": True,
+                    "from_preloaded": True,
+                    "latest_investor_data_week": context.get("investor_context_week"),
+                    "investor_context_source": context.get("investor_context_source"),
+                    "investor_context_score": context.get("investor_context_score"),
+                },
+            }
         return {
-            "records": records,
-            "context": context,
+            "records": [],
+            "context": dict(INVESTOR_CONTEXT_EMPTY),
             "metadata": {
-                **preloaded.get("metadata", {}),
-                "available": True,
+                **metadata,
+                "available": False,
                 "from_preloaded": True,
-                "latest_investor_data_week": context.get("investor_context_week"),
-                "investor_context_source": context.get("investor_context_source"),
-                "investor_context_score": context.get("investor_context_score"),
+                "warning": metadata.get("warning") or metadata.get("reason") or "investor_types unavailable",
+                "disabled_reason": metadata.get("reason") or metadata.get("disabled_reason"),
             },
         }
     disabled_reason = _jquants_api_session().setdefault("disabled_features_reason", {}).get("investor_types")
@@ -9214,30 +9271,44 @@ def _load_investor_context_for_date(target_date: date, config: dict[str, Any], f
             "metadata": {"available": False, "warning": "investor_types disabled for current J-Quants plan"},
         }
     try:
-        provider = JQuantsDataProvider(
-            ROOT / ".env",
-            timeout_seconds=int(config.get("jquants", {}).get("request_timeout_seconds", 20)),
-            plan=_jquants_plan(config),
-            requests_per_minute=_jquants_requests_per_minute(config),
-            parallel_fetch=_jquants_parallel_fetch(config),
-            max_parallel_requests=_jquants_max_parallel_requests(config),
-        )
+        provider: JQuantsDataProvider | None = None
         payload = {"records": [], "available": False, "warning": "investor_types unavailable"}
         ranges = _investor_types_fetch_ranges(target_date)
         consecutive_empty = 0
         for index, (start_date, end_date) in enumerate(ranges):
+            cached = _read_investor_types_cache_payload(start_date, end_date)
+            if cached is not None:
+                payload = cached
+                retry_range = ""
+                _log_jquants_api_event(
+                    endpoint="investor_types",
+                    plan=_jquants_plan(config),
+                    cache_hit=True,
+                    status="200",
+                    records=len(payload.get("records", [])),
+                    saved=False,
+                    cache_path=payload.get("cache_path"),
+                    reason="",
+                )
+                break
             allowed, stop_reason = _api_call_allowed("investor_types")
             if not allowed:
                 payload = _api_unavailable_payload("investor_types", stop_reason)
                 break
-            payload = provider.fetch_investor_types_cached(
-                ROOT / "data" / "cache",
-                start_date=start_date,
-                end_date=end_date,
-                force_refresh=FORCE_REFRESH_ACTIVE if force_refresh is None else force_refresh,
-            )
+            if provider is None:
+                provider = JQuantsDataProvider(
+                    ROOT / ".env",
+                    timeout_seconds=int(config.get("jquants", {}).get("request_timeout_seconds", 20)),
+                    plan=_jquants_plan(config),
+                    requests_per_minute=_jquants_requests_per_minute(config),
+                    parallel_fetch=_jquants_parallel_fetch(config),
+                    max_parallel_requests=_jquants_max_parallel_requests(config),
+                )
+            payload = _fetch_investor_types_with_retries(provider, start_date, end_date, config, force_refresh=FORCE_REFRESH_ACTIVE if force_refresh is None else force_refresh)
             retry_range = ""
-            if not payload.get("records") and index + 1 < len(ranges):
+            status = _provider_payload_status(payload)
+            terminal_error = status in {"auth_or_plan_error", "bad_request", "endpoint_not_found"}
+            if not payload.get("records") and not terminal_error and index + 1 < len(ranges):
                 consecutive_empty += 1
                 retry_start, retry_end = ranges[index + 1]
                 retry_range = f"{retry_start.isoformat()}_to_{retry_end.isoformat()}"
@@ -9255,8 +9326,14 @@ def _load_investor_context_for_date(target_date: date, config: dict[str, Any], f
                 cache_path=payload.get("cache_path"),
                 reason=str(payload.get("reason") or ""),
                 retry_range=retry_range,
+                attempt=payload.get("attempt") or "",
+                error_reason=str(payload.get("reason") or ""),
+                **_payload_http_log_fields(payload, getattr(provider, "last_request_metadata", {}) if provider is not None else {}),
             )
             if payload.get("records"):
+                break
+            if terminal_error:
+                _record_api_error("investor_types", status)
                 break
             if consecutive_empty >= 3:
                 payload["warning"] = payload.get("warning") or "api_success_but_empty"
@@ -9297,10 +9374,114 @@ def _load_investor_context_for_date(target_date: date, config: dict[str, Any], f
             "from_cache": payload.get("from_cache"),
             "fallback_used": payload.get("fallback_used"),
             "warning": payload.get("warning"),
+            "disabled_reason": payload.get("reason"),
             "latest_investor_data_week": context.get("investor_context_week"),
             "investor_context_source": context.get("investor_context_source"),
             "investor_context_score": context.get("investor_context_score"),
         },
+    }
+
+
+def _load_investor_types_for_period(start_date: date, end_date: date, config: dict[str, Any]) -> dict[str, Any]:
+    fetch_start = start_date - timedelta(weeks=26)
+    fetch_end = _business_day_on_or_before(end_date - timedelta(days=14))
+    if fetch_end < fetch_start:
+        fetch_end = _business_day_on_or_before(end_date)
+    metadata: dict[str, Any] = {
+        "available": False,
+        "warning": "investor_types unavailable",
+        "reason": "unavailable",
+        "from_period_preload": True,
+    }
+    if not jquants_has_capability(_jquants_plan(config), "investor_types"):
+        metadata["warning"] = "investor_types disabled for current J-Quants plan"
+        metadata["reason"] = "capability_disabled"
+        return {
+            "records": [],
+            "metadata": metadata,
+            "start_date": fetch_start.isoformat(),
+            "end_date": fetch_end.isoformat(),
+        }
+    cached = _read_investor_types_cache_payload(fetch_start, fetch_end)
+    if cached is not None:
+        _log_jquants_api_event(
+            endpoint="investor_types",
+            plan=_jquants_plan(config),
+            cache_hit=True,
+            status="200",
+            records=len(cached.get("records", [])),
+            saved=False,
+            cache_path=cached.get("cache_path"),
+            reason="",
+        )
+        return {
+            "records": cached.get("records", []),
+            "metadata": {
+                **metadata,
+                "available": True,
+                "warning": "",
+                "reason": "",
+                "cache_path": cached.get("cache_path"),
+                "from_cache": True,
+            },
+            "start_date": fetch_start.isoformat(),
+            "end_date": fetch_end.isoformat(),
+        }
+    allowed, stop_reason = _api_call_allowed("investor_types")
+    if not allowed:
+        metadata["warning"] = stop_reason
+        metadata["reason"] = stop_reason
+        return {
+            "records": [],
+            "metadata": metadata,
+            "start_date": fetch_start.isoformat(),
+            "end_date": fetch_end.isoformat(),
+        }
+    provider = JQuantsDataProvider(
+        ROOT / ".env",
+        timeout_seconds=int(config.get("jquants", {}).get("request_timeout_seconds", 20)),
+        plan=_jquants_plan(config),
+        requests_per_minute=_jquants_requests_per_minute(config),
+        parallel_fetch=_jquants_parallel_fetch(config),
+        max_parallel_requests=_jquants_max_parallel_requests(config),
+    )
+    payload = _fetch_investor_types_with_retries(provider, fetch_start, fetch_end, config, force_refresh=FORCE_REFRESH_ACTIVE)
+    status = _provider_payload_status(payload)
+    reason = str(payload.get("reason") or status)
+    _log_jquants_api_event(
+        endpoint="investor_types",
+        plan=_jquants_plan(config),
+        cache_hit=bool(payload.get("from_cache")),
+        status=status,
+        records=len(payload.get("records", [])),
+        saved=bool(payload.get("saved")),
+        cache_path=payload.get("cache_path"),
+        reason=reason,
+        attempt=payload.get("attempt") or "",
+        error_reason=reason,
+        **_payload_http_log_fields(payload, getattr(provider, "last_request_metadata", {}) or {}),
+    )
+    records = payload.get("records", [])
+    if records:
+        metadata.update(
+            {
+                "available": True,
+                "warning": "",
+                "reason": "",
+                "cache_path": payload.get("cache_path"),
+                "from_cache": payload.get("from_cache"),
+                "saved": payload.get("saved"),
+            }
+        )
+    else:
+        metadata["warning"] = payload.get("warning") or reason
+        metadata["reason"] = reason
+        _record_api_error("investor_types", reason)
+    return {
+        "records": records if isinstance(records, list) else [],
+        "metadata": metadata,
+        "start_date": fetch_start.isoformat(),
+        "end_date": fetch_end.isoformat(),
     }
 
 
@@ -9311,6 +9492,83 @@ def _investor_types_fetch_ranges(target_date: date) -> list[tuple[date, date]]:
         (end_date - timedelta(weeks=52), end_date),
         (end_date - timedelta(weeks=104), end_date),
     ]
+
+
+def _read_investor_types_cache_payload(start_date: date, end_date: date) -> dict[str, Any] | None:
+    if FORCE_REFRESH_ACTIVE:
+        return None
+    cache_path = ROOT / "data" / "cache" / "jquants" / "investor_types" / f"{start_date.isoformat()}_to_{end_date.isoformat()}.json"
+    if not cache_path.exists():
+        return None
+    try:
+        records = read_json(cache_path).get("records", [])
+    except Exception:
+        return None
+    if not isinstance(records, list) or not records:
+        return None
+    return {
+        "records": records,
+        "cache_path": str(cache_path),
+        "from_cache": True,
+        "fallback_used": False,
+        "warning": "",
+        "available": True,
+        "saved": False,
+        "usable": True,
+        "reason": "",
+    }
+
+
+def _fetch_investor_types_with_retries(
+    provider: JQuantsDataProvider,
+    start_date: date,
+    end_date: date,
+    config: dict[str, Any],
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    max_attempts = int(config.get("jquants", {}).get("investor_types_retry_attempts", 4) or 4)
+    retry_waits = _jquants_retry_waits(config)
+    last_payload: dict[str, Any] = {}
+    for attempt in range(1, max_attempts + 1):
+        payload = provider.fetch_investor_types_cached(
+            ROOT / "data" / "cache",
+            start_date=start_date,
+            end_date=end_date,
+            force_refresh=force_refresh or attempt > 1,
+        )
+        payload["attempt"] = attempt
+        last_payload = payload
+        status = _provider_payload_status(payload)
+        retryable = _retryable_jquants_status(status)
+        if payload.get("records") or payload.get("from_cache") or not retryable or attempt >= max_attempts:
+            if attempt > 1 and payload.get("records"):
+                _record_api_retry_success("investor_types")
+                payload["retry_success"] = True
+            return payload
+        _record_api_retry("investor_types")
+        retry_after_header = _retry_after_seconds(payload)
+        retry_after = retry_after_header if retry_after_header is not None else _retry_wait_for_attempt(retry_waits, attempt)
+        payload["retry_after"] = str(retry_after)
+        _log_jquants_api_event(
+            endpoint="investor_types",
+            plan=_jquants_plan(config),
+            cache_hit=bool(payload.get("from_cache")),
+            status=status,
+            records=len(payload.get("records", [])),
+            saved=bool(payload.get("saved")),
+            cache_path=payload.get("cache_path"),
+            reason=str(payload.get("reason") or ""),
+            attempt=attempt,
+            error_reason=str(payload.get("reason") or status),
+            **_payload_http_log_fields(payload, getattr(provider, "last_request_metadata", {}) or {}),
+        )
+        if retry_after > 0:
+            time.sleep(retry_after)
+        allowed, stop_reason = _api_call_allowed("investor_types")
+        if not allowed:
+            last_payload = _api_unavailable_payload("investor_types", stop_reason)
+            break
+    return last_payload
 
 
 def _business_day_on_or_before(value: date) -> date:
@@ -9388,18 +9646,48 @@ def _relative_strength_benchmark_payload(
     topix_records: list[dict[str, Any]] = []
     scoring_config = config.get("scoring", {}).get("relative_strength", {})
     wants_topix = str(scoring_config.get("benchmark", "topix")) == "topix"
+    source_payload: dict[str, Any] = {}
     if wants_topix and _jquants_plan(config) == "light" and jquants_has_capability(_jquants_plan(config), "topix_prices"):
-        start_date = fetch_dates[0] if fetch_dates else target_date
-        payload = _load_topix_prices_for_period(start_date, target_date, config)
-        topix_records = payload.get("records", [])
+        preloaded = _preloaded_topix_payload_for(target_date)
+        if preloaded:
+            topix_records = preloaded.get("records", [])
+            source_payload = preloaded
+        else:
+            start_date = fetch_dates[0] if fetch_dates else target_date
+            payload = _load_topix_prices_for_period(start_date, target_date, config)
+            topix_records = payload.get("records", [])
+            source_payload = payload
         if not topix_records:
-            print(f"relative_strength warning: TOPIX benchmark unavailable; fallback benchmark will be used. reason={payload.get('warning')}")
+            print(f"relative_strength warning: TOPIX benchmark unavailable; fallback benchmark will be used. reason={source_payload.get('warning')}")
     elif wants_topix:
         print("relative_strength warning: TOPIX benchmark disabled for current J-Quants plan; fallback benchmark will be used.")
     benchmark = build_relative_strength_benchmark(price_rows, target_date.isoformat(), topix_records)
+    benchmark["topix_records_loaded"] = len(topix_records)
+    benchmark["topix_api_calls"] = int(_jquants_api_session().setdefault("api_calls_by_endpoint", {}).get("topix_prices", 0) or 0)
+    benchmark["topix_cache_path"] = source_payload.get("cache_path", "")
     if benchmark["benchmark_source"] == "unavailable":
         print("relative_strength warning: benchmark unavailable; relative_strength_score will be 0.")
     return benchmark
+
+
+def _preloaded_topix_payload_for(target_date: date) -> dict[str, Any] | None:
+    preloaded = _jquants_api_session().setdefault("payloads", {}).get("topix_prices")
+    if not isinstance(preloaded, dict):
+        return None
+    end_text = str(preloaded.get("end_date") or "")
+    if end_text and target_date.isoformat() > end_text:
+        return None
+    metadata = preloaded.get("metadata", {}) if isinstance(preloaded.get("metadata"), dict) else {}
+    records = preloaded.get("records", [])
+    return {
+        "records": records,
+        "available": metadata.get("available", bool(records)),
+        "from_cache": metadata.get("from_cache"),
+        "fallback_used": metadata.get("fallback_used"),
+        "warning": metadata.get("warning", ""),
+        "reason": metadata.get("reason", ""),
+        "topix_records_loaded": metadata.get("topix_records_loaded", len(records)),
+    }
 
 
 def _expected_relative_strength_benchmark_source(config: dict[str, Any]) -> str:
@@ -9411,6 +9699,32 @@ def _expected_relative_strength_benchmark_source(config: dict[str, Any]) -> str:
 
 
 def _load_topix_prices_for_period(start_date: date, end_date: date, config: dict[str, Any]) -> dict[str, Any]:
+    return _load_topix_prices_for_period_with_options(start_date, end_date, config, use_preloaded=True)
+
+
+def _load_topix_prices_for_period_with_options(
+    start_date: date,
+    end_date: date,
+    config: dict[str, Any],
+    use_preloaded: bool = True,
+) -> dict[str, Any]:
+    if use_preloaded:
+        preloaded = _preloaded_topix_payload_for(end_date)
+        if preloaded:
+            return preloaded
+    cached = _read_topix_cache_payload(start_date, end_date)
+    if cached is not None:
+        _log_jquants_api_event(
+            endpoint="topix_prices",
+            plan=_jquants_plan(config),
+            cache_hit=True,
+            status="200",
+            records=len(cached.get("records", [])),
+            saved=False,
+            cache_path=cached.get("cache_path"),
+            reason="",
+        )
+        return cached
     allowed, stop_reason = _api_call_allowed("topix_prices")
     if not allowed:
         return _api_unavailable_payload("topix_prices", stop_reason)
@@ -9423,12 +9737,7 @@ def _load_topix_prices_for_period(start_date: date, end_date: date, config: dict
             parallel_fetch=_jquants_parallel_fetch(config),
             max_parallel_requests=_jquants_max_parallel_requests(config),
         )
-        payload = provider.fetch_topix_prices_cached(
-            ROOT / "data" / "cache",
-            start_date=start_date,
-            end_date=end_date,
-            force_refresh=FORCE_REFRESH_ACTIVE,
-        )
+        payload = _fetch_topix_prices_with_retries(provider, start_date, end_date, config)
         _log_jquants_api_event(
             endpoint="topix_prices",
             plan=_jquants_plan(config),
@@ -9438,10 +9747,15 @@ def _load_topix_prices_for_period(start_date: date, end_date: date, config: dict
             saved=bool(payload.get("saved")),
             cache_path=payload.get("cache_path"),
             reason=str(payload.get("reason") or ""),
+            attempt=payload.get("attempt") or "",
+            error_reason=str(payload.get("reason") or ""),
             **_payload_http_log_fields(payload, getattr(provider, "last_request_metadata", {}) or {}),
         )
-        if _provider_payload_status(payload) == "auth_or_plan_error":
+        status = _provider_payload_status(payload)
+        if status == "auth_or_plan_error":
             _record_api_error("topix_prices", "auth_or_plan_error")
+        elif not payload.get("records") and _retryable_jquants_status(status):
+            _record_api_error("topix_prices", status)
         return payload
     except Exception as exc:
         reason = _api_error_status(exc)
@@ -9470,6 +9784,114 @@ def _load_topix_prices_for_period(start_date: date, end_date: date, config: dict
         }
 
 
+def _read_topix_cache_payload(start_date: date, end_date: date) -> dict[str, Any] | None:
+    if FORCE_REFRESH_ACTIVE:
+        return None
+    cache_path = ROOT / "data" / "cache" / "jquants" / "topix_prices" / f"{start_date.isoformat()}_to_{end_date.isoformat()}.json"
+    if not cache_path.exists():
+        return None
+    try:
+        records = read_json(cache_path).get("records", [])
+    except Exception:
+        return None
+    if not isinstance(records, list) or not records:
+        return None
+    return {
+        "records": records,
+        "cache_path": str(cache_path),
+        "from_cache": True,
+        "fallback_used": False,
+        "warning": "",
+        "available": True,
+        "saved": False,
+        "usable": True,
+        "reason": "",
+    }
+
+
+def _fetch_topix_prices_with_retries(
+    provider: JQuantsDataProvider,
+    start_date: date,
+    end_date: date,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    max_attempts = int(config.get("jquants", {}).get("topix_retry_attempts", 4) or 4)
+    retry_waits = _jquants_retry_waits(config)
+    last_payload: dict[str, Any] = {}
+    for attempt in range(1, max_attempts + 1):
+        payload = provider.fetch_topix_prices_cached(
+            ROOT / "data" / "cache",
+            start_date=start_date,
+            end_date=end_date,
+            force_refresh=FORCE_REFRESH_ACTIVE or attempt > 1,
+        )
+        payload["attempt"] = attempt
+        last_payload = payload
+        status = _provider_payload_status(payload)
+        retryable = _retryable_jquants_status(status)
+        if payload.get("records") or payload.get("from_cache") or not retryable or attempt >= max_attempts:
+            if attempt > 1 and payload.get("records"):
+                _record_api_retry_success("topix_prices")
+                payload["retry_success"] = True
+            return payload
+        _record_api_retry("topix_prices")
+        retry_after_header = _retry_after_seconds(payload)
+        retry_after = retry_after_header if retry_after_header is not None else _retry_wait_for_attempt(retry_waits, attempt)
+        payload["retry_after"] = str(retry_after)
+        _log_jquants_api_event(
+            endpoint="topix_prices",
+            plan=_jquants_plan(config),
+            cache_hit=bool(payload.get("from_cache")),
+            status=status,
+            records=len(payload.get("records", [])),
+            saved=bool(payload.get("saved")),
+            cache_path=payload.get("cache_path"),
+            reason=str(payload.get("reason") or ""),
+            attempt=attempt,
+            error_reason=str(payload.get("reason") or status),
+            **_payload_http_log_fields(payload, getattr(provider, "last_request_metadata", {}) or {}),
+        )
+        if retry_after > 0:
+            time.sleep(retry_after)
+        allowed, stop_reason = _api_call_allowed("topix_prices")
+        if not allowed:
+            last_payload = _api_unavailable_payload("topix_prices", stop_reason)
+            break
+    return last_payload
+
+
+def _jquants_retry_waits(config: dict[str, Any]) -> list[int]:
+    raw = config.get("jquants", {}).get("retry_backoff_seconds", [30, 60, 120])
+    if not isinstance(raw, list):
+        return [30, 60, 120]
+    waits: list[int] = []
+    for value in raw:
+        try:
+            waits.append(max(0, int(value)))
+        except (TypeError, ValueError):
+            continue
+    return waits or [30, 60, 120]
+
+
+def _retry_wait_for_attempt(waits: list[int], attempt: int) -> int:
+    index = max(0, min(len(waits) - 1, attempt - 1))
+    return waits[index]
+
+
+def _retry_after_seconds(payload: dict[str, Any]) -> int | None:
+    value = payload.get("retry_after")
+    try:
+        if value not in (None, ""):
+            return max(0, int(float(value)))
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _retryable_jquants_status(status: str) -> bool:
+    return status in {"rate_limit", "network_error", "timeout", "api_error", "api_call_limit_reached"}
+
+
 def _provider_payload_status(payload: dict[str, Any]) -> str:
     if payload.get("api_status"):
         return str(payload.get("api_status"))
@@ -9495,6 +9917,7 @@ def _api_error_log_fields(exc: Exception) -> dict[str, str]:
         "request_url": exc.request_url,
         "request_params": json.dumps(exc.request_params, ensure_ascii=False, sort_keys=True),
         "response_body": exc.response_body,
+        "retry_after": str(getattr(exc, "retry_after", "") or ""),
     }
 
 
@@ -9506,6 +9929,7 @@ def _api_error_log_fields_raw(exc: Exception) -> dict[str, Any]:
         "request_url": exc.request_url,
         "request_params": exc.request_params,
         "response_body": exc.response_body,
+        "retry_after": getattr(exc, "retry_after", "") or "",
     }
 
 
@@ -9522,6 +9946,7 @@ def _payload_http_log_fields(payload: dict[str, Any], metadata: dict[str, Any] |
         "request_url": str(payload.get("request_url") or metadata.get("url") or ""),
         "request_params": request_params_text,
         "response_body": str(payload.get("response_body") or metadata.get("response_body") or ""),
+        "retry_after": str(payload.get("retry_after") or metadata.get("retry_after") or ""),
     }
 
 
@@ -9540,6 +9965,9 @@ def _log_jquants_api_event(
     request_url: str = "",
     request_params: str = "",
     response_body: str = "",
+    attempt: Any = "",
+    retry_after: str = "",
+    error_reason: str = "",
 ) -> None:
     path = ROOT / "logs" / "jquants_api.log"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -9553,8 +9981,15 @@ def _log_jquants_api_event(
         line = f"{line} reason={reason}"
     if retry_range:
         line = f"{line} retry_range={retry_range}"
+    if attempt:
+        line = f"{line} attempt={attempt}"
     if http_status:
         line = f"{line} http_status={http_status}"
+        line = f"{line} status_code={http_status}"
+    if retry_after:
+        line = f"{line} retry_after={retry_after}"
+    if error_reason:
+        line = f"{line} error_reason={error_reason}"
     if request_url:
         line = f"{line} request_url={request_url}"
     if request_params:

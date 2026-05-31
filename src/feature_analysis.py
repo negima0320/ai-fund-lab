@@ -848,6 +848,8 @@ def _relative_strength_debug(scoring_rows: list[dict[str, Any]]) -> dict[str, An
         warnings.append("relative_strength_5d/10d/20d are missing for all candidates")
     return {
         "candidate_count": len(rows),
+        "topix_records_loaded": int(max([_feature_value(row, "topix_records_loaded") or 0 for row in rows], default=0)),
+        "topix_api_calls": int(max([_feature_value(row, "topix_api_calls") or 0 for row in rows], default=0)),
         "rs_data_available_count": len(rs_available),
         "rs_data_missing_count": len(rows) - len(rs_available),
         "relative_strength_score_distribution": score_distribution,
@@ -912,6 +914,8 @@ def _relative_strength_debug_lines(debug: dict[str, Any]) -> list[str]:
     benchmark = debug.get("benchmark_source_distribution", {})
     lines = [
         f"- candidate_count: {debug.get('candidate_count', 0)}",
+        f"- topix_records_loaded: {debug.get('topix_records_loaded', 0)}",
+        f"- topix_api_calls: {debug.get('topix_api_calls', 0)}",
         f"- rs_data_available_count: {debug.get('rs_data_available_count', 0)}",
         f"- rs_data_missing_count: {debug.get('rs_data_missing_count', 0)}",
         "",
