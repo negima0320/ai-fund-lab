@@ -13,6 +13,14 @@ from tax import calculate_period_estimated_tax
 from trade_metrics import is_filled_trade, profit_factor_metrics
 
 
+HOLDING_PERIOD_SIMULATION_DAYS = [4, 5, 6, 7, 8, 10]
+WALK_FORWARD_PERIODS = [
+    ("2025-03-01", "2025-06-30"),
+    ("2025-07-01", "2025-10-31"),
+    ("2025-11-01", "2026-03-06"),
+]
+
+
 def get_database_path(config: dict[str, Any], root: Path) -> Path:
     configured_path = config.get("database", {}).get("path", "storage/ai_fund_lab.sqlite3")
     path = Path(configured_path)
@@ -1082,9 +1090,10 @@ def analyze_operation_data(config: dict[str, Any], root: Path) -> dict[str, Any]
     if not portfolio_rows and not trade_rows and not scoring_rows and not reflection_rows:
         raise ValueError("SQLite DB has no operation data.")
 
+    prices_by_code = _load_price_history(root)
     return {
         "portfolio_analysis": _portfolio_analysis(config, portfolio_rows),
-        "trade_analysis": _trade_analysis(config, trade_rows),
+        "trade_analysis": _trade_analysis(config, trade_rows, prices_by_code),
         "score_analysis": _score_analysis(scoring_rows),
         "reflection_analysis": _reflection_analysis(reflection_rows),
         "config_version_analysis": _config_version_analysis(trade_rows),
@@ -1092,6 +1101,7 @@ def analyze_operation_data(config: dict[str, Any], root: Path) -> dict[str, Any]
         "profile_analysis": _profile_analysis(portfolio_rows, trade_rows),
         "yearly_performance": _yearly_performance_analysis(portfolio_rows, trade_rows),
         "monthly_performance": _monthly_performance_analysis(trade_rows),
+        "walk_forward_validation": _walk_forward_validation(config, portfolio_rows, trade_rows),
         "current_profile_id": _profile_id(config),
         "current_profile_name": _profile_name(config),
         "current_config_version": config_version_from(config),
@@ -1196,7 +1206,11 @@ def _portfolio_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> d
     }
 
 
-def _trade_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _trade_analysis(
+    config: dict[str, Any],
+    rows: list[dict[str, Any]],
+    prices_by_code: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     filled_rows = [row for row in rows if is_filled_trade(row)]
     pf_metrics = profit_factor_metrics(rows)
     closed = pf_metrics["closed_trades"]
@@ -1258,6 +1272,12 @@ def _trade_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> dict[
         "best_trade": _trade_summary(best_trade),
         "worst_trade": _trade_summary(worst_trade),
         "exit_reason_analysis": _exit_reason_analysis(closed),
+        "exit_efficiency": _exit_efficiency_analysis(closed),
+        "holding_period_analysis": _holding_period_analysis(closed),
+        "holding_period_optimization": _holding_period_optimization(config, closed),
+        "candidate_exit_improvements": _candidate_exit_improvements(config, closed),
+        "trade_replay_analysis": _trade_replay_analysis(closed, prices_by_code or {}),
+        "stop_loss_recovery_analysis": _stop_loss_recovery_analysis(closed, prices_by_code or {}),
         "sold_before_take_profit_rate": _sold_before_take_profit_rate(closed),
         "average_holding_days": _average(holding_days),
         "take_profit_count": sum(1 for row in closed if row.get("exit_reason") == "利確"),
@@ -1286,24 +1306,616 @@ def _trade_analysis(config: dict[str, Any], rows: list[dict[str, Any]]) -> dict[
 
 
 def _exit_reason_analysis(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    primary_reasons = ["利確", "損切り", "最大保有期間到達"]
-    reasons = primary_reasons + sorted({str(row.get("exit_reason") or "unknown") for row in rows} - set(primary_reasons))
+    primary_reasons = ["利確", "損切り", "最大保有期間到達", "その他"]
     summaries = []
-    for reason in reasons:
-        reason_rows = [row for row in rows if str(row.get("exit_reason") or "unknown") == reason]
+    for reason in primary_reasons:
+        if reason == "その他":
+            reason_rows = [row for row in rows if _exit_reason_group(row) == "その他"]
+        else:
+            reason_rows = [row for row in rows if _exit_reason_group(row) == reason]
         profit_rates = [float(row["profit_rate"]) for row in reason_rows if row.get("profit_rate") is not None]
         profits = [_trade_profit(row) for row in reason_rows]
         profits = [profit for profit in profits if profit is not None]
+        holding_days = [float(row["holding_days"]) for row in reason_rows if row.get("holding_days") is not None]
         summaries.append(
             {
                 "exit_reason": reason,
                 "count": len(reason_rows),
                 "win_rate": _win_rate(reason_rows),
+                "avg_profit": _average(profits),
+                "avg_profit_rate": _average(profit_rates),
                 "average_profit_rate": _average(profit_rates),
+                "total_profit": round(sum(profits), 2) if profits else 0.0,
+                "avg_holding_days": _average(holding_days),
+            }
+        )
+    return summaries
+
+
+def _exit_reason_group(row: dict[str, Any]) -> str:
+    reason = str(row.get("exit_reason") or "その他")
+    if reason in {"利確", "損切り", "最大保有期間到達"}:
+        return reason
+    return "その他"
+
+
+def _exit_efficiency_analysis(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    max_holding_rows = [row for row in rows if _exit_reason_group(row) == "最大保有期間到達"]
+    return {
+        "take_profit_count": sum(1 for row in rows if _exit_reason_group(row) == "利確"),
+        "stop_loss_count": sum(1 for row in rows if _exit_reason_group(row) == "損切り"),
+        "max_holding_count": len(max_holding_rows),
+        "max_holding_profit_count": sum(1 for row in max_holding_rows if _profit_rate(row) is not None and float(_profit_rate(row) or 0.0) > 0),
+        "max_holding_loss_count": sum(1 for row in max_holding_rows if _profit_rate(row) is not None and float(_profit_rate(row) or 0.0) <= 0),
+    }
+
+
+def _holding_period_analysis(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        if row.get("holding_days") is None:
+            continue
+        grouped.setdefault(int(row["holding_days"]), []).append(row)
+    summaries = []
+    for holding_days, period_rows in sorted(grouped.items()):
+        profit_rates = [float(row["profit_rate"]) for row in period_rows if row.get("profit_rate") is not None]
+        profits = [_trade_profit(row) for row in period_rows]
+        profits = [profit for profit in profits if profit is not None]
+        summaries.append(
+            {
+                "holding_days": holding_days,
+                "count": len(period_rows),
+                "win_rate": _win_rate(period_rows),
+                "avg_profit_rate": _average(profit_rates),
                 "total_profit": round(sum(profits), 2) if profits else 0.0,
             }
         )
     return summaries
+
+
+def _holding_period_optimization(config: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    current_max_holding_days = int(config.get("risk", {}).get("max_holding_business_days", 5))
+    current_rows = [row for row in rows if _trade_profit(row) is not None]
+    current_profit = round(sum(float(_trade_profit(row) or 0.0) for row in current_rows), 2)
+    simulations = [
+        _simulate_max_holding_days(config, rows, max_holding_days)
+        for max_holding_days in HOLDING_PERIOD_SIMULATION_DAYS
+    ]
+    ranked = sorted(
+        simulations,
+        key=lambda item: (
+            float(item.get("estimated_profit") or 0.0),
+            float(item.get("estimated_profit_factor") or 0.0),
+            float(item.get("estimated_win_rate") or 0.0),
+            float(item.get("estimated_drawdown") or -1.0),
+        ),
+        reverse=True,
+    )
+    return {
+        "current_max_holding_days": current_max_holding_days,
+        "current_profit": current_profit,
+        "holding_period_analysis": _holding_period_analysis(rows),
+        "estimated_profit_ranking": ranked,
+        "calculation_details": _holding_period_calculation_details(ranked, current_profit, len(current_rows)),
+        "candidate_holding_days": _candidate_holding_days(ranked, current_profit),
+    }
+
+
+def _simulate_max_holding_days(
+    config: dict[str, Any],
+    rows: list[dict[str, Any]],
+    max_holding_days: int,
+) -> dict[str, Any]:
+    simulated_rows = [
+        row for row in rows
+        if row.get("holding_days") is not None
+        and int(row["holding_days"]) <= max_holding_days
+        and _trade_profit(row) is not None
+    ]
+    simulated_rows = sorted(simulated_rows, key=_trade_timeline_key)
+    profits = [_trade_profit(row) for row in simulated_rows]
+    profits = [profit for profit in profits if profit is not None]
+    wins = [profit for profit in profits if profit > 0]
+    losses = [profit for profit in profits if profit < 0]
+    gross_win_total = round(sum(wins), 2)
+    gross_loss_total = round(sum(losses), 2)
+    profit_factor = round(gross_win_total / abs(gross_loss_total), 4) if gross_loss_total < 0 else None
+    return {
+        "max_holding_days": max_holding_days,
+        "sample_count": len(simulated_rows),
+        "estimated_profit": round(sum(profits), 2) if profits else 0.0,
+        "estimated_profit_factor": profit_factor,
+        "estimated_win_rate": round(len(wins) / len(profits), 4) if profits else None,
+        "estimated_drawdown": _estimated_drawdown(profits, _initial_capital(config)),
+    }
+
+
+def _holding_period_calculation_details(
+    ranked: list[dict[str, Any]],
+    current_profit: float,
+    base_trade_count: int,
+) -> dict[str, Any]:
+    if not ranked:
+        return {
+            "current_profit_formula": "sum(profit for all closed trades)",
+            "simulated_profit_formula": "sum(profit for closed trades with holding_days <= max_holding_days)",
+            "lift_vs_current_formula": "simulated_profit - current_profit",
+            "current_profit": current_profit,
+            "simulated_profit": None,
+            "profit_difference": None,
+            "lift_vs_current": None,
+            "base_trade_count": base_trade_count,
+            "simulated_trade_count": 0,
+        }
+    best = ranked[0]
+    simulated_profit = float(best.get("estimated_profit") or 0.0)
+    profit_difference = round(simulated_profit - current_profit, 2)
+    return {
+        "current_profit_formula": "sum(profit for all closed trades)",
+        "simulated_profit_formula": "sum(profit for closed trades with holding_days <= max_holding_days)",
+        "lift_vs_current_formula": "simulated_profit - current_profit",
+        "current_profit": current_profit,
+        "simulated_profit": round(simulated_profit, 2),
+        "profit_difference": profit_difference,
+        "lift_vs_current": profit_difference,
+        "base_trade_count": base_trade_count,
+        "simulated_trade_count": best.get("sample_count", 0),
+    }
+
+
+def _candidate_holding_days(ranked: list[dict[str, Any]], current_profit: float) -> list[dict[str, Any]]:
+    if not ranked:
+        return []
+    best = ranked[0]
+    simulated_profit = float(best.get("estimated_profit") or 0.0)
+    lift = round(simulated_profit - current_profit, 2)
+    if simulated_profit <= current_profit:
+        return []
+    reason = (
+        f"max_holding_days={best.get('max_holding_days')} が推定利益 "
+        f"{simulated_profit:,.0f}円で、実績利益 {current_profit:,.0f}円を上回ります。"
+    )
+    return [
+        {
+            "recommended_max_holding_days": best.get("max_holding_days"),
+            "reason": reason,
+            "estimated_profit": best.get("estimated_profit"),
+            "estimated_profit_lift_vs_current": lift,
+            "estimated_profit_factor": best.get("estimated_profit_factor"),
+            "estimated_win_rate": best.get("estimated_win_rate"),
+            "estimated_drawdown": best.get("estimated_drawdown"),
+        }
+    ]
+
+
+def _estimated_drawdown(profits: list[float], initial_capital: float) -> float | None:
+    if not profits or initial_capital <= 0:
+        return None
+    equity = initial_capital
+    peak = initial_capital
+    max_drawdown = 0.0
+    for profit in profits:
+        equity += profit
+        peak = max(peak, equity)
+        drawdown = (equity - peak) / peak if peak else 0.0
+        max_drawdown = min(max_drawdown, drawdown)
+    return round(max_drawdown, 4)
+
+
+def _initial_capital(config: dict[str, Any]) -> float:
+    return float(config.get("portfolio", {}).get("initial_cash") or config.get("initial_capital") or 1_000_000)
+
+
+def _trade_timeline_key(row: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(row.get("exit_date") or row.get("entry_date") or row.get("date") or ""),
+        str(row.get("trade_id") or row.get("code") or ""),
+    )
+
+
+def _load_price_history(root: Path) -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = {}
+    raw_dir = root / "data" / "raw"
+    for path in sorted(raw_dir.glob("prices_*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for row in payload.get("prices", []):
+            code = str(row.get("code") or row.get("Code") or row.get("LocalCode") or "")
+            row_date = row.get("date") or row.get("Date")
+            close = _number(row.get("close") or row.get("Close") or row.get("AdjustmentClose"))
+            if code and row_date and close is not None:
+                result.setdefault(code, []).append({"date": str(row_date), "close": close})
+    for code in result:
+        result[code] = sorted(result[code], key=lambda row: row.get("date") or "")
+    return result
+
+
+def _candidate_exit_improvements(config: dict[str, Any], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    risk = config.get("risk", {})
+    take_profit_rate = float(risk.get("take_profit_pct", 0.06))
+    stop_loss_rate = float(risk.get("stop_loss_pct", -0.03))
+    max_holding_days = int(risk.get("max_holding_business_days", 5))
+    efficiency = _exit_efficiency_analysis(rows)
+    max_holding_rows = [row for row in rows if _exit_reason_group(row) == "最大保有期間到達"]
+    stop_loss_rows = [row for row in rows if _exit_reason_group(row) == "損切り"]
+    suggestions = []
+
+    if efficiency["take_profit_count"] < efficiency["max_holding_profit_count"]:
+        suggestions.append(
+            {
+                "suggestion": "take_profit_rate を下げる候補",
+                "reason": f"利確件数 {efficiency['take_profit_count']}件に対して、最大保有期間到達の利益終了が {efficiency['max_holding_profit_count']}件あります。",
+                "current_value": take_profit_rate,
+            }
+        )
+
+    max_holding_profit_rates = [
+        float(row["profit_rate"]) for row in max_holding_rows if row.get("profit_rate") is not None
+    ]
+    max_holding_avg = _average(max_holding_profit_rates)
+    max_holding_win_rate = _win_rate(max_holding_rows)
+    if max_holding_avg is not None and max_holding_avg > 0 and (max_holding_win_rate or 0.0) >= 0.5:
+        suggestions.append(
+            {
+                "suggestion": "max_holding_days を延ばす候補",
+                "reason": f"最大保有期間到達の平均利益率が {max_holding_avg:.2%}、勝率が {(max_holding_win_rate or 0.0):.2%} です。",
+                "current_value": max_holding_days,
+            }
+        )
+
+    stop_loss_profit_rates = [
+        float(row["profit_rate"]) for row in stop_loss_rows if row.get("profit_rate") is not None
+    ]
+    stop_loss_avg = _average(stop_loss_profit_rates)
+    if stop_loss_rows and stop_loss_avg is not None and abs(stop_loss_avg - stop_loss_rate) <= 0.010001:
+        suggestions.append(
+            {
+                "suggestion": "stop_loss は機能",
+                "reason": f"損切り {len(stop_loss_rows)}件の平均損失率が {stop_loss_avg:.2%} で、設定値 {stop_loss_rate:.2%} 付近です。",
+                "current_value": stop_loss_rate,
+            }
+        )
+
+    if efficiency["max_holding_loss_count"] > efficiency["max_holding_profit_count"]:
+        suggestions.append(
+            {
+                "suggestion": "time stop 強化",
+                "reason": f"最大保有期間到達の損失終了が {efficiency['max_holding_loss_count']}件で、利益終了 {efficiency['max_holding_profit_count']}件を上回っています。",
+                "current_value": max_holding_days,
+            }
+        )
+
+    return suggestions or [
+        {
+            "suggestion": "現行出口ルールを継続検証",
+            "reason": "利確、損切り、最大保有期間到達の偏りが小さく、明確な変更候補はまだ弱いです。",
+            "current_value": None,
+        }
+    ]
+
+
+def _trade_replay_analysis(
+    rows: list[dict[str, Any]],
+    prices_by_code: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    if not prices_by_code:
+        return {
+            "top_profit_trades": [],
+            "top_loss_trades": [],
+            "winner_average_replay": _average_replay([]),
+            "loser_average_replay": _average_replay([]),
+        }
+    ranked = [
+        row for row in rows
+        if _trade_profit(row) is not None
+        and row.get("code")
+        and row.get("entry_date")
+    ]
+    winners = sorted(
+        [row for row in ranked if float(_trade_profit(row) or 0.0) > 0],
+        key=lambda row: float(_trade_profit(row) or 0.0),
+        reverse=True,
+    )[:10]
+    losers = sorted(
+        [row for row in ranked if float(_trade_profit(row) or 0.0) < 0],
+        key=lambda row: float(_trade_profit(row) or 0.0),
+    )[:10]
+    winner_replays = [_trade_replay_record(row, prices_by_code) for row in winners]
+    loser_replays = [_trade_replay_record(row, prices_by_code) for row in losers]
+    winner_replays = [item for item in winner_replays if item]
+    loser_replays = [item for item in loser_replays if item]
+    return {
+        "top_profit_trades": winner_replays,
+        "top_loss_trades": loser_replays,
+        "winner_average_replay": _average_replay(winner_replays),
+        "loser_average_replay": _average_replay(loser_replays),
+    }
+
+
+def _trade_replay_record(
+    row: dict[str, Any],
+    prices_by_code: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any] | None:
+    code = str(row.get("code") or "")
+    entry_date = str(row.get("entry_date") or "")
+    prices = prices_by_code.get(code, [])
+    entry_price = _trade_entry_price(row, prices)
+    if not code or not entry_date or entry_price is None or entry_price == 0:
+        return None
+    day_returns = []
+    for day in range(1, 11):
+        close = _future_close(prices, entry_date, day)
+        day_returns.append(
+            {
+                "day": day,
+                "close": close,
+                "return_rate": _close_return_rate(entry_price, close),
+            }
+        )
+    return {
+        "entry_date": entry_date,
+        "code": code,
+        "name": row.get("name"),
+        "holding_days": row.get("holding_days"),
+        "profit": _trade_profit(row),
+        "profit_rate": _profit_rate(row),
+        "entry_price": entry_price,
+        "entry_return_rate": 0.0,
+        "day_returns": day_returns,
+    }
+
+
+def _trade_entry_price(row: dict[str, Any], prices: list[dict[str, Any]]) -> float | None:
+    entry_price = row.get("entry_price")
+    if entry_price is not None:
+        return float(entry_price)
+    return _close_on_or_after(prices, str(row.get("entry_date") or ""))
+
+
+def _close_on_or_after(prices: list[dict[str, Any]], target_date: str) -> float | None:
+    for row in prices:
+        if str(row.get("date") or "") >= target_date:
+            return _number(row.get("close"))
+    return None
+
+
+def _future_close(prices: list[dict[str, Any]], entry_date: str, offset: int) -> float | None:
+    future_prices = [row for row in prices if str(row.get("date") or "") > entry_date]
+    if len(future_prices) < offset:
+        return None
+    return _number(future_prices[offset - 1].get("close"))
+
+
+def _close_return_rate(entry_price: float, close: float | None) -> float | None:
+    if close is None or entry_price == 0:
+        return None
+    return round((close - entry_price) / entry_price, 6)
+
+
+def _average_replay(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result = [{"label": "entry", "return_rate": 0.0, "count": len(items)}]
+    for day in range(1, 11):
+        returns = []
+        for item in items:
+            day_item = next((entry for entry in item.get("day_returns", []) if entry.get("day") == day), None)
+            if day_item and day_item.get("return_rate") is not None:
+                returns.append(float(day_item["return_rate"]))
+        result.append({"label": f"day{day}", "return_rate": _average(returns), "count": len(returns)})
+    return result
+
+
+def _stop_loss_recovery_analysis(
+    rows: list[dict[str, Any]],
+    prices_by_code: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    stop_loss_rows = [row for row in rows if _exit_reason_group(row) == "損切り"]
+    records = [
+        record for record in (
+            _stop_loss_recovery_record(row, prices_by_code)
+            for row in stop_loss_rows
+        )
+        if record
+    ]
+    winners = [record for record in records if record.get("day10_recovered")]
+    losers = [record for record in records if not record.get("day10_recovered")]
+    return {
+        "stop_loss_count": len(stop_loss_rows),
+        "replay_count": len(records),
+        "day5_recovery_rate": _recovery_rate(records, "day5_recovered"),
+        "day10_recovery_rate": _recovery_rate(records, "day10_recovered"),
+        "recovery_winners": winners,
+        "recovery_losers": losers,
+        "recovery_signals": _recovery_signal_rows(winners, losers),
+        "candidate_dynamic_stop_rules": _candidate_dynamic_stop_rules(winners, losers),
+    }
+
+
+def _stop_loss_recovery_record(
+    row: dict[str, Any],
+    prices_by_code: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any] | None:
+    replay = _trade_replay_record(row, prices_by_code)
+    if not replay:
+        return None
+    day1_return = _replay_day_return(replay, 1)
+    day5_return = _replay_day_return(replay, 5)
+    day10_return = _replay_day_return(replay, 10)
+    return {
+        "entry_date": replay.get("entry_date"),
+        "code": replay.get("code"),
+        "name": replay.get("name"),
+        "holding_days": replay.get("holding_days"),
+        "profit": replay.get("profit"),
+        "profit_rate": replay.get("profit_rate"),
+        "day1_return": day1_return,
+        "day5_return": day5_return,
+        "day10_return": day10_return,
+        "day5_recovered": day5_return is not None and day5_return > 0,
+        "day10_recovered": day10_return is not None and day10_return > 0,
+        "rsi": row.get("rsi"),
+        "volume_ratio": row.get("volume_ratio"),
+        "market_regime": row.get("market_regime") or "unknown",
+        "sector": row.get("sector_name") or "未分類",
+        "candlestick_signals": _load_json_list(row.get("candlestick_signals")),
+    }
+
+
+def _replay_day_return(replay: dict[str, Any], day: int) -> float | None:
+    day_item = next((item for item in replay.get("day_returns", []) if item.get("day") == day), None)
+    if not day_item:
+        return None
+    return day_item.get("return_rate")
+
+
+def _recovery_rate(records: list[dict[str, Any]], key: str) -> float | None:
+    valid = [record for record in records if record.get(key) is not None]
+    if not valid:
+        return None
+    return round(sum(1 for record in valid if record.get(key)) / len(valid), 4)
+
+
+def _recovery_signal_rows(winners: list[dict[str, Any]], losers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    winner_counts = _recovery_feature_counts(winners)
+    loser_counts = _recovery_feature_counts(losers)
+    rows = []
+    for feature in sorted(set(winner_counts) | set(loser_counts)):
+        winner_count = winner_counts.get(feature, 0)
+        loser_count = loser_counts.get(feature, 0)
+        winner_share = _share_count(winner_count, len(winners))
+        loser_share = _share_count(loser_count, len(losers))
+        rows.append(
+            {
+                "feature": feature[0],
+                "value": feature[1],
+                "winner_count": winner_count,
+                "loser_count": loser_count,
+                "winner_share": winner_share,
+                "loser_share": loser_share,
+                "share_difference": _difference_rates(winner_share, loser_share),
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda item: (
+            abs(float(item.get("share_difference") or 0.0)),
+            int(item.get("winner_count") or 0) + int(item.get("loser_count") or 0),
+        ),
+        reverse=True,
+    )
+
+
+def _recovery_feature_counts(records: list[dict[str, Any]]) -> dict[tuple[str, str], int]:
+    counts: dict[tuple[str, str], int] = {}
+    for record in records:
+        for feature in set(_recovery_features(record)):
+            counts[feature] = counts.get(feature, 0) + 1
+    return counts
+
+
+def _recovery_features(record: dict[str, Any]) -> list[tuple[str, str]]:
+    signals = record.get("candlestick_signals") or ["no_signal"]
+    features = [
+        ("RSI", _rsi_bucket(record.get("rsi"))),
+        ("volume_ratio", _volume_bucket(record.get("volume_ratio"))),
+        ("market_regime", str(record.get("market_regime") or "unknown")),
+        ("sector", str(record.get("sector") or "未分類")),
+    ]
+    features.extend(("candlestick_signal", str(signal)) for signal in signals)
+    return [(name, value) for name, value in features if value]
+
+
+def _candidate_dynamic_stop_rules(
+    winners: list[dict[str, Any]],
+    losers: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rules = []
+    day1_soft_winners = [
+        record for record in winners
+        if record.get("day1_return") is not None and float(record["day1_return"]) >= -0.02
+    ]
+    day1_soft_losers = [
+        record for record in losers
+        if record.get("day1_return") is not None and float(record["day1_return"]) >= -0.02
+    ]
+    winner_share = _share_count(len(day1_soft_winners), len(winners))
+    loser_share = _share_count(len(day1_soft_losers), len(losers))
+    if winner_share is not None and winner_share >= 0.5 and (loser_share is None or winner_share > loser_share):
+        rules.append(
+            {
+                "rule": "Day1 -2%以内なら保有継続候補",
+                "winner_share": winner_share,
+                "loser_share": loser_share,
+                "winner_count": len(day1_soft_winners),
+                "loser_count": len(day1_soft_losers),
+                "reason": "損切り後に回復した銘柄はDay1の下落が浅い傾向があります。",
+            }
+        )
+    day1_deep_losers = [
+        record for record in losers
+        if record.get("day1_return") is not None and float(record["day1_return"]) < -0.02
+    ]
+    deep_loser_share = _share_count(len(day1_deep_losers), len(losers))
+    if deep_loser_share is not None and deep_loser_share >= 0.5:
+        rules.append(
+            {
+                "rule": "Day1 -2%超なら通常損切り維持候補",
+                "winner_share": _share_count(
+                    sum(1 for record in winners if record.get("day1_return") is not None and float(record["day1_return"]) < -0.02),
+                    len(winners),
+                ),
+                "loser_share": deep_loser_share,
+                "winner_count": sum(1 for record in winners if record.get("day1_return") is not None and float(record["day1_return"]) < -0.02),
+                "loser_count": len(day1_deep_losers),
+                "reason": "未回復組はDay1から大きく崩れる傾向があります。",
+            }
+        )
+    return rules
+
+
+def _rsi_bucket(value: Any) -> str:
+    number = _number(value)
+    if number is None:
+        return "unknown"
+    if number < 40:
+        return "<40"
+    if number < 50:
+        return "40-50"
+    if number < 60:
+        return "50-60"
+    if number < 65:
+        return "60-65"
+    if number < 70:
+        return "65-70"
+    return "70+"
+
+
+def _volume_bucket(value: Any) -> str:
+    number = _number(value)
+    if number is None:
+        return "unknown"
+    if number < 1.5:
+        return "<1.5"
+    if number < 2:
+        return "1.5-2"
+    if number < 3:
+        return "2-3"
+    return "3+"
+
+
+def _share_count(count: int, total: int) -> float | None:
+    if total <= 0:
+        return None
+    return round(count / total, 4)
+
+
+def _difference_rates(left: float | None, right: float | None) -> float | None:
+    if left is None or right is None:
+        return None
+    return round(left - right, 4)
 
 
 def _sold_before_take_profit_rate(rows: list[dict[str, Any]]) -> float | None:
@@ -1311,6 +1923,21 @@ def _sold_before_take_profit_rate(rows: list[dict[str, Any]]) -> float | None:
         return None
     before_take_profit = [row for row in rows if row.get("exit_reason") != "利確"]
     return round(len(before_take_profit) / len(rows), 4)
+
+
+def _profit_rate(row: dict[str, Any]) -> float | None:
+    if row.get("profit_rate") is None:
+        return None
+    return float(row["profit_rate"])
+
+
+def _number(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _win_rate(rows: list[dict[str, Any]]) -> float | None:
@@ -1377,6 +2004,119 @@ def _yearly_performance_analysis(portfolio_rows: list[dict[str, Any]], trade_row
             }
         )
     return result
+
+
+def _walk_forward_validation(
+    config: dict[str, Any],
+    portfolio_rows: list[dict[str, Any]],
+    trade_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    periods = [
+        _walk_forward_period(config, portfolio_rows, trade_rows, start_date, end_date)
+        for start_date, end_date in WALK_FORWARD_PERIODS
+    ]
+    stable = [period for period in periods if _is_stable_walk_forward_period(period)]
+    weak = [period for period in periods if not _is_stable_walk_forward_period(period)]
+    return {
+        "periods": periods,
+        "stable_periods": stable,
+        "weak_periods": weak,
+        "overfit_risk": _walk_forward_overfit_risk(periods),
+    }
+
+
+def _walk_forward_period(
+    config: dict[str, Any],
+    portfolio_rows: list[dict[str, Any]],
+    trade_rows: list[dict[str, Any]],
+    start_date: str,
+    end_date: str,
+) -> dict[str, Any]:
+    period_trades = [
+        row for row in trade_rows
+        if _date_in_range(_trade_metric_date(row), start_date, end_date)
+    ]
+    metrics = profit_factor_metrics(period_trades)
+    closed = metrics["closed_trades"]
+    profits = [_trade_profit(row) for row in closed]
+    profits = [profit for profit in profits if profit is not None]
+    win_rates = [
+        float(row["profit_rate"]) for row in closed
+        if row.get("profit_rate") is not None and float(row["profit_rate"]) > 0
+    ]
+    loss_rates = [
+        float(row["profit_rate"]) for row in closed
+        if row.get("profit_rate") is not None and float(row["profit_rate"]) <= 0
+    ]
+    win_rate = metrics["win_rate"]
+    expectancy = None
+    if win_rate is not None:
+        expectancy = round((win_rate * (_average(win_rates) or 0.0)) + ((1 - win_rate) * (_average(loss_rates) or 0.0)), 4)
+    period_portfolio = [
+        row for row in portfolio_rows
+        if _date_in_range(str(row.get("date") or ""), start_date, end_date)
+    ]
+    portfolio_drawdowns = [
+        float(row.get("max_drawdown") or 0.0)
+        for row in period_portfolio
+        if row.get("max_drawdown") is not None
+    ]
+    max_drawdown = min(portfolio_drawdowns) if portfolio_drawdowns else _estimated_drawdown(profits, _initial_capital(config))
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "net_cumulative_profit": round(sum(profits), 2) if profits else 0.0,
+        "win_rate": win_rate,
+        "profit_factor": metrics["profit_factor"],
+        "max_drawdown": max_drawdown,
+        "total_trades": metrics["closed_trade_count"],
+        "expectancy": expectancy,
+    }
+
+
+def _is_stable_walk_forward_period(period: dict[str, Any]) -> bool:
+    return (
+        int(period.get("total_trades") or 0) > 0
+        and float(period.get("net_cumulative_profit") or 0.0) > 0
+        and (period.get("profit_factor") is None or float(period.get("profit_factor") or 0.0) >= 1.0)
+        and (period.get("expectancy") is None or float(period.get("expectancy") or 0.0) > 0)
+    )
+
+
+def _walk_forward_overfit_risk(periods: list[dict[str, Any]]) -> dict[str, Any]:
+    evaluated = [period for period in periods if int(period.get("total_trades") or 0) > 0]
+    stable = [period for period in evaluated if _is_stable_walk_forward_period(period)]
+    weak = [period for period in evaluated if not _is_stable_walk_forward_period(period)]
+    if not evaluated:
+        return {
+            "risk_level": "unknown",
+            "stable_period_count": 0,
+            "weak_period_count": 0,
+            "reason": "評価可能な取引期間がありません。",
+        }
+    if len(stable) == len(evaluated):
+        risk_level = "low"
+        reason = "評価可能な全期間がプラス期待値でした。"
+    elif len(stable) >= len(weak):
+        risk_level = "moderate"
+        reason = "安定期間と弱い期間が混在しています。"
+    else:
+        risk_level = "high"
+        reason = "弱い期間が安定期間を上回っており、期間依存の可能性があります。"
+    return {
+        "risk_level": risk_level,
+        "stable_period_count": len(stable),
+        "weak_period_count": len(weak),
+        "reason": reason,
+    }
+
+
+def _trade_metric_date(row: dict[str, Any]) -> str:
+    return str(row.get("exit_date") or row.get("entry_date") or row.get("date") or "")
+
+
+def _date_in_range(value: str, start_date: str, end_date: str) -> bool:
+    return bool(value) and start_date <= value <= end_date
 
 
 def _monthly_performance_analysis(trade_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

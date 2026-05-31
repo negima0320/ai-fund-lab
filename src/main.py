@@ -3632,6 +3632,7 @@ def write_real_daily_markdown(
     config = load_config(CONFIG_PATH)
     summary = normalize_real_summary_for_markdown(trade_result["portfolio_summary"], target_date_text)
     summary["market_context"] = load_market_context_for_date(target_date_text, "jquants")
+    attach_paper_trading_report_context(summary, config)
     paper_trade_log = normalize_real_trade_for_markdown(
         trade_result["state"],
         trade_result["trades"],
@@ -3709,6 +3710,7 @@ def write_backtest_daily_markdown(
     config = load_config(CONFIG_PATH)
     summary = normalize_real_summary_for_markdown(trade_result["portfolio_summary"], target_date_text)
     summary["market_context"] = load_market_context_for_date(target_date_text, "jquants")
+    attach_paper_trading_report_context(summary, config)
     paper_trade_log = normalize_real_trade_for_markdown(
         trade_result["state"],
         trade_result["trades"],
@@ -3790,6 +3792,14 @@ def normalize_real_summary_for_markdown(summary: dict[str, Any], target_date_tex
     }
 
 
+def attach_paper_trading_report_context(summary: dict[str, Any], config: dict[str, Any]) -> None:
+    try:
+        analysis = analyze_operation_data(config, ROOT)
+    except (FileNotFoundError, ValueError, sqlite3.Error):
+        return
+    summary["walk_forward_validation"] = analysis.get("walk_forward_validation", {})
+
+
 def _extract_markdown_title(markdown: str) -> str:
     for line in markdown.splitlines():
         if line.startswith("# "):
@@ -3851,6 +3861,7 @@ def normalize_real_trade_for_markdown(
             "quantity": position["shares"],
             "market_value": position["market_value"],
             "unrealized_pnl": position.get("unrealized_profit", 0),
+            "sector_name": position.get("sector_name", ""),
         }
         for position in state["positions"]
     ]
@@ -3862,6 +3873,7 @@ def normalize_real_trade_for_markdown(
         "executed_orders": executed_orders,
         "skipped_buys": skipped_buys,
         "closed_trades": closed,
+        "all_closed_trades": state.get("closed_trades", closed),
         "safety_events": safety_events or [],
         "positions": positions,
     }
@@ -4350,6 +4362,7 @@ def render_analysis_markdown(analysis: dict[str, Any]) -> str:
     profile_analysis = analysis.get("profile_analysis", [])
     yearly_performance = analysis.get("yearly_performance", [])
     monthly_performance = analysis.get("monthly_performance", [])
+    walk_forward_validation = analysis.get("walk_forward_validation", {})
     selection_quality = analysis.get("selection_quality_analysis", {})
     bands = scores["score_bands"]
     lines = [
@@ -4428,9 +4441,37 @@ def render_analysis_markdown(analysis: dict[str, Any]) -> str:
         f"- ギャップダウン回数: {trades.get('gap_down_count', 0)}",
         f"- 利確到達前に売った取引の割合: {_format_optional_percent(trades.get('sold_before_take_profit_rate'))}",
         "",
-        "### exit_reason別集計",
+        "## Exit Reason Analysis",
         "",
         *_exit_reason_analysis_lines(trades.get("exit_reason_analysis", [])),
+        "",
+        "## Exit Efficiency",
+        "",
+        *_exit_efficiency_lines(trades.get("exit_efficiency", {})),
+        "",
+        "## Holding Period Analysis",
+        "",
+        *_holding_period_analysis_lines(trades.get("holding_period_analysis", [])),
+        "",
+        "## Holding Period Optimization",
+        "",
+        *_holding_period_optimization_lines(trades.get("holding_period_optimization", {})),
+        "",
+        "## Candidate Exit Improvements",
+        "",
+        *_candidate_exit_improvement_lines(trades.get("candidate_exit_improvements", [])),
+        "",
+        "## Trade Replay Analysis",
+        "",
+        *_trade_replay_analysis_lines(trades.get("trade_replay_analysis", {})),
+        "",
+        "## Stop Loss Recovery Analysis",
+        "",
+        *_stop_loss_recovery_analysis_lines(trades.get("stop_loss_recovery_analysis", {})),
+        "",
+        "## Walk Forward Validation",
+        "",
+        *_walk_forward_validation_lines(walk_forward_validation),
         "",
         "## Yearly Performance",
         "",
@@ -4633,6 +4674,56 @@ def _monthly_performance_lines(items: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def _walk_forward_validation_lines(analysis: dict[str, Any]) -> list[str]:
+    if not analysis:
+        return ["- Walk Forward Validation データなし"]
+    return [
+        "### Period Results",
+        "",
+        *_walk_forward_period_lines(analysis.get("periods", [])),
+        "",
+        "## Stable Periods",
+        "",
+        *_walk_forward_period_lines(analysis.get("stable_periods", [])),
+        "",
+        "## Weak Periods",
+        "",
+        *_walk_forward_period_lines(analysis.get("weak_periods", [])),
+        "",
+        "## Overfit Risk",
+        "",
+        *_overfit_risk_lines(analysis.get("overfit_risk", {})),
+    ]
+
+
+def _walk_forward_period_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- 該当期間なし"]
+    return [
+        (
+            f"- {item.get('start_date')} to {item.get('end_date')}: "
+            f"net_cumulative_profit {_format_optional_yen(item.get('net_cumulative_profit'))}, "
+            f"win_rate {_format_optional_percent(item.get('win_rate'))}, "
+            f"profit_factor {_format_optional_number(item.get('profit_factor'))}, "
+            f"max_drawdown {_format_optional_percent(item.get('max_drawdown'))}, "
+            f"total_trades {item.get('total_trades')}, "
+            f"expectancy {_format_optional_percent(item.get('expectancy'))}"
+        )
+        for item in items
+    ]
+
+
+def _overfit_risk_lines(item: dict[str, Any]) -> list[str]:
+    if not item:
+        return ["- overfit risk データなし"]
+    return [
+        f"- risk_level: {item.get('risk_level')}",
+        f"- stable_period_count: {item.get('stable_period_count')}",
+        f"- weak_period_count: {item.get('weak_period_count')}",
+        f"- reason: {item.get('reason')}",
+    ]
+
+
 def _exit_reason_analysis_lines(items: list[dict[str, Any]]) -> list[str]:
     if not items:
         return ["- 売却理由別データなし"]
@@ -4640,11 +4731,264 @@ def _exit_reason_analysis_lines(items: list[dict[str, Any]]) -> list[str]:
         (
             f"- {item['exit_reason']}: 件数 {item['count']}件, "
             f"勝率 {_format_optional_percent(item.get('win_rate'))}, "
-            f"平均利益率 {_format_optional_percent(item.get('average_profit_rate'))}, "
-            f"合計利益 {_format_optional_yen(item.get('total_profit'))}"
+            f"平均利益 {_format_optional_yen(item.get('avg_profit'))}, "
+            f"平均利益率 {_format_optional_percent(item.get('avg_profit_rate', item.get('average_profit_rate')))}, "
+            f"合計利益 {_format_optional_yen(item.get('total_profit'))}, "
+            f"平均保有日数 {_format_optional_number(item.get('avg_holding_days'))}"
         )
         for item in items
     ]
+
+
+def _exit_efficiency_lines(item: dict[str, Any]) -> list[str]:
+    if not item:
+        return ["- Exit Efficiency データなし"]
+    return [
+        f"- 利確到達件数: {item.get('take_profit_count', 0)}",
+        f"- 損切り到達件数: {item.get('stop_loss_count', 0)}",
+        f"- 最大保有期間到達件数: {item.get('max_holding_count', 0)}",
+        f"- 最大保有期間到達のうち利益で終わった件数: {item.get('max_holding_profit_count', 0)}",
+        f"- 最大保有期間到達のうち損失で終わった件数: {item.get('max_holding_loss_count', 0)}",
+    ]
+
+
+def _holding_period_analysis_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- 保有期間別データなし"]
+    return [
+        (
+            f"- {item.get('holding_days')}日: count {item.get('count')}, "
+            f"win_rate {_format_optional_percent(item.get('win_rate'))}, "
+            f"avg_profit_rate {_format_optional_percent(item.get('avg_profit_rate'))}, "
+            f"total_profit {_format_optional_yen(item.get('total_profit'))}"
+        )
+        for item in items
+    ]
+
+
+def _holding_period_optimization_lines(analysis: dict[str, Any]) -> list[str]:
+    if not analysis:
+        return ["- Holding Period Optimization データなし"]
+    return [
+        f"- current_max_holding_days: {analysis.get('current_max_holding_days')}",
+        f"- current_profit: {_format_optional_yen(analysis.get('current_profit'))}",
+        "",
+        "### calculation_details",
+        "",
+        *_holding_period_calculation_detail_lines(analysis.get("calculation_details", {})),
+        "",
+        "### 推定利益ランキング",
+        "",
+        *_holding_period_simulation_lines(analysis.get("estimated_profit_ranking", [])),
+        "",
+        "### Candidate Holding Days",
+        "",
+        *_candidate_holding_day_lines(analysis.get("candidate_holding_days", [])),
+    ]
+
+
+def _holding_period_calculation_detail_lines(item: dict[str, Any]) -> list[str]:
+    if not item:
+        return ["- calculation_details なし"]
+    return [
+        f"- current_profit_formula: {item.get('current_profit_formula')}",
+        f"- simulated_profit_formula: {item.get('simulated_profit_formula')}",
+        f"- lift_vs_current_formula: {item.get('lift_vs_current_formula')}",
+        f"- current_profit: {_format_optional_yen(item.get('current_profit'))}",
+        f"- simulated_profit: {_format_optional_yen(item.get('simulated_profit'))}",
+        f"- profit_difference: {_format_optional_yen(item.get('profit_difference'))}",
+        f"- lift_vs_current: {_format_optional_yen(item.get('lift_vs_current'))}",
+        f"- base_trade_count: {item.get('base_trade_count')}",
+        f"- simulated_trade_count: {item.get('simulated_trade_count')}",
+    ]
+
+
+def _holding_period_simulation_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- 推定データなし"]
+    return [
+        (
+            f"- max_holding_days={item.get('max_holding_days')}: "
+            f"推定利益 {_format_optional_yen(item.get('estimated_profit'))}, "
+            f"推定PF {_format_optional_number(item.get('estimated_profit_factor'))}, "
+            f"推定勝率 {_format_optional_percent(item.get('estimated_win_rate'))}, "
+            f"推定DD {_format_optional_percent(item.get('estimated_drawdown'))}, "
+            f"sample_count {item.get('sample_count')}"
+        )
+        for item in items
+    ]
+
+
+def _candidate_holding_day_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- 推奨候補なし"]
+    return [
+        (
+            f"- recommended_max_holding_days: {item.get('recommended_max_holding_days')}, "
+            f"estimated_profit {_format_optional_yen(item.get('estimated_profit'))}, "
+            f"lift_vs_current {_format_optional_yen(item.get('estimated_profit_lift_vs_current'))}, "
+            f"estimated_pf {_format_optional_number(item.get('estimated_profit_factor'))}, "
+            f"estimated_win_rate {_format_optional_percent(item.get('estimated_win_rate'))}, "
+            f"estimated_dd {_format_optional_percent(item.get('estimated_drawdown'))}, "
+            f"reason {item.get('reason')}"
+        )
+        for item in items
+    ]
+
+
+def _candidate_exit_improvement_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- 改善候補なし"]
+    return [
+        (
+            f"- {item.get('suggestion')}: {item.get('reason')} "
+            f"(current_value: {_format_exit_current_value(item.get('current_value'))})"
+        )
+        for item in items
+    ]
+
+
+def _format_exit_current_value(value: Any) -> str:
+    if value is None:
+        return "N/A"
+    if isinstance(value, float):
+        return f"{value:.2%}"
+    return str(value)
+
+
+def _trade_replay_analysis_lines(analysis: dict[str, Any]) -> list[str]:
+    if not analysis:
+        return ["- Trade Replay データなし"]
+    return [
+        "### TOP10利益トレード",
+        "",
+        *_trade_replay_record_lines(analysis.get("top_profit_trades", [])),
+        "",
+        "### TOP10損失トレード",
+        "",
+        *_trade_replay_record_lines(analysis.get("top_loss_trades", [])),
+        "",
+        "### 勝ち組平均推移",
+        "",
+        *_average_replay_lines(analysis.get("winner_average_replay", [])),
+        "",
+        "### 負け組平均推移",
+        "",
+        *_average_replay_lines(analysis.get("loser_average_replay", [])),
+    ]
+
+
+def _trade_replay_record_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- replayデータなし"]
+    lines = []
+    for item in items:
+        lines.append(
+            (
+                f"- entry_date {item.get('entry_date')}, code {item.get('code')}, "
+                f"holding_days {item.get('holding_days')}, "
+                f"profit {_format_optional_yen(item.get('profit'))}, "
+                f"profit_rate {_format_optional_percent(item.get('profit_rate'))}"
+            )
+        )
+        lines.append(f"  - entry: {_format_optional_percent(item.get('entry_return_rate'))}")
+        for day_item in item.get("day_returns", []):
+            lines.append(
+                f"  - Day{day_item.get('day')}: {_format_optional_percent(day_item.get('return_rate'))}"
+            )
+    return lines
+
+
+def _average_replay_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- 平均推移データなし"]
+    return [
+        (
+            f"- {item.get('label')}: {_format_optional_percent(item.get('return_rate'))} "
+            f"(count {item.get('count')})"
+        )
+        for item in items
+    ]
+
+
+def _stop_loss_recovery_analysis_lines(analysis: dict[str, Any]) -> list[str]:
+    if not analysis:
+        return ["- Stop Loss Recovery データなし"]
+    return [
+        f"- stop_loss_count: {analysis.get('stop_loss_count', 0)}",
+        f"- replay_count: {analysis.get('replay_count', 0)}",
+        f"- Day5回復率: {_format_optional_percent(analysis.get('day5_recovery_rate'))}",
+        f"- Day10回復率: {_format_optional_percent(analysis.get('day10_recovery_rate'))}",
+        "",
+        "### Recovery Winners",
+        "",
+        *_recovery_trade_lines(analysis.get("recovery_winners", [])),
+        "",
+        "### Recovery Losers",
+        "",
+        *_recovery_trade_lines(analysis.get("recovery_losers", [])),
+        "",
+        "### Recovery Signals",
+        "",
+        *_recovery_signal_lines(analysis.get("recovery_signals", [])),
+        "",
+        "### Candidate Dynamic Stop Rules",
+        "",
+        *_dynamic_stop_rule_lines(analysis.get("candidate_dynamic_stop_rules", [])),
+    ]
+
+
+def _recovery_trade_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- データなし"]
+    return [
+        (
+            f"- {item.get('entry_date')} {item.get('code')} {item.get('name')}: "
+            f"holding_days {item.get('holding_days')}, "
+            f"Day1 {_format_optional_percent(item.get('day1_return'))}, "
+            f"Day5 {_format_optional_percent(item.get('day5_return'))}, "
+            f"Day10 {_format_optional_percent(item.get('day10_return'))}, "
+            f"RSI {_format_optional_number(item.get('rsi'))}, "
+            f"volume_ratio {_format_optional_number(item.get('volume_ratio'))}, "
+            f"market_regime {item.get('market_regime')}, "
+            f"sector {item.get('sector')}, "
+            f"signals {', '.join(item.get('candlestick_signals') or ['no_signal'])}"
+        )
+        for item in items
+    ]
+
+
+def _recovery_signal_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- データなし"]
+    return [
+        (
+            f"- {item.get('feature')}={item.get('value')}: "
+            f"recovery {_format_optional_percent(item.get('winner_share'))} ({item.get('winner_count')}件), "
+            f"non_recovery {_format_optional_percent(item.get('loser_share'))} ({item.get('loser_count')}件), "
+            f"difference {_format_optional_signed_percent(item.get('share_difference'))}"
+        )
+        for item in items
+    ]
+
+
+def _dynamic_stop_rule_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- 候補なし"]
+    return [
+        (
+            f"- {item.get('rule')}: recovery {_format_optional_percent(item.get('winner_share'))} "
+            f"({item.get('winner_count')}件), non_recovery {_format_optional_percent(item.get('loser_share'))} "
+            f"({item.get('loser_count')}件), reason {item.get('reason')}"
+        )
+        for item in items
+    ]
+
+
+def _format_optional_signed_percent(value: Any) -> str:
+    if value is None:
+        return "N/A"
+    return f"{float(value):+.2%}"
 
 
 def _count_lines(items: list[dict[str, Any]]) -> list[str]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Any, Optional
 
 from commentary import generate_buy_comment, generate_daily_comment, generate_sell_comment
@@ -41,6 +42,18 @@ def generate_daily_report(
         f"- 勝率: {win_rate}",
         f"- 最大ドローダウン: {summary['max_drawdown']:.2%}",
         f"- 最大ドローダウン計算: {summary['max_drawdown_note']}",
+        "",
+        "## Daily Report",
+        "",
+        *_paper_daily_report_lines(summary, paper_trade_log),
+        "",
+        "## Weekly Report",
+        "",
+        *_paper_weekly_report_lines(summary, paper_trade_log),
+        "",
+        "## Walk Forward Validation",
+        "",
+        *_walk_forward_validation_lines(summary.get("walk_forward_validation", {})),
         "",
         "## 本日の売買判断",
         "",
@@ -117,6 +130,203 @@ def _top_sector_lines(sectors: list[dict[str, Any]]) -> list[str]:
         )
         for index, item in enumerate(sectors[:5], start=1)
     ]
+
+
+def _paper_daily_report_lines(summary: dict[str, Any], paper_trade_log: dict[str, Any]) -> list[str]:
+    all_closed = paper_trade_log.get("all_closed_trades") or paper_trade_log.get("closed_trades", [])
+    lines = ["### 今日買った銘柄", ""]
+    lines.extend(_today_bought_lines(paper_trade_log.get("orders", [])))
+    lines.extend(["", "### 今日売った銘柄", ""])
+    lines.extend(_today_sold_lines(paper_trade_log.get("closed_trades", [])))
+    lines.extend(
+        [
+            "",
+            "### 含み損益",
+            "",
+            f"- 含み損益: {_format_yen(_unrealized_profit_total(paper_trade_log.get('positions', [])))}",
+            "",
+            "### セクター比率",
+            "",
+            *_sector_ratio_lines(paper_trade_log.get("positions", [])),
+            "",
+            "### 勝率 / PF",
+            "",
+            f"- 勝率: {_format_optional_percent(summary.get('win_rate'))}",
+            f"- PF: {_format_optional_number(_profit_factor(all_closed))}",
+        ]
+    )
+    return lines
+
+
+def _paper_weekly_report_lines(summary: dict[str, Any], paper_trade_log: dict[str, Any]) -> list[str]:
+    all_closed = paper_trade_log.get("all_closed_trades") or paper_trade_log.get("closed_trades", [])
+    report_date = _parse_date(str(summary.get("date") or paper_trade_log.get("date") or ""))
+    if report_date is None:
+        return ["- 期間集計データなし"]
+    week_start = report_date - timedelta(days=report_date.weekday())
+    month_start = report_date.replace(day=1)
+    year_start = report_date.replace(month=1, day=1)
+    return [
+        "### 今週の成績",
+        "",
+        *_period_performance_lines(all_closed, week_start, report_date),
+        "",
+        "### 月初来成績",
+        "",
+        *_period_performance_lines(all_closed, month_start, report_date),
+        "",
+        "### 年初来成績",
+        "",
+        *_period_performance_lines(all_closed, year_start, report_date),
+    ]
+
+
+def _walk_forward_validation_lines(analysis: dict[str, Any]) -> list[str]:
+    if not analysis:
+        return ["- Walk Forward Validation データなし"]
+    lines = ["### Period Results", ""]
+    lines.extend(_walk_forward_period_lines(analysis.get("periods", [])))
+    lines.extend(["", "### Stable Periods", ""])
+    lines.extend(_walk_forward_period_lines(analysis.get("stable_periods", [])))
+    lines.extend(["", "### Weak Periods", ""])
+    lines.extend(_walk_forward_period_lines(analysis.get("weak_periods", [])))
+    lines.extend(["", "### Overfit Risk", ""])
+    risk = analysis.get("overfit_risk", {})
+    if risk:
+        lines.extend(
+            [
+                f"- risk_level: {risk.get('risk_level')}",
+                f"- stable_period_count: {risk.get('stable_period_count')}",
+                f"- weak_period_count: {risk.get('weak_period_count')}",
+                f"- reason: {risk.get('reason')}",
+            ]
+        )
+    else:
+        lines.append("- overfit risk データなし")
+    return lines
+
+
+def _walk_forward_period_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- 該当期間なし"]
+    return [
+        (
+            f"- {item.get('start_date')} to {item.get('end_date')}: "
+            f"net_cumulative_profit {_format_yen(item.get('net_cumulative_profit'))}, "
+            f"win_rate {_format_optional_percent(item.get('win_rate'))}, "
+            f"profit_factor {_format_optional_number(item.get('profit_factor'))}, "
+            f"max_drawdown {_format_optional_percent(item.get('max_drawdown'))}, "
+            f"total_trades {item.get('total_trades')}, "
+            f"expectancy {_format_optional_percent(item.get('expectancy'))}"
+        )
+        for item in items
+    ]
+
+
+def _today_bought_lines(orders: list[dict[str, Any]]) -> list[str]:
+    buys = [item for item in orders if item.get("action") == "BUY"]
+    if not buys:
+        return ["- 本日買付なし"]
+    return [
+        (
+            f"- {item.get('code')} {item.get('name')}: "
+            f"{item.get('quantity', item.get('shares', 0))}株, "
+            f"entry_price={float(item.get('price') or item.get('entry_price') or 0):,.0f}円"
+        )
+        for item in buys
+    ]
+
+
+def _today_sold_lines(closed: list[dict[str, Any]]) -> list[str]:
+    if not closed:
+        return ["- 本日売却なし"]
+    return [
+        (
+            f"- {item.get('code')} {item.get('name')}: "
+            f"損益 {_format_yen(item.get('net_profit', item.get('profit')))}, "
+            f"損益率 {_format_optional_percent(item.get('net_profit_rate', item.get('profit_rate')))}, "
+            f"理由 {item.get('exit_reason') or 'N/A'}"
+        )
+        for item in closed
+    ]
+
+
+def _sector_ratio_lines(positions: list[dict[str, Any]]) -> list[str]:
+    if not positions:
+        return ["- 保有銘柄なし"]
+    total_value = sum(float(item.get("market_value") or 0.0) for item in positions)
+    if total_value <= 0:
+        return ["- 評価額データなし"]
+    sectors: dict[str, float] = {}
+    for item in positions:
+        sector = str(item.get("sector_name") or "未分類")
+        sectors[sector] = sectors.get(sector, 0.0) + float(item.get("market_value") or 0.0)
+    return [
+        f"- {sector}: {value / total_value:.2%} ({value:,.0f}円)"
+        for sector, value in sorted(sectors.items(), key=lambda item: item[1], reverse=True)
+    ]
+
+
+def _period_performance_lines(closed: list[dict[str, Any]], start: date, end: date) -> list[str]:
+    rows = [
+        item for item in closed
+        if (trade_date := _parse_date(str(item.get("exit_date") or item.get("entry_date") or ""))) is not None
+        and start <= trade_date <= end
+    ]
+    profit = sum(_trade_profit(item) for item in rows)
+    return [
+        f"- 期間: {start.isoformat()} to {end.isoformat()}",
+        f"- 損益: {_format_yen(profit)}",
+        f"- 勝率: {_format_optional_percent(_win_rate(rows))}",
+        f"- PF: {_format_optional_number(_profit_factor(rows))}",
+        f"- 取引数: {len(rows)}",
+    ]
+
+
+def _unrealized_profit_total(positions: list[dict[str, Any]]) -> float:
+    return sum(float(item.get("unrealized_pnl", item.get("unrealized_profit", 0.0)) or 0.0) for item in positions)
+
+
+def _trade_profit(item: dict[str, Any]) -> float:
+    for key in ["net_profit", "gross_profit", "profit"]:
+        if item.get(key) is not None:
+            return float(item[key])
+    return 0.0
+
+
+def _win_rate(rows: list[dict[str, Any]]) -> float | None:
+    if not rows:
+        return None
+    wins = sum(1 for item in rows if _trade_profit(item) > 0)
+    return round(wins / len(rows), 4)
+
+
+def _profit_factor(rows: list[dict[str, Any]]) -> float | None:
+    profits = [_trade_profit(item) for item in rows]
+    gross_win = sum(value for value in profits if value > 0)
+    gross_loss = sum(value for value in profits if value < 0)
+    if gross_loss >= 0:
+        return None
+    return round(gross_win / abs(gross_loss), 4)
+
+
+def _parse_date(value: str) -> date | None:
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _format_yen(value: Any) -> str:
+    if value is None:
+        return "N/A"
+    return f"{float(value):,.0f}円"
+
+
+def _format_optional_number(value: Any) -> str:
+    if value is None:
+        return "N/A"
+    return f"{float(value):,.2f}"
 
 
 def _buy_lines(buys: list[dict[str, Any]], config: dict[str, Any]) -> list[str]:
