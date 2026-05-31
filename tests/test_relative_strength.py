@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import main as main_module
@@ -109,6 +110,28 @@ def test_topix_cache_and_api_failure_fallback(monkeypatch, tmp_path) -> None:
     assert fallback["records"][0]["close"] == 102.0
 
 
+def test_topix_prices_api_success_creates_cache_file(monkeypatch, tmp_path) -> None:
+    provider = JQuantsDataProvider.__new__(JQuantsDataProvider)
+    provider.plan = "light"
+    provider.capabilities = {"topix_prices"}
+    provider.fetch_stats = {"api_calls": 0, "cache_hits": 0, "cache_misses": 0, "total_fetch_time": 0.0, "rate_limit_wait_time": 0.0}
+    calls = {"count": 0}
+
+    def fake_fetch(*_args, **_kwargs):
+        calls["count"] += 1
+        return [{"date": "2026-01-26", "close": 102.0}]
+
+    monkeypatch.setattr(provider, "fetch_topix_prices", fake_fetch)
+
+    payload = provider.fetch_topix_prices_cached(tmp_path, date(2026, 1, 1), date(2026, 1, 26))
+    cached = provider.fetch_topix_prices_cached(tmp_path, date(2026, 1, 1), date(2026, 1, 26))
+
+    assert calls["count"] == 1
+    assert payload["saved"] is True
+    assert cached["from_cache"] is True
+    assert (tmp_path / "jquants" / "topix_prices" / "2026-01-01_to_2026-01-26.json").exists()
+
+
 def test_v2_1_does_not_calculate_relative_strength(monkeypatch) -> None:
     price_rows = _relative_strength_price_rows()
 
@@ -209,6 +232,173 @@ def test_relative_strength_score_is_used_only_by_v2_6() -> None:
     assert enhanced["score_components"]["matches_total_score"] is True
     assert enhanced["relative_strength_5d"] == 0.04
     assert enhanced["benchmark_return_20d"] == 0.03
+
+
+def test_v2_6_indicator_route_fetches_topix_and_records_relative_strength(monkeypatch, tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_6")
+    config.setdefault("jquants", {})["plan"] = "light"
+    config["jquants"]["requests_per_minute"] = 60
+    config["jquants"]["parallel_fetch"] = True
+    config.setdefault("backtest", {})["indicator_mode"] = "minimal"
+
+    target = date(2026, 1, 26)
+    fetch_dates = main_module.previous_business_dates(target, 35)
+    _write_prime_fixture(tmp_path)
+    _write_price_history_fixture(tmp_path, fetch_dates)
+    calls = {"count": 0}
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def fetch_topix_prices_cached(self, *_args, **_kwargs):
+            calls["count"] += 1
+            return {
+                "records": _topix_rows(latest_close=102, dates=[day.isoformat() for day in fetch_dates]),
+                "cache_path": "",
+                "from_cache": False,
+                "fallback_used": False,
+                "warning": "",
+                "available": True,
+            }
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "load_config", lambda _path: config)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+    monkeypatch.setattr(main_module, "BACKTEST_MODE_ACTIVE", True)
+
+    main_module.run_calculate_indicators("jquants", target.isoformat())
+
+    payload = main_module.read_json(tmp_path / "data" / "processed" / "rookie_dealer_02_v2_6" / "indicators_2026-01-26.json")
+    by_code = {item["code"]: item for item in payload["indicators"]}
+    api_log = (tmp_path / "logs" / "jquants_api.log").read_text(encoding="utf-8")
+
+    assert calls["count"] == 1
+    assert payload["benchmark_source"] == "topix"
+    assert by_code["1001"]["benchmark_source"] == "topix"
+    assert by_code["1001"]["stock_return_5d"] is not None
+    assert by_code["1001"]["benchmark_return_5d"] == 0.02
+    assert by_code["1001"]["relative_strength_5d"] == 0.18
+    assert by_code["1001"]["relative_strength_score"] > 0
+    assert "endpoint=topix_prices" in api_log
+    assert "plan=light" in api_log
+    assert "cache_hit=false" in api_log
+    assert "status=200" in api_log
+
+
+def test_stale_relative_strength_indicator_cache_is_recalculated(monkeypatch, tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_6")
+    config.setdefault("jquants", {})["plan"] = "light"
+    config.setdefault("backtest", {})["indicator_mode"] = "minimal"
+    target = date(2026, 1, 26)
+    fetch_dates = main_module.previous_business_dates(target, 35)
+    _write_prime_fixture(tmp_path)
+    _write_price_history_fixture(tmp_path, fetch_dates)
+    stale_path = tmp_path / "data" / "processed" / "rookie_dealer_02_v2_6" / "indicators_2026-01-26.json"
+    stale_path.parent.mkdir(parents=True, exist_ok=True)
+    stale_path.write_text(
+        '{"indicator_mode":"minimal","relative_strength_enabled":true,"benchmark_source":"topix","indicators":[{"code":"1001","benchmark_source":"topix","relative_strength_score":0}]}',
+        encoding="utf-8",
+    )
+    calls = {"count": 0}
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def fetch_topix_prices_cached(self, *_args, **_kwargs):
+            calls["count"] += 1
+            return {
+                "records": _topix_rows(latest_close=102, dates=[day.isoformat() for day in fetch_dates]),
+                "cache_path": "",
+                "from_cache": False,
+                "fallback_used": False,
+                "warning": "",
+                "available": True,
+            }
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "load_config", lambda _path: config)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+    monkeypatch.setattr(main_module, "BACKTEST_MODE_ACTIVE", True)
+
+    main_module.ensure_indicators("jquants", target.isoformat())
+
+    refreshed = main_module.read_json(stale_path)
+    assert calls["count"] == 1
+    assert refreshed["indicators"][0]["relative_strength_5d"] is not None
+
+
+def test_light_topix_benchmark_payload_does_not_emit_fallback_warning(monkeypatch, capsys) -> None:
+    config = load_profile("rookie_dealer_02_v2_6")
+    config.setdefault("jquants", {})["plan"] = "light"
+    price_rows = _relative_strength_price_rows()
+    fetch_dates = main_module.previous_business_dates(date(2026, 1, 26), 35)
+    monkeypatch.setattr(
+        main_module,
+        "_load_topix_prices_for_period",
+        lambda *_args, **_kwargs: {
+            "records": _topix_rows(latest_close=102),
+            "from_cache": False,
+            "fallback_used": False,
+            "warning": "",
+            "available": True,
+        },
+    )
+
+    payload = main_module._relative_strength_benchmark_payload(price_rows, date(2026, 1, 26), fetch_dates, config)
+
+    assert payload["benchmark_source"] == "topix"
+    assert "fallback benchmark" not in capsys.readouterr().out
+
+
+def test_scoring_storage_keeps_relative_strength_log_fields() -> None:
+    candidate = {
+        "code": "1001",
+        "name": "Strong",
+        "date": "2026-03-06",
+        "close": 1200,
+        "volume": 100000,
+        "ma5": 1100,
+        "ma25": 1000,
+        "rsi": 57.5,
+        "volume_ratio": 3.0,
+        "turnover_value": 2_500_000_000,
+        "five_day_volatility": 0.02,
+        "fallback": False,
+        "benchmark_source": "topix",
+        "stock_return_5d": 0.05,
+        "stock_return_10d": 0.08,
+        "stock_return_20d": 0.12,
+        "benchmark_return_5d": 0.01,
+        "benchmark_return_10d": 0.02,
+        "benchmark_return_20d": 0.03,
+        "relative_strength_5d": 0.04,
+        "relative_strength_10d": 0.06,
+        "relative_strength_20d": 0.09,
+        "relative_strength_score": 10,
+    }
+    config = load_profile("rookie_dealer_02_v2_6")
+
+    scoring_log = score_real_candidates([candidate], "2026-03-06", config, "test")
+    stored = main_module._scoring_log_for_storage(scoring_log, config)["scores"][0]
+
+    for field in [
+        "benchmark_source",
+        "stock_return_5d",
+        "stock_return_10d",
+        "stock_return_20d",
+        "benchmark_return_5d",
+        "benchmark_return_10d",
+        "benchmark_return_20d",
+        "relative_strength_5d",
+        "relative_strength_10d",
+        "relative_strength_20d",
+        "relative_strength_score",
+    ]:
+        assert field in stored
+    assert stored["benchmark_source"] == "topix"
+    assert stored["score_components"]["relative_strength_score"] == 10
 
 
 def test_fast_analysis_omits_rejected_candidate_storage() -> None:
@@ -409,15 +599,50 @@ def _relative_strength_price_rows() -> list[dict]:
     return rows
 
 
-def _topix_rows(latest_close: float) -> list[dict]:
-    dates = [f"2026-01-{day:02d}" for day in range(1, 27)]
+def _write_prime_fixture(root) -> None:
+    path = root / "data" / "raw" / "prime_stocks_jquants.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '{"stocks":[{"code":"1001","name":"Strong","sector_name":"機械"},{"code":"1002","name":"Flat","sector_name":"情報通信"}]}',
+        encoding="utf-8",
+    )
+
+
+def _write_price_history_fixture(root, dates: list[date]) -> None:
+    for target_date in dates:
+        date_text = target_date.isoformat()
+        prices = []
+        for code, latest_close in [("1001", 120), ("1002", 100)]:
+            close = latest_close if target_date == dates[-1] else 100
+            prices.append(
+                {
+                    "code": code,
+                    "date": date_text,
+                    "open": 100,
+                    "high": max(100, latest_close),
+                    "low": 95,
+                    "close": close,
+                    "volume": 1000,
+                }
+            )
+        path = root / "data" / "raw" / f"prices_{date_text}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"provider": "jquants", "date": date_text, "prices": prices}),
+            encoding="utf-8",
+        )
+
+
+def _topix_rows(latest_close: float, dates: list[str] | None = None) -> list[dict]:
+    dates = dates or [f"2026-01-{day:02d}" for day in range(1, 27)]
+    latest_date = dates[-1]
     return [
         {
             "date": date_text,
             "open": 100,
             "high": latest_close,
             "low": 99,
-            "close": latest_close if date_text == "2026-01-26" else 100,
+            "close": latest_close if date_text == latest_date else 100,
         }
         for date_text in dates
     ]

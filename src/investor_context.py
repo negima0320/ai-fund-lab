@@ -92,7 +92,7 @@ def build_investor_context(records: list[dict[str, Any]], target_date: str | dat
     )
 
     return {
-        "investor_context_source": "jquants",
+        "investor_context_source": "investor_types",
         "investor_context_week": latest.get("date"),
         "overseas_net_buy": _number(latest, ["overseas_net_buy"]),
         "overseas_net_buy_4w_sum": overseas_4w_sum,

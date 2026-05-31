@@ -125,6 +125,7 @@ def build_feature_analysis(
     score_effective_range_audit = _score_effective_range_audit(config, records, scoring_rows)
     earnings_exposure = _earnings_calendar_exposure(records, scoring_rows)
     feature_activation_audit = build_feature_activation_audit(config, records, scoring_rows, _registry_features(root, profile_id))
+    relative_strength_debug = _relative_strength_debug(scoring_rows)
 
     return {
         "profile_id": profile_id,
@@ -161,6 +162,7 @@ def build_feature_analysis(
         "score_formula_audit": score_formula_audit,
         "score_effective_range_audit": score_effective_range_audit,
         "feature_activation_audit": feature_activation_audit,
+        "relative_strength_debug": relative_strength_debug,
         "earnings_calendar_exposure": earnings_exposure,
         "relative_strength_analysis": {
             "benchmark_source": _group_by(records, lambda item: item.get("benchmark_source") or "unknown"),
@@ -249,6 +251,10 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "## Relative Strength Analysis",
         "",
         *_relative_strength_analysis_lines(analysis.get("relative_strength_analysis", {})),
+        "",
+        "## Relative Strength Debug",
+        "",
+        *_relative_strength_debug_lines(analysis.get("relative_strength_debug", {})),
         "",
         "## Investor Context Analysis",
         "",
@@ -808,6 +814,167 @@ def _relative_strength_analysis_lines(analysis: dict[str, Any]) -> list[str]:
         lines.extend([f"### {title}", ""])
         lines.extend(_group_lines(analysis.get(key, [])))
     return lines
+
+
+def _relative_strength_debug(scoring_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    rows = list(scoring_rows)
+    rs_available = [
+        row for row in rows
+        if _has_relative_strength_data(row)
+    ]
+    score_values = [_feature_value(row, "relative_strength_score") for row in rows]
+    score_values = [value for value in score_values if value is not None]
+    score_distribution = {
+        "0": 0,
+        "1-3": 0,
+        "4-6": 0,
+        "7-10": 0,
+        "unknown": 0,
+    }
+    for row in rows:
+        score_distribution[_debug_score_bucket(_feature_value(row, "relative_strength_score"))] += 1
+    top_rows = sorted(
+        rows,
+        key=lambda row: (
+            -(_feature_value(row, "relative_strength_score") or 0),
+            str(row.get("date") or ""),
+            str(row.get("code") or ""),
+        ),
+    )[:20]
+    warnings = []
+    if rows and all((value or 0) == 0 for value in score_values):
+        warnings.append("relative_strength_score is zero for all candidates")
+    if rows and not rs_available:
+        warnings.append("relative_strength_5d/10d/20d are missing for all candidates")
+    return {
+        "candidate_count": len(rows),
+        "rs_data_available_count": len(rs_available),
+        "rs_data_missing_count": len(rows) - len(rs_available),
+        "relative_strength_score_distribution": score_distribution,
+        "relative_strength_5d_stats": _numeric_stats([_feature_value(row, "relative_strength_5d") for row in rows]),
+        "relative_strength_10d_stats": _numeric_stats([_feature_value(row, "relative_strength_10d") for row in rows]),
+        "relative_strength_20d_stats": _numeric_stats([_feature_value(row, "relative_strength_20d") for row in rows]),
+        "benchmark_source_distribution": _count_values(row.get("benchmark_source") or "unknown" for row in rows),
+        "top_20_relative_strength_score": [_relative_strength_debug_record(row) for row in top_rows],
+        "warnings": warnings,
+    }
+
+
+def _has_relative_strength_data(row: dict[str, Any]) -> bool:
+    return any(_feature_value(row, key) is not None for key in ["relative_strength_5d", "relative_strength_10d", "relative_strength_20d"])
+
+
+def _debug_score_bucket(value: Any) -> str:
+    value = _number(value)
+    if value is None:
+        return "unknown"
+    if value <= 0:
+        return "0"
+    if value <= 3:
+        return "1-3"
+    if value <= 6:
+        return "4-6"
+    return "7-10"
+
+
+def _numeric_stats(values: list[float | None]) -> dict[str, Any]:
+    numbers = [value for value in values if value is not None]
+    return {
+        "average": _average(numbers),
+        "max": max(numbers) if numbers else None,
+        "min": min(numbers) if numbers else None,
+    }
+
+
+def _count_values(values: Any) -> dict[str, int]:
+    counts = {"topix": 0, "prime_average": 0, "candidate_median": 0, "unknown": 0}
+    for value in values:
+        key = str(value or "unknown")
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _relative_strength_debug_record(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "date": row.get("date"),
+        "code": row.get("code"),
+        "score": _feature_value(row, "relative_strength_score"),
+        "rs5": _feature_value(row, "relative_strength_5d"),
+        "rs10": _feature_value(row, "relative_strength_10d"),
+        "rs20": _feature_value(row, "relative_strength_20d"),
+    }
+
+
+def _relative_strength_debug_lines(debug: dict[str, Any]) -> list[str]:
+    if not debug:
+        return ["- データなし"]
+    distribution = debug.get("relative_strength_score_distribution", {})
+    benchmark = debug.get("benchmark_source_distribution", {})
+    lines = [
+        f"- candidate_count: {debug.get('candidate_count', 0)}",
+        f"- rs_data_available_count: {debug.get('rs_data_available_count', 0)}",
+        f"- rs_data_missing_count: {debug.get('rs_data_missing_count', 0)}",
+        "",
+        "### warnings",
+        "",
+    ]
+    warnings = debug.get("warnings", [])
+    lines.extend(f"- {warning}" for warning in warnings) if warnings else lines.append("- なし")
+    lines.extend(
+        [
+            "",
+            "### relative_strength_score",
+            "",
+            f"- 0点: {distribution.get('0', 0)}件",
+            f"- 1-3点: {distribution.get('1-3', 0)}件",
+            f"- 4-6点: {distribution.get('4-6', 0)}件",
+            f"- 7-10点: {distribution.get('7-10', 0)}件",
+            f"- unknown: {distribution.get('unknown', 0)}件",
+            "",
+            "### relative_strength_5d",
+            "",
+            *_rs_stat_lines(debug.get("relative_strength_5d_stats", {})),
+            "",
+            "### relative_strength_10d",
+            "",
+            *_rs_stat_lines(debug.get("relative_strength_10d_stats", {})),
+            "",
+            "### relative_strength_20d",
+            "",
+            *_rs_stat_lines(debug.get("relative_strength_20d_stats", {})),
+            "",
+            "### benchmark_source",
+            "",
+            f"- topix: {benchmark.get('topix', 0)}件",
+            f"- prime_average: {benchmark.get('prime_average', 0)}件",
+            f"- candidate_median: {benchmark.get('candidate_median', 0)}件",
+            f"- unknown: {benchmark.get('unknown', 0)}件",
+            "",
+            "### Top 20 relative_strength_score",
+            "",
+            "| date | code | score | rs5 | rs10 | rs20 |",
+            "|---|---:|---:|---:|---:|---:|",
+        ]
+    )
+    top = debug.get("top_20_relative_strength_score", [])
+    if top:
+        for row in top:
+            lines.append(
+                "| "
+                f"{row.get('date')} | {row.get('code')} | {_format_number(row.get('score'))} | "
+                f"{_format_percent(row.get('rs5'))} | {_format_percent(row.get('rs10'))} | {_format_percent(row.get('rs20'))} |"
+            )
+    else:
+        lines.append("| なし |  |  |  |  |  |")
+    return lines
+
+
+def _rs_stat_lines(stats: dict[str, Any]) -> list[str]:
+    return [
+        f"- average: {_format_percent(stats.get('average'))}",
+        f"- max: {_format_percent(stats.get('max'))}",
+        f"- min: {_format_percent(stats.get('min'))}",
+    ]
 
 
 def _investor_context_analysis_lines(analysis: dict[str, Any]) -> list[str]:

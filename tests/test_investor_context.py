@@ -91,11 +91,30 @@ def test_investor_types_cache_fallback_on_api_failure(monkeypatch, tmp_path) -> 
     assert payload["records"][0]["overseas_net_buy"] == 100
 
 
+def test_investor_types_api_success_creates_cache_file(monkeypatch, tmp_path) -> None:
+    provider = _provider_without_init("light")
+    calls = {"count": 0}
+
+    def fake_fetch(*_args, **_kwargs):
+        calls["count"] += 1
+        return _investor_records()
+
+    monkeypatch.setattr(provider, "fetch_investor_types", fake_fetch)
+
+    payload = provider.fetch_investor_types_cached(tmp_path, date(2026, 2, 1), date(2026, 3, 6))
+    cached = provider.fetch_investor_types_cached(tmp_path, date(2026, 2, 1), date(2026, 3, 6))
+
+    assert calls["count"] == 1
+    assert payload["saved"] is True
+    assert cached["from_cache"] is True
+    assert (tmp_path / "jquants" / "investor_types" / "2026-02-01_to_2026-03-06.json").exists()
+
+
 def test_investor_context_score_range_and_unavailable() -> None:
     context = build_investor_context(_investor_records(), "2026-03-06")
     unavailable = build_investor_context([], "2026-03-06")
 
-    assert context["investor_context_source"] == "jquants"
+    assert context["investor_context_source"] == "investor_types"
     assert context["overseas_net_buy_4w_trend"] == "improving"
     assert -3 <= context["investor_context_score"] <= 5
     assert context["investor_context_score"] == 5

@@ -221,7 +221,101 @@ def test_feature_analysis_groups_closed_trade_results(config_copy: dict, tmp_pat
     assert "Duplicated Signal Warning" in render_feature_analysis_markdown(analysis)
     assert "Relative Strength Analysis" in render_feature_analysis_markdown(analysis)
     assert "relative_strength_5d帯別" in render_feature_analysis_markdown(analysis)
+    assert "Relative Strength Debug" in render_feature_analysis_markdown(analysis)
     assert "technical_score average: 41.50" in render_feature_analysis_markdown(analysis)
+
+
+def test_relative_strength_debug_outputs_distribution_and_benchmark_warning(config_copy: dict, tmp_path) -> None:
+    config_copy["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    config_copy.setdefault("features", {})["relative_strength"] = True
+    config_copy.setdefault("scoring", {})["use_relative_strength_score"] = True
+    initialize_database(config_copy, tmp_path)
+    save_scoring_results(
+        config_copy,
+        tmp_path,
+        {
+            "date": "2026-03-01",
+            "scores": [
+                {
+                    "code": "1001",
+                    "name": "Topix Strong",
+                    "rank": 1,
+                    "selected": True,
+                    "benchmark_source": "topix",
+                    "relative_strength_5d": 0.04,
+                    "relative_strength_10d": 0.06,
+                    "relative_strength_20d": 0.09,
+                    "relative_strength_score": 10,
+                    "score_components": {"relative_strength_score": 10},
+                },
+                {
+                    "code": "1002",
+                    "name": "Prime Modest",
+                    "rank": 2,
+                    "selected": False,
+                    "benchmark_source": "prime_average",
+                    "relative_strength_5d": 0.01,
+                    "relative_strength_10d": 0.02,
+                    "relative_strength_20d": 0.03,
+                    "relative_strength_score": 3,
+                    "score_components": {"relative_strength_score": 3},
+                },
+                {
+                    "code": "1003",
+                    "name": "Missing",
+                    "rank": 3,
+                    "selected": False,
+                },
+            ],
+        },
+    )
+
+    analysis = build_feature_analysis(config_copy, tmp_path)
+    debug = analysis["relative_strength_debug"]
+
+    assert debug["candidate_count"] == 3
+    assert debug["rs_data_available_count"] == 2
+    assert debug["rs_data_missing_count"] == 1
+    assert debug["relative_strength_score_distribution"]["1-3"] == 1
+    assert debug["relative_strength_score_distribution"]["7-10"] == 1
+    assert debug["benchmark_source_distribution"]["topix"] == 1
+    assert debug["benchmark_source_distribution"]["prime_average"] == 1
+    assert debug["top_20_relative_strength_score"][0]["code"] == "1001"
+    markdown = render_feature_analysis_markdown(analysis)
+    assert "## Relative Strength Debug" in markdown
+    assert "### benchmark_source" in markdown
+    assert "Top 20 relative_strength_score" in markdown
+
+
+def test_relative_strength_debug_warns_when_all_scores_are_zero(config_copy: dict, tmp_path) -> None:
+    config_copy["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    config_copy.setdefault("features", {})["relative_strength"] = True
+    config_copy.setdefault("scoring", {})["use_relative_strength_score"] = True
+    initialize_database(config_copy, tmp_path)
+    save_scoring_results(
+        config_copy,
+        tmp_path,
+        {
+            "date": "2026-03-01",
+            "scores": [
+                {
+                    "code": "1001",
+                    "rank": 1,
+                    "selected": True,
+                    "benchmark_source": "topix",
+                    "relative_strength_5d": 0.01,
+                    "relative_strength_10d": 0.02,
+                    "relative_strength_20d": 0.03,
+                    "relative_strength_score": 0,
+                    "score_components": {"relative_strength_score": 0},
+                }
+            ],
+        },
+    )
+
+    debug = build_feature_analysis(config_copy, tmp_path)["relative_strength_debug"]
+
+    assert "relative_strength_score is zero for all candidates" in debug["warnings"]
 
 
 def test_feature_activation_audit_marks_enabled_feature_inactive_in_practice(config_copy: dict, tmp_path) -> None:

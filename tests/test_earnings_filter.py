@@ -44,6 +44,25 @@ def test_earnings_calendar_cache_is_used(tmp_path, monkeypatch) -> None:
     assert result["records"] == payload["records"]
 
 
+def test_earnings_calendar_api_success_creates_cache_file(tmp_path, monkeypatch) -> None:
+    provider = _provider_without_init()
+    calls = {"count": 0}
+
+    def fake_fetch(*_args, **_kwargs):
+        calls["count"] += 1
+        return [{"Date": "2026-03-06", "Code": "1001"}]
+
+    monkeypatch.setattr(provider, "fetch_earnings_calendar", fake_fetch)
+
+    payload = provider.fetch_earnings_calendar_cached(tmp_path, target_date=date(2026, 3, 6))
+    cached = provider.fetch_earnings_calendar_cached(tmp_path, target_date=date(2026, 3, 6))
+
+    assert calls["count"] == 1
+    assert payload["saved"] is True
+    assert cached["from_cache"] is True
+    assert (tmp_path / "jquants" / "earnings_calendar" / "2026-03-06.json").exists()
+
+
 def test_historical_backtest_does_not_fetch_current_earnings_calendar(monkeypatch, tmp_path) -> None:
     config = _earnings_config()
     monkeypatch.setattr(main_module, "ROOT", tmp_path)
