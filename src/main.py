@@ -147,6 +147,9 @@ def main() -> None:
     if args.mode == "jquants-api-summary":
         run_jquants_api_summary()
         return
+    if args.mode == "jquants-smoke-test":
+        run_jquants_smoke_test(args.endpoint)
+        return
     if args.mode == "validate-config":
         run_validate_config(args.profile, args.strict)
         return
@@ -361,6 +364,7 @@ def parse_args() -> Any:
             "compare-experiments",
             "run-experiments",
             "jquants-api-summary",
+            "jquants-smoke-test",
             "validate-config",
             "clean-reports",
             "clean-experiments",
@@ -500,6 +504,12 @@ def parse_args() -> Any:
         choices=["prices", "topix_prices", "earnings_calendar", "investor_types", "financial_statements", "all"],
         default="all",
         help="Cache category for clean-cache.",
+    )
+    parser.add_argument(
+        "--endpoint",
+        choices=["topix_prices", "investor_types"],
+        default="topix_prices",
+        help="J-Quants endpoint for jquants-smoke-test.",
     )
     parser.add_argument(
         "--verbose",
@@ -925,6 +935,90 @@ def run_jquants_api_summary() -> None:
             f"last_status={row['last_status'] or 'N/A'} last_records={row['last_records'] or 'N/A'} "
             f"last_error={row['last_error'] or 'N/A'}"
         )
+
+
+def run_jquants_smoke_test(endpoint: str) -> None:
+    result = build_jquants_smoke_test(endpoint, load_config(CONFIG_PATH))
+    print("J-Quants Smoke Test")
+    keys = ["endpoint", "url", "params", "status_code", "records", "first_record_keys", "cache_saved", "error_reason"]
+    if int(result.get("records") or 0) == 0:
+        keys.append("response_body_sample")
+    for key in keys:
+        value = result.get(key)
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        print(f"{key}: {value if value not in (None, '') else 'N/A'}")
+
+
+def build_jquants_smoke_test(endpoint: str, config: dict[str, Any]) -> dict[str, Any]:
+    if endpoint not in {"topix_prices", "investor_types"}:
+        raise ValueError(f"unsupported smoke endpoint: {endpoint}")
+    end_date = _business_day_on_or_before(date.today())
+    start_date = _jquants_smoke_start_date(endpoint, end_date)
+    provider = JQuantsDataProvider(
+        ROOT / ".env",
+        timeout_seconds=int(config.get("jquants", {}).get("request_timeout_seconds", 20)),
+        plan=_jquants_plan(config),
+        requests_per_minute=_jquants_requests_per_minute(config),
+        parallel_fetch=_jquants_parallel_fetch(config),
+        max_parallel_requests=_jquants_max_parallel_requests(config),
+    )
+    payload: dict[str, Any]
+    try:
+        if endpoint == "topix_prices":
+            payload = provider.fetch_topix_prices_cached(
+                ROOT / "data" / "cache",
+                start_date=start_date,
+                end_date=end_date,
+                force_refresh=True,
+            )
+        else:
+            payload = provider.fetch_investor_types_cached(
+                ROOT / "data" / "cache",
+                start_date=start_date,
+                end_date=end_date,
+                force_refresh=True,
+            )
+    except Exception as exc:
+        payload = {
+            "records": [],
+            "saved": False,
+            "reason": _api_error_status(exc),
+            "api_status": _api_error_status(exc),
+            **_api_error_log_fields_raw(exc),
+        }
+    metadata = dict(getattr(provider, "last_request_metadata", {}) or {})
+    records = payload.get("records", []) if isinstance(payload.get("records"), list) else []
+    request_params = payload.get("request_params") or metadata.get("params") or {}
+    result = {
+        "endpoint": endpoint,
+        "url": payload.get("request_url") or metadata.get("url") or "",
+        "params": request_params,
+        "status_code": payload.get("http_status") or metadata.get("status_code") or payload.get("api_status") or "",
+        "records": len(records),
+        "first_record_keys": sorted(records[0].keys()) if records else [],
+        "cache_saved": bool(payload.get("saved")),
+        "error_reason": str(payload.get("reason") or ("empty_response" if not records else "")),
+        "response_body_sample": str(payload.get("response_body") or metadata.get("response_body") or "")[:500],
+    }
+    _log_jquants_api_event(
+        endpoint=endpoint,
+        plan=_jquants_plan(config),
+        cache_hit=bool(payload.get("from_cache")),
+        status=_provider_payload_status(payload),
+        records=len(records),
+        saved=bool(payload.get("saved")),
+        cache_path=payload.get("cache_path"),
+        reason=str(payload.get("reason") or ""),
+        **_payload_http_log_fields(payload, metadata),
+    )
+    return result
+
+
+def _jquants_smoke_start_date(endpoint: str, end_date: date) -> date:
+    if endpoint == "investor_types":
+        return end_date - timedelta(weeks=52)
+    return end_date - timedelta(days=14)
 
 
 def build_jquants_api_summary() -> dict[str, Any]:
@@ -4196,7 +4290,7 @@ def _check_jquants_plan_capabilities(results: list[dict[str, Any]], config: dict
     _preflight_add(results, "OK", "J-Quants supported date range:", jquants_supported_date_ranges(config))
     for endpoint, earliest in jquants_supported_date_ranges(config).items():
         _preflight_add(results, "OK", f"{endpoint} earliest: {earliest}")
-    for capability in ["prices", "earnings_calendar", "topix_prices", "investor_breakdown", "investor_types"]:
+    for capability in ["prices", "earnings_calendar", "topix_prices", "investor_types"]:
         capability_status = status.get(capability, "disabled")
         _preflight_add(
             results,
@@ -8867,11 +8961,6 @@ def _apply_jquants_plan_settings(config: dict[str, Any]) -> None:
     else:
         jquants["relative_strength_benchmark"] = "topix" if features.get("topix_relative_strength") else "prime_market_average"
 
-    if not jquants_has_capability(plan, "investor_breakdown"):
-        if features.get("investor_breakdown_score"):
-            warnings.append("investor_breakdown_score disabled because J-Quants plan is free")
-        features["investor_breakdown_score"] = False
-
     if not jquants_has_capability(plan, "investor_types"):
         if features.get("investor_context"):
             warnings.append("investor_context disabled because J-Quants plan is free")
@@ -9349,7 +9438,10 @@ def _load_topix_prices_for_period(start_date: date, end_date: date, config: dict
             saved=bool(payload.get("saved")),
             cache_path=payload.get("cache_path"),
             reason=str(payload.get("reason") or ""),
+            **_payload_http_log_fields(payload, getattr(provider, "last_request_metadata", {}) or {}),
         )
+        if _provider_payload_status(payload) == "auth_or_plan_error":
+            _record_api_error("topix_prices", "auth_or_plan_error")
         return payload
     except Exception as exc:
         reason = _api_error_status(exc)
@@ -9403,6 +9495,33 @@ def _api_error_log_fields(exc: Exception) -> dict[str, str]:
         "request_url": exc.request_url,
         "request_params": json.dumps(exc.request_params, ensure_ascii=False, sort_keys=True),
         "response_body": exc.response_body,
+    }
+
+
+def _api_error_log_fields_raw(exc: Exception) -> dict[str, Any]:
+    if not isinstance(exc, JQuantsApiError):
+        return {}
+    return {
+        "http_status": exc.status_code,
+        "request_url": exc.request_url,
+        "request_params": exc.request_params,
+        "response_body": exc.response_body,
+    }
+
+
+def _payload_http_log_fields(payload: dict[str, Any], metadata: dict[str, Any] | None = None) -> dict[str, str]:
+    metadata = metadata or {}
+    request_params = payload.get("request_params") or metadata.get("params") or {}
+    if isinstance(request_params, str):
+        request_params_text = request_params
+    else:
+        request_params_text = json.dumps(request_params, ensure_ascii=False, sort_keys=True)
+    status_code = payload.get("http_status") or metadata.get("status_code") or ""
+    return {
+        "http_status": str(status_code or ""),
+        "request_url": str(payload.get("request_url") or metadata.get("url") or ""),
+        "request_params": request_params_text,
+        "response_body": str(payload.get("response_body") or metadata.get("response_body") or ""),
     }
 
 

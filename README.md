@@ -1205,6 +1205,17 @@ Free / Light のprofile別互換性は [docs/jquants_plan_matrix.md](docs/jquant
 
 Free planではLight専用APIを呼びません。TOPIX四本値が使えない場合、Relative Strengthは東証プライム銘柄の平均リターンをbenchmarkとして使うか、対象profileで無効化します。`investor_context_score` はFree planでは自動的に無効になります。
 
+J-Quants APIはv2 endpointのみを利用します。旧v1 endpoint（例: `/prices/daily_quotes`, `/listed/info`, `/indices/topix`, `/fins/statements`, `/markets/trades_spec`）は使いません。
+
+| 用途 | v2 endpoint |
+| --- | --- |
+| 上場銘柄一覧 | `/equities/master` |
+| 株価四本値 | `/equities/bars/daily` |
+| TOPIX四本値 | `/indices/bars/daily/topix` |
+| 投資部門別情報 | `/equities/investor-types` |
+| 決算発表予定日 | `/equities/earnings-calendar` |
+| 財務サマリー | `/fins/summary` |
+
 投資部門別情報はLight planの `/equities/investor-types` から取得し、`data/cache/jquants/investor_types/YYYY-MM-DD_to_YYYY-MM-DD.json` に保存します。v2.8では週次データとして扱い、海外投資家の買い越し/売り越し、4週合計、改善/悪化トレンド、個人投資家との需給差を市場地合い補正として `investor_context_score` に変換します。個別銘柄のAI判断ではなく、ルールベースの市場コンテキストです。
 
 決算発表予定日は Free / Light の両方で使える `/equities/earnings-calendar` から取得します。取得結果は `data/cache/jquants/earnings_calendar/YYYY-MM-DD.json` に保存し、同一日はキャッシュを優先します。再取得したい場合は `--force-refresh` を付けます。APIエラー時に同日のキャッシュがあればfallbackし、キャッシュもない場合は `earnings_filter.fail_open: true` のprofileではwarningを出して決算フィルターを無効扱いにします。`rookie_dealer_02_v2_10` はv2.1をベースに、この決算予定日前後の新規買付除外だけを追加した検証profileです。
@@ -1221,7 +1232,6 @@ Available capabilities:
 - prices: OK
 - earnings_calendar: OK
 - topix_prices: disabled
-- investor_breakdown: disabled
 - investor_types: disabled
 ```
 

@@ -24,18 +24,18 @@ INVESTOR_CONTEXT_EMPTY: dict[str, Any] = {
 def normalize_investor_type_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized = []
     for record in records:
-        week = _date_text(record, ["Date", "date", "PublishedDate", "published_date", "Week", "week"])
+        week = _date_text(record, ["Date", "date", "EnDate", "end_date", "PublishedDate", "published_date", "PubDate", "Week", "week"])
         if not week:
             continue
-        overseas_buy = _number(record, ["overseas_buy", "OverseasBuy", "ForeignersBuy", "ForeignersPurchases"])
-        overseas_sell = _number(record, ["overseas_sell", "OverseasSell", "ForeignersSell", "ForeignersSales"])
+        overseas_buy = _number(record, ["overseas_buy", "OverseasBuy", "ForeignersBuy", "ForeignersPurchases", "FrgnBuy"])
+        overseas_sell = _number(record, ["overseas_sell", "OverseasSell", "ForeignersSell", "ForeignersSales", "FrgnSell"])
         normalized.append(
             {
                 **record,
                 "date": week,
                 "overseas_net_buy": _net(
                     record,
-                    ["overseas_net_buy", "OverseasNetBuy", "ForeignersBalance", "ForeignersNetBuy"],
+                    ["overseas_net_buy", "OverseasNetBuy", "ForeignersBalance", "ForeignersNetBuy", "FrgnBal"],
                     overseas_buy,
                     overseas_sell,
                 ),
@@ -43,15 +43,15 @@ def normalize_investor_type_records(records: list[dict[str, Any]]) -> list[dict[
                 "overseas_sell": overseas_sell,
                 "individual_net_buy": _net(
                     record,
-                    ["individual_net_buy", "IndividualNetBuy", "IndividualsBalance", "IndividualsNetBuy"],
-                    _number(record, ["individual_buy", "IndividualBuy", "IndividualsBuy"]),
-                    _number(record, ["individual_sell", "IndividualSell", "IndividualsSell"]),
+                    ["individual_net_buy", "IndividualNetBuy", "IndividualsBalance", "IndividualsNetBuy", "IndBal"],
+                    _number(record, ["individual_buy", "IndividualBuy", "IndividualsBuy", "IndBuy"]),
+                    _number(record, ["individual_sell", "IndividualSell", "IndividualsSell", "IndSell"]),
                 ),
                 "institution_net_buy": _net(
                     record,
-                    ["institution_net_buy", "InstitutionNetBuy", "InstitutionsBalance", "InstitutionsNetBuy"],
-                    _number(record, ["institution_buy", "InstitutionBuy", "InstitutionsBuy"]),
-                    _number(record, ["institution_sell", "InstitutionSell", "InstitutionsSell"]),
+                    ["institution_net_buy", "InstitutionNetBuy", "InstitutionsBalance", "InstitutionsNetBuy", "InstBal", "BrkBal"],
+                    _number(record, ["institution_buy", "InstitutionBuy", "InstitutionsBuy", "InstBuy", "BrkBuy"]),
+                    _number(record, ["institution_sell", "InstitutionSell", "InstitutionsSell", "InstSell", "BrkSell"]),
                 ),
                 "trust_bank_net_buy": _net(
                     record,
@@ -61,9 +61,9 @@ def normalize_investor_type_records(records: list[dict[str, Any]]) -> list[dict[
                 ),
                 "proprietary_net_buy": _net(
                     record,
-                    ["proprietary_net_buy", "ProprietaryNetBuy", "ProprietaryBalance", "ProprietaryNetBuy"],
-                    _number(record, ["proprietary_buy", "ProprietaryBuy"]),
-                    _number(record, ["proprietary_sell", "ProprietarySell"]),
+                    ["proprietary_net_buy", "ProprietaryNetBuy", "ProprietaryBalance", "ProprietaryNetBuy", "PropBal"],
+                    _number(record, ["proprietary_buy", "ProprietaryBuy", "PropBuy"]),
+                    _number(record, ["proprietary_sell", "ProprietarySell", "PropSell"]),
                 ),
             }
         )

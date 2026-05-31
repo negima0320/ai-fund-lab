@@ -4,6 +4,8 @@ J-Quants Free / Light のどちらでも ai-fund-lab が停止せずに動くこ
 
 ## Plan Capabilities
 
+J-Quants連携はv2 endpointだけを使います。旧v1 endpoint（`/listed/info`, `/prices/daily_quotes`, `/indices/topix`, `/fins/statements`, `/markets/trades_spec`）は使用しません。
+
 | capability | Free | Light | 用途 |
 | --- | --- | --- | --- |
 | listed_info | OK | OK | 上場銘柄一覧 |
@@ -13,7 +15,6 @@ J-Quants Free / Light のどちらでも ai-fund-lab が停止せずに動くこ
 | trading_calendar | OK | OK | 営業日判定 |
 | topix_prices | disabled | OK | TOPIX Relative Strength |
 | investor_types | disabled | OK | 投資部門別情報 |
-| investor_breakdown | disabled | OK | 将来の投資家別需給スコア |
 
 ## Profile Matrix
 

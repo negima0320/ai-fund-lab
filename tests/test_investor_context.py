@@ -64,6 +64,59 @@ def test_light_plan_fetches_investor_types_api(monkeypatch) -> None:
     assert rows[-1]["overseas_net_buy"] == 180
 
 
+def test_v2_investor_types_fields_are_normalized(monkeypatch) -> None:
+    provider = _provider_without_init("light")
+
+    def fake_fetch(*_args, **_kwargs):
+        return [
+            {
+                "PubDate": "2026-03-12",
+                "StDate": "2026-03-02",
+                "EnDate": "2026-03-06",
+                "Section": "TSEPrime",
+                "FrgnSell": 1000,
+                "FrgnBuy": 1250,
+                "FrgnBal": 250,
+                "IndSell": 700,
+                "IndBuy": 600,
+                "IndBal": -100,
+                "PropSell": 200,
+                "PropBuy": 240,
+                "PropBal": 40,
+            }
+        ]
+
+    monkeypatch.setattr(provider, "_get_paginated_records", fake_fetch)
+
+    rows = provider.fetch_investor_types(date(2026, 3, 1), date(2026, 3, 13))
+
+    assert rows == [
+        {
+            "PubDate": "2026-03-12",
+            "StDate": "2026-03-02",
+            "EnDate": "2026-03-06",
+            "Section": "TSEPrime",
+            "FrgnSell": 1000,
+            "FrgnBuy": 1250,
+            "FrgnBal": 250,
+            "IndSell": 700,
+            "IndBuy": 600,
+            "IndBal": -100,
+            "PropSell": 200,
+            "PropBuy": 240,
+            "PropBal": 40,
+            "date": "2026-03-06",
+            "overseas_net_buy": 250.0,
+            "overseas_buy": 1250.0,
+            "overseas_sell": 1000.0,
+            "individual_net_buy": -100.0,
+            "institution_net_buy": None,
+            "trust_bank_net_buy": None,
+            "proprietary_net_buy": 40.0,
+        }
+    ]
+
+
 def test_free_plan_does_not_call_investor_types_api(monkeypatch, tmp_path) -> None:
     provider = _provider_without_init("free")
 

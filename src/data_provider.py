@@ -196,6 +196,7 @@ class JQuantsDataProvider(BaseDataProvider):
             "total_fetch_time": 0.0,
             "rate_limit_wait_time": 0.0,
         }
+        self.last_request_metadata: dict[str, Any] = {}
 
     def get_listed_stocks(self) -> list[dict[str, Any]]:
         payload = self._get_json("/equities/master")
@@ -223,7 +224,7 @@ class JQuantsDataProvider(BaseDataProvider):
         params = {"from": start_date.isoformat()}
         if end_date:
             params["to"] = end_date.isoformat()
-        return self._get_paginated_records("/indices/topix", params)
+        return self._get_paginated_records("/indices/bars/daily/topix", params)
 
     def fetch_topix_prices(self, start_date: date, end_date: date) -> list[dict[str, Any]]:
         return normalize_topix_price_records(self.get_topix_prices(start_date, end_date))
@@ -261,6 +262,7 @@ class JQuantsDataProvider(BaseDataProvider):
                 if _records_usable(records):
                     _increment_fetch_stat(self, "cache_hits")
                     return _cache_payload(records, cache_path, from_cache=True, fallback_used=True, warning=str(exc), available=True)
+            error_fields = _api_error_payload_fields(exc)
             return {
                 "records": [],
                 "cache_path": str(cache_path),
@@ -270,7 +272,8 @@ class JQuantsDataProvider(BaseDataProvider):
                 "available": False,
                 "saved": False,
                 "usable": False,
-                "reason": "empty_cache" if cache_path.exists() else "api_error",
+                "reason": "empty_cache" if cache_path.exists() else error_fields.get("reason", "api_error"),
+                **error_fields,
             }
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         if _records_usable(records):
@@ -290,15 +293,6 @@ class JQuantsDataProvider(BaseDataProvider):
             "api_status": "200",
             "reason": "" if available else "empty_response",
         }
-
-    def get_investor_breakdown(self, start_date: date, end_date: Optional[date] = None) -> list[dict[str, Any]]:
-        if not self.has_capability("investor_breakdown"):
-            print("warning: J-Quants investor_breakdown is disabled for free plan.")
-            return []
-        params = {"from": start_date.isoformat()}
-        if end_date:
-            params["to"] = end_date.isoformat()
-        return self._get_paginated_records("/markets/trades_spec", params)
 
     def fetch_investor_types(self, start_date: date, end_date: date) -> list[dict[str, Any]]:
         if not self.has_capability("investor_types"):
@@ -441,7 +435,7 @@ class JQuantsDataProvider(BaseDataProvider):
             print("warning: J-Quants financial_statements is disabled for current plan.")
             return []
         return self._get_paginated_records(
-            "/fins/statements",
+            "/fins/summary",
             {
                 "from": start_date.isoformat(),
                 "to": end_date.isoformat(),
@@ -528,11 +522,20 @@ class JQuantsDataProvider(BaseDataProvider):
 
     def _get_json(self, path: str) -> Any:
         request = self._build_request(path)
+        self.last_request_metadata = {
+            "endpoint": _endpoint_from_path(path),
+            "url": getattr(request, "full_url", str(request)),
+            "params": _params_from_path(path),
+            "status_code": None,
+            "response_body": "",
+        }
         wait_seconds = self.rate_limiter.acquire()
         started_at = time.perf_counter()
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
                 body = response.read().decode("utf-8")
+                self.last_request_metadata["status_code"] = getattr(response, "status", 200)
+                self.last_request_metadata["response_body"] = body[:500]
         except HTTPError as exc:
             body_summary = _http_error_body_summary(exc)
             category = _http_error_category(exc.code)
@@ -579,17 +582,23 @@ class JQuantsDataProvider(BaseDataProvider):
     def _get_paginated_records(self, path: str, params: dict[str, str]) -> list[dict[str, Any]]:
         records = []
         pagination_key = ""
+        first_request_metadata: dict[str, Any] | None = None
         while True:
             request_params = dict(params)
             if pagination_key:
                 request_params["pagination_key"] = pagination_key
             payload = self._get_json(f"{path}?{urlencode(request_params)}")
+            if first_request_metadata is None:
+                first_request_metadata = dict(self.last_request_metadata)
             records.extend(_extract_records(payload))
             if not isinstance(payload, dict):
                 break
             pagination_key = str(payload.get("pagination_key") or "")
             if not pagination_key:
                 break
+        if first_request_metadata is not None:
+            self.last_request_metadata = first_request_metadata
+            self.last_request_metadata["records"] = len(records)
         return records
 
 
@@ -762,6 +771,19 @@ def _http_error_body_summary(exc: HTTPError) -> str:
     except Exception:
         return ""
     return body.replace("\n", " ")[:500]
+
+
+def _api_error_payload_fields(exc: Exception) -> dict[str, Any]:
+    if not isinstance(exc, JQuantsApiError):
+        return {"api_status": "api_error", "reason": "api_error"}
+    return {
+        "api_status": exc.category,
+        "reason": exc.category,
+        "http_status": exc.status_code,
+        "request_url": exc.request_url,
+        "request_params": exc.request_params,
+        "response_body": exc.response_body,
+    }
 
 
 def _endpoint_from_path(path: str) -> str:

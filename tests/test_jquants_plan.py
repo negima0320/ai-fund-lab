@@ -47,7 +47,7 @@ def test_light_plan_can_call_topix_prices(monkeypatch) -> None:
     rows = provider.get_topix_prices(date(2026, 3, 1), date(2026, 3, 6))
 
     assert rows == [{"date": "2026-03-06", "close": 2800}]
-    assert calls == [("/indices/topix", {"from": "2026-03-01", "to": "2026-03-06"})]
+    assert calls == [("/indices/bars/daily/topix", {"from": "2026-03-01", "to": "2026-03-06"})]
 
 
 def test_cli_jquants_plan_overrides_config(monkeypatch, config_copy: dict) -> None:
@@ -86,7 +86,7 @@ def test_preflight_displays_plan_and_capabilities(config_copy: dict) -> None:
     assert "J-Quants Plan: free (source=config/jquants.yaml)" in messages
     assert "J-Quants capability prices: OK" in messages
     assert "J-Quants capability topix_prices: disabled" in messages
-    assert "J-Quants capability investor_breakdown: disabled" in messages
+    assert "J-Quants capability investor_types: disabled" in messages
     assert "profile required capabilities: listed_info, prices" in messages
     assert "missing capabilities: none" in messages
     assert "fallback applied: none" in messages

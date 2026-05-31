@@ -88,8 +88,8 @@ def test_topix_api_error_logs_http_status_and_body(monkeypatch, tmp_path) -> Non
                 "J-Quants API request failed with HTTP 403.",
                 status_code=403,
                 category="auth_or_plan_error",
-                endpoint="/indices/topix",
-                request_url="https://api.jquants.com/v2/indices/topix?from=2026-01-01&to=2026-01-26",
+                endpoint="/indices/bars/daily/topix",
+                request_url="https://api.jquants.com/v2/indices/bars/daily/topix?from=2026-01-01&to=2026-01-26",
                 request_params={"from": "2026-01-01", "to": "2026-01-26"},
                 response_body='{"message":"forbidden"}',
             )
@@ -104,7 +104,7 @@ def test_topix_api_error_logs_http_status_and_body(monkeypatch, tmp_path) -> Non
     assert "endpoint=topix_prices" in log
     assert "status=auth_or_plan_error" in log
     assert "http_status=403" in log
-    assert "request_url=https://api.jquants.com/v2/indices/topix?from=2026-01-01&to=2026-01-26" in log
+    assert "request_url=https://api.jquants.com/v2/indices/bars/daily/topix?from=2026-01-01&to=2026-01-26" in log
     assert "response_body=" in log
 
 
@@ -141,7 +141,7 @@ def test_http_status_categories_are_distinct() -> None:
     assert main_module._provider_payload_status({"api_status": "200", "records": [], "reason": "empty_response"}) == "200"
 
 
-def test_topix_smoke_uses_indices_topix_path_and_iso_params(monkeypatch) -> None:
+def test_topix_smoke_uses_indices_bars_daily_topix_path_and_iso_params(monkeypatch) -> None:
     provider = _provider_without_init("light")
     calls = []
 
@@ -153,8 +153,187 @@ def test_topix_smoke_uses_indices_topix_path_and_iso_params(monkeypatch) -> None
 
     rows = provider.fetch_topix_prices(date(2026, 1, 1), date(2026, 1, 26))
 
-    assert calls == [("/indices/topix", {"from": "2026-01-01", "to": "2026-01-26"})]
+    assert calls == [("/indices/bars/daily/topix", {"from": "2026-01-01", "to": "2026-01-26"})]
     assert rows == [{"date": "2026-01-26", "open": None, "high": None, "low": None, "close": 102.0}]
+
+
+def test_financial_statements_uses_v2_fins_summary_endpoint(monkeypatch) -> None:
+    provider = _provider_without_init("light")
+    calls = []
+
+    def fake_fetch(path, params):
+        calls.append((path, params))
+        return [{"Date": "2026-01-26", "LocalCode": "1001"}]
+
+    monkeypatch.setattr(provider, "_get_paginated_records", fake_fetch)
+
+    records = provider.fetch_financial_statements(date(2026, 1, 1), date(2026, 1, 26))
+
+    assert records == [{"Date": "2026-01-26", "LocalCode": "1001"}]
+    assert calls == [("/fins/summary", {"from": "2026-01-01", "to": "2026-01-26"})]
+
+
+def test_investor_types_uses_v2_equities_investor_types_endpoint(monkeypatch) -> None:
+    provider = _provider_without_init("light")
+    calls = []
+
+    def fake_fetch(path, params):
+        calls.append((path, params))
+        return [{"Date": "2026-01-26", "Section": "TSEPrime", "ForeignersBalance": 100}]
+
+    monkeypatch.setattr(provider, "_get_paginated_records", fake_fetch)
+
+    provider.fetch_investor_types(date(2026, 1, 1), date(2026, 1, 26))
+
+    assert calls == [("/equities/investor-types", {"from": "2026-01-01", "to": "2026-01-26"})]
+
+
+def test_topix_cached_api_error_preserves_endpoint_params_and_category(monkeypatch, tmp_path) -> None:
+    provider = _provider_without_init("light")
+
+    def fake_fetch(*_args, **_kwargs):
+        raise JQuantsApiError(
+            "J-Quants API request failed with HTTP 400.",
+            status_code=400,
+            category="bad_request",
+            endpoint="/indices/bars/daily/topix",
+            request_url="https://api.jquants.com/v2/indices/bars/daily/topix?from=2026-01-01&to=2026-01-26",
+            request_params={"from": "2026-01-01", "to": "2026-01-26"},
+            response_body='{"message":"bad request"}',
+        )
+
+    monkeypatch.setattr(provider, "fetch_topix_prices", fake_fetch)
+
+    payload = provider.fetch_topix_prices_cached(tmp_path, date(2026, 1, 1), date(2026, 1, 26), force_refresh=True)
+
+    assert payload["api_status"] == "bad_request"
+    assert payload["reason"] == "bad_request"
+    assert payload["http_status"] == 400
+    assert payload["request_url"].endswith("/indices/bars/daily/topix?from=2026-01-01&to=2026-01-26")
+    assert payload["request_params"] == {"from": "2026-01-01", "to": "2026-01-26"}
+    assert "bad request" in payload["response_body"]
+
+
+def test_topix_smoke_reports_bad_request_as_endpoint_params_issue(monkeypatch, tmp_path) -> None:
+    config = {"jquants": {"plan": "light", "requests_per_minute": 60, "parallel_fetch": True}}
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            self.last_request_metadata = {
+                "url": "https://api.jquants.com/v2/indices/bars/daily/topix?from=2026-05-15&to=2026-05-29",
+                "params": {"from": "2026-05-15", "to": "2026-05-29"},
+                "status_code": 400,
+                "response_body": '{"message":"invalid params"}',
+            }
+
+        def fetch_topix_prices_cached(self, *_args, **_kwargs):
+            return {
+                "records": [],
+                "cache_path": str(tmp_path / "data" / "cache" / "jquants" / "topix_prices" / "x.json"),
+                "from_cache": False,
+                "saved": False,
+                "usable": False,
+                "available": False,
+                "api_status": "bad_request",
+                "reason": "bad_request",
+                "http_status": 400,
+                "request_url": self.last_request_metadata["url"],
+                "request_params": self.last_request_metadata["params"],
+                "response_body": self.last_request_metadata["response_body"],
+            }
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    result = main_module.build_jquants_smoke_test("topix_prices", config)
+
+    assert result["error_reason"] == "bad_request"
+    assert result["status_code"] == 400
+    assert result["url"].endswith("/indices/bars/daily/topix?from=2026-05-15&to=2026-05-29")
+    assert result["params"] == {"from": "2026-05-15", "to": "2026-05-29"}
+    assert result["error_reason"] != "auth_or_plan_error"
+
+
+def test_topix_smoke_reports_empty_response(monkeypatch, tmp_path) -> None:
+    config = {"jquants": {"plan": "light", "requests_per_minute": 60, "parallel_fetch": True}}
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            self.last_request_metadata = {
+                "url": "https://api.jquants.com/v2/indices/bars/daily/topix?from=2026-05-15&to=2026-05-29",
+                "params": {"from": "2026-05-15", "to": "2026-05-29"},
+                "status_code": 200,
+                "response_body": '{"data":[]}',
+            }
+
+        def fetch_topix_prices_cached(self, *_args, **_kwargs):
+            return {
+                "records": [],
+                "cache_path": str(tmp_path / "data" / "cache" / "jquants" / "topix_prices" / "x.json"),
+                "from_cache": False,
+                "saved": False,
+                "usable": False,
+                "available": False,
+                "api_status": "200",
+                "reason": "empty_response",
+                "http_status": 200,
+            }
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    result = main_module.build_jquants_smoke_test("topix_prices", config)
+
+    assert result["error_reason"] == "empty_response"
+    assert result["status_code"] == 200
+    assert result["records"] == 0
+    assert result["response_body_sample"] == '{"data":[]}'
+
+
+def test_investor_types_smoke_reports_empty_response_body_sample(monkeypatch, tmp_path, capsys) -> None:
+    config = {"jquants": {"plan": "light", "requests_per_minute": 60, "parallel_fetch": True}}
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            self.last_request_metadata = {
+                "url": "https://api.jquants.com/v2/equities/investor-types?from=2025-05-30&to=2026-05-29",
+                "params": {"from": "2025-05-30", "to": "2026-05-29"},
+                "status_code": 200,
+                "response_body": '{"data":[]}',
+            }
+
+        def fetch_investor_types_cached(self, *_args, **_kwargs):
+            return {
+                "records": [],
+                "cache_path": str(tmp_path / "data" / "cache" / "jquants" / "investor_types" / "x.json"),
+                "from_cache": False,
+                "saved": False,
+                "usable": False,
+                "available": False,
+                "api_status": "200",
+                "reason": "empty_response",
+                "http_status": 200,
+            }
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    result = main_module.build_jquants_smoke_test("investor_types", config)
+
+    assert result["endpoint"] == "investor_types"
+    assert result["url"].endswith("/equities/investor-types?from=2025-05-30&to=2026-05-29")
+    assert result["params"] == {"from": "2025-05-30", "to": "2026-05-29"}
+    assert result["status_code"] == 200
+    assert result["records"] == 0
+    assert result["first_record_keys"] == []
+    assert result["cache_saved"] is False
+    assert result["error_reason"] == "empty_response"
+    assert result["response_body_sample"] == '{"data":[]}'
+
+    main_module.run_jquants_smoke_test("investor_types")
+    output = capsys.readouterr().out
+    assert "endpoint: investor_types" in output
+    assert "response_body_sample: {\"data\":[]}" in output
 
 
 def test_preflight_cache_status_reports_missing_cache_as_false(monkeypatch, tmp_path) -> None:

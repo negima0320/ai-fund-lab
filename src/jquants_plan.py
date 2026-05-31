@@ -30,7 +30,6 @@ JQUANTS_PLAN_CAPABILITIES: dict[str, set[str]] = {
         "earnings_calendar",
         "trading_calendar",
         "topix_prices",
-        "investor_breakdown",
         "investor_types",
     },
 }
@@ -42,7 +41,6 @@ DISPLAY_CAPABILITIES = [
     "earnings_calendar",
     "trading_calendar",
     "topix_prices",
-    "investor_breakdown",
     "investor_types",
 ]
 
