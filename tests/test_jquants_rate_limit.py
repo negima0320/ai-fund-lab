@@ -30,7 +30,7 @@ def test_rate_limiter_does_not_exceed_requests_per_minute() -> None:
 
 
 def test_plan_settings_switch_rate_limit(config_copy: dict, monkeypatch) -> None:
-    monkeypatch.setattr(main_module, "JQUANTS_PLAN_OVERRIDE", None)
+    monkeypatch.setattr(main_module, "JQUANTS_PLAN_OVERRIDE", "free")
     monkeypatch.setattr(main_module, "_load_jquants_config_file", lambda: {
         "plan": "free",
         "plans": {
@@ -56,11 +56,12 @@ def test_parallel_fetch_is_light_only(config_copy: dict, monkeypatch) -> None:
             "light": {"requests_per_minute": 60, "parallel_fetch": True},
         },
     })
-    monkeypatch.setattr(main_module, "JQUANTS_PLAN_OVERRIDE", None)
+    monkeypatch.setattr(main_module, "JQUANTS_PLAN_OVERRIDE", "free")
     config_copy["jquants"]["plan"] = "free"
     main_module._apply_jquants_plan_settings(config_copy)
     assert main_module._jquants_parallel_fetch(config_copy) is False
 
+    monkeypatch.setattr(main_module, "JQUANTS_PLAN_OVERRIDE", "light")
     config_copy["jquants"]["plan"] = "light"
     main_module._apply_jquants_plan_settings(config_copy)
     assert main_module._jquants_parallel_fetch(config_copy) is True

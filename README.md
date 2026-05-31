@@ -195,7 +195,7 @@ python src/main.py --mode simulate-operation --days 30 --profile rookie_dealer_0
 
 `--period 6m|1y|3y|5y` を使うと期間を自動計算できます。CLIで `--start-date` / `--end-date` を指定した場合は明示日付を優先します。`--profiles rookie_dealer_02_v2_6 rookie_dealer_02_v2_8` を付けると対象実験を絞れます。`--skip-backtest` は既存DB結果を使ってanalyze/compareのみ実行し、`--skip-analyze` はanalyzeを省略してcompareのみ進めます。どちらも必要な既存結果がなければ分かりやすく停止します。実行するのはbacktest/analyze/compareのみで、実売買やbroker発注は行いません。
 
-各profile実行前にregistryの `required_plan` と現在のJ-Quants planを照合します。Light専用capabilityがFree planで不足していてもfallback可能ならwarningとして実行し、fallback不可ならそのprofileを `skipped` としてsummaryに残します。J-Quants planは `config/provider.yaml` を正とし、`--jquants-plan` は一時上書き用途だけにします。
+各profile実行前にregistryの `required_plan` と現在のJ-Quants planを照合します。Light専用capabilityがFree planで不足していてもfallback可能ならwarningとして実行し、fallback不可ならそのprofileを `skipped` としてsummaryに残します。J-Quants planは `config/jquants.yaml` を正とし、`--jquants-plan` は一時上書き用途だけにします。
 
 実験判定は `candidate`、`needs_review`、`rejected`、`no_practical_effect` で表示します。baseより累計利益が増え、PFがbaseの95%以上、最大DDが大きく悪化せず、取引数がbaseの50%以上で、実際の採用/除外差分があれば `candidate` です。利益は増えたがDD/PF/取引数に懸念がある場合やサンプルが少ない場合は `needs_review`、利益・PF・DDが明確に悪化した場合は `rejected`、採用/除外差分がなく主要指標も一致する場合は `no_practical_effect` です。理由は `verdict_reason` に出力します。
 
@@ -1128,18 +1128,22 @@ JQUANTS_API_KEY=
 
 J-Quants は株価、財務、上場銘柄一覧の取得に使います。ニュース取得はJ-Quantsでは提供されないため、別APIまたはWeb検索で対応予定です。
 
-通常運用では `config/provider.yaml` を正として、profile、data provider、J-Quants契約プラン、broker、auto order設定を一元管理します。CLI指定は一時的な上書き用途です。優先順位は `CLI指定 > config/provider.yaml > default` です。
+通常運用では `config/provider.yaml` を正としてprofile、data provider、broker、auto order設定を管理し、J-Quants契約プランだけは `config/jquants.yaml` を正とします。CLI指定は一時的な上書き用途です。J-Quants planの優先順位は `CLI指定 > config/jquants.yaml > default free` です。互換のため `config/provider.yaml` に残った `jquants.plan` はdeprecatedとして扱い、`config/jquants.yaml` がある場合は無視されます。
 
 ```yaml
 data_provider: jquants
-jquants:
-  plan: free
 broker:
   mode: paper
 profile:
   default: rookie_dealer_02_v2_1
 operation:
   auto_order_enabled: false
+```
+
+```yaml
+# config/jquants.yaml
+jquants:
+  plan: light
 ```
 
 通常のバックテストは設定ファイルだけで動くため、次のように実行できます。
@@ -1151,7 +1155,7 @@ python src/main.py --mode backtest
 preflight では解決された値と source を表示します。
 
 ```text
-J-Quants Plan: free (source=config)
+J-Quants Plan: light (source=config/jquants.yaml)
 Broker: paper (source=config)
 Profile: rookie_dealer_02_v2_1 (source=config)
 ```

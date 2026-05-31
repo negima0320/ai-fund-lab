@@ -1,8 +1,5 @@
 data_provider: jquants
 
-jquants:
-  plan: free
-
 broker:
   mode: paper
 

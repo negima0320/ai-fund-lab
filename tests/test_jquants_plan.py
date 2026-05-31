@@ -4,7 +4,7 @@ from datetime import date
 
 import main as main_module
 from data_provider import JQuantsDataProvider
-from jquants_plan import jquants_capability_status, jquants_profile_compatibility
+from jquants_plan import jquants_capability_status, jquants_profile_compatibility, resolve_jquants_plan
 from profile_loader import load_profile
 
 
@@ -66,7 +66,7 @@ def test_free_plan_relative_strength_uses_prime_fallback(monkeypatch, config_cop
     config_copy.setdefault("features", {})["relative_strength"] = True
     config_copy["features"]["topix_relative_strength"] = True
     config_copy.setdefault("scoring", {})["use_relative_strength_score"] = True
-    monkeypatch.setattr(main_module, "JQUANTS_PLAN_OVERRIDE", None)
+    monkeypatch.setattr(main_module, "JQUANTS_PLAN_OVERRIDE", "free")
     monkeypatch.setattr(main_module, "_load_jquants_config_file", lambda: {})
 
     main_module._apply_jquants_plan_settings(config_copy)
@@ -83,7 +83,7 @@ def test_preflight_displays_plan_and_capabilities(config_copy: dict) -> None:
     main_module._check_jquants_plan_capabilities(results, config_copy)
 
     messages = [item["message"] for item in results]
-    assert "J-Quants Plan: free (source=config)" in messages
+    assert "J-Quants Plan: free (source=config/jquants.yaml)" in messages
     assert "J-Quants capability prices: OK" in messages
     assert "J-Quants capability topix_prices: disabled" in messages
     assert "J-Quants capability investor_breakdown: disabled" in messages
@@ -93,6 +93,30 @@ def test_preflight_displays_plan_and_capabilities(config_copy: dict) -> None:
     assert "can_run_backtest: true" in messages
     assert "can_run_live/paper: true" in messages
     assert any(message.startswith("prices earliest:") for message in messages)
+
+
+def test_resolve_jquants_plan_prefers_jquants_yaml_over_provider_yaml(tmp_path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "jquants.yaml").write_text(
+        "jquants:\n"
+        "  plan: light\n"
+        "  plans:\n"
+        "    light:\n"
+        "      requests_per_minute: 60\n"
+        "      parallel_fetch: true\n",
+        encoding="utf-8",
+    )
+    (config_dir / "provider.yaml").write_text("jquants:\n  plan: free\n", encoding="utf-8")
+
+    resolution = resolve_jquants_plan(config_root=tmp_path)
+
+    assert resolution.plan == "light"
+    assert resolution.source == "config/jquants.yaml"
+    assert resolution.capabilities["topix_prices"] == "OK"
+    assert resolution.requests_per_minute == 60
+    assert resolution.parallel_fetch is True
+    assert resolution.warnings
 
 
 def test_jquants_earliest_supported_date_from_config() -> None:

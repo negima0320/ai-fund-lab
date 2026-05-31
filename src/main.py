@@ -59,7 +59,17 @@ from db import (
 from feature_analysis import build_feature_analysis, render_feature_analysis_markdown, score_detail_groups
 from indicators import calculate_indicators
 from investor_context import INVESTOR_CONTEXT_EMPTY, build_investor_context
-from jquants_plan import DISPLAY_CAPABILITIES, jquants_capability_status, jquants_has_capability, jquants_profile_compatibility, normalize_jquants_plan
+from jquants_plan import (
+    DISPLAY_CAPABILITIES,
+    PlanResolution,
+    jquants_capability_status,
+    jquants_earliest_supported_date,
+    jquants_has_capability,
+    jquants_profile_compatibility,
+    jquants_supported_date_ranges,
+    normalize_jquants_plan,
+    resolve_jquants_plan,
+)
 from market_context import build_market_context, neutral_market_context
 from news_provider import build_news_provider
 from paper_trade import execute_paper_trade_day, execute_real_data_paper_trade, initial_live_paper_state, initial_paper_state
@@ -593,10 +603,8 @@ def _apply_jquants_supported_date_limits(args: Any) -> None:
         return
     if getattr(args, "mode", "") not in {"backtest", "fetch-prices", "run-experiments"}:
         return
-    settings = resolve_runtime_settings(args)
-    config = {"jquants": _load_jquants_config_file()}
-    config.setdefault("jquants", {})["plan"] = settings["jquants_plan"]
-    earliest = jquants_earliest_supported_date(config, "prices")
+    resolution = resolve_jquants_plan(args=args, config_root=ROOT, provider_config=_load_provider_runtime_config())
+    earliest = jquants_earliest_supported_date({"jquants": resolution.config}, "prices")
     if earliest is None:
         return
     if getattr(args, "start_date", None):
@@ -621,6 +629,12 @@ def _apply_jquants_supported_date_limits(args: Any) -> None:
 
 def resolve_runtime_settings(args: Any, provider_config: dict[str, Any] | None = None) -> dict[str, Any]:
     config = provider_config if provider_config is not None else _load_provider_runtime_config()
+    plan_resolution = resolve_jquants_plan(
+        args=args,
+        config=config if provider_config is not None else None,
+        config_root=None if provider_config is not None else ROOT,
+        provider_config=config,
+    )
     profile_id, profile_source = _resolve_setting_value(
         getattr(args, "profile", None),
         _config_get(config, ("profile", "default")),
@@ -630,11 +644,6 @@ def resolve_runtime_settings(args: Any, provider_config: dict[str, Any] | None =
         getattr(args, "provider", None),
         config.get("data_provider") or _config_get(config, ("provider", "default")),
         "jquants",
-    )
-    jquants_plan, jquants_plan_source = _resolve_setting_value(
-        getattr(args, "jquants_plan", None),
-        _config_get(config, ("jquants", "plan")),
-        "free",
     )
     broker_mode, broker_source = _resolve_setting_value(
         None,
@@ -649,13 +658,14 @@ def resolve_runtime_settings(args: Any, provider_config: dict[str, Any] | None =
     return {
         "profile_id": str(profile_id),
         "provider": str(provider_name),
-        "jquants_plan": normalize_jquants_plan(str(jquants_plan)),
+        "jquants_plan": plan_resolution.plan,
+        "jquants_plan_resolution": plan_resolution,
         "broker_mode": str(broker_mode),
         "auto_order_enabled": bool(auto_order_enabled),
         "sources": {
             "profile": profile_source,
             "provider": provider_source,
-            "jquants_plan": jquants_plan_source,
+            "jquants_plan": plan_resolution.source,
             "broker": broker_source,
             "auto_order_enabled": auto_order_source,
         },
@@ -875,6 +885,11 @@ def run_validate_config(profile_id: str | None = None, strict: bool = False) -> 
     print(f"profiles: {', '.join(result['profile_ids'])}")
     print(f"J-Quants Plan: {result['jquants_plan']}")
     print(f"Source: {result['jquants_plan_source']}")
+    print("J-Quants Plan Resolution:")
+    print(f"- plan: {result['jquants_plan']}")
+    print(f"- source: {result['jquants_plan_source']}")
+    print(f"- config_path: {result.get('jquants_config_path') or 'N/A'}")
+    print(f"- capabilities: {json.dumps(result['capabilities'], ensure_ascii=False, sort_keys=True)}")
     print("Capabilities:")
     for capability in DISPLAY_CAPABILITIES:
         print(f"- {capability}: {result['capabilities'].get(capability, 'disabled')}")
@@ -929,6 +944,7 @@ def build_config_validation(
         "profile_ids": target_profile_ids,
         "jquants_plan": plan,
         "jquants_plan_source": jquants_validation["source"],
+        "jquants_config_path": jquants_validation.get("config_path"),
         "capabilities": jquants_validation["capabilities"],
         "fail_count": fail_count,
         "warn_count": warn_count,
@@ -978,35 +994,20 @@ def _load_profile_for_validation(checks: list[dict[str, str]], profile_id: str) 
 
 
 def _load_jquants_validation_config(provider_config: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
-    jquants_path = ROOT / "config" / "jquants.yaml"
-    config_plan = None
-    source = "default"
-    if jquants_path.exists():
-        try:
-            if yaml is not None:
-                payload = yaml.safe_load(jquants_path.read_text(encoding="utf-8")) or {}
-            else:
-                payload = _load_simple_yaml(jquants_path.read_text(encoding="utf-8"))
-            config_plan = _config_get(payload if isinstance(payload, dict) else {}, ("jquants", "plan"))
-            source = "config/jquants.yaml"
-        except Exception:
-            config_plan = None
-    if config_plan is None:
-        config_plan = _config_get(provider_config, ("jquants", "plan"))
-        source = "config/provider.yaml" if config_plan is not None else source
-    runtime_plan = settings.get("jquants_plan")
-    runtime_source = settings.get("sources", {}).get("jquants_plan")
-    if runtime_source == "cli":
-        raw_plan = runtime_plan
-        source = "cli"
-    else:
-        raw_plan = config_plan or runtime_plan or "free"
-    plan = normalize_jquants_plan(raw_plan)
+    class Args:
+        jquants_plan = settings.get("jquants_plan") if settings.get("sources", {}).get("jquants_plan") == "cli" else None
+
+    resolution = resolve_jquants_plan(args=Args(), config_root=ROOT, provider_config=provider_config)
     return {
-        "plan": plan,
-        "raw_plan": raw_plan,
-        "source": source,
-        "capabilities": jquants_capability_status(plan),
+        "plan": resolution.plan,
+        "raw_plan": resolution.plan,
+        "source": resolution.source,
+        "config_path": resolution.config_path,
+        "capabilities": resolution.capabilities,
+        "requests_per_minute": resolution.requests_per_minute,
+        "parallel_fetch": resolution.parallel_fetch,
+        "supported_date_ranges": resolution.supported_date_ranges,
+        "warnings": resolution.warnings,
     }
 
 
@@ -1022,7 +1023,9 @@ def _validate_jquants_config(checks: list[dict[str, str]], jquants_validation: d
     )
     for capability, status in jquants_validation.get("capabilities", {}).items():
         checks.append({"status": "OK", "name": f"jquants.capability.{capability}", "message": status})
-    ranges = jquants_supported_date_ranges({"jquants": _load_jquants_config_file() | {"plan": jquants_validation["plan"]}})
+    for warning in jquants_validation.get("warnings", []):
+        checks.append({"status": "WARN", "name": "jquants.plan_resolution", "message": warning})
+    ranges = jquants_validation.get("supported_date_ranges", {})
     for endpoint, earliest in ranges.items():
         checks.append({"status": "OK", "name": f"jquants.supported_date.{endpoint}", "message": f"{endpoint} earliest: {earliest}"})
 
@@ -1929,7 +1932,17 @@ def run_experiments(
     registry = load_profile_registry()
     base = base_profile_id or _registry_baseline_profile_id(registry)
     experiment_ids = select_experiment_profiles(base, registry, requested_profiles)
-    capability = resolve_experiment_capabilities(experiment_ids, _runtime_settings_or_defaults().get("jquants_plan", "free"))
+    plan_resolution = _runtime_settings_or_defaults().get("jquants_plan_resolution")
+    current_plan = (plan_resolution.plan if isinstance(plan_resolution, PlanResolution) else _runtime_settings_or_defaults().get("jquants_plan", "free"))
+    print("J-Quants Plan Resolution:")
+    if isinstance(plan_resolution, PlanResolution):
+        print(f"- plan: {plan_resolution.plan}")
+        print(f"- source: {plan_resolution.source}")
+        print(f"- config_path: {plan_resolution.config_path or 'N/A'}")
+        print(f"- capabilities: {json.dumps(plan_resolution.capabilities, ensure_ascii=False, sort_keys=True)}")
+    else:
+        print(f"- plan: {current_plan}")
+    capability = resolve_experiment_capabilities(experiment_ids, current_plan)
     runnable_experiment_ids = [item["profile_id"] for item in capability["runnable"]]
     skipped_profiles = capability["skipped"]
     profile_ids = [base, *runnable_experiment_ids]
@@ -3974,8 +3987,20 @@ def _check_jquants_plan_capabilities(results: list[dict[str, Any]], config: dict
     plan = _jquants_plan(config)
     sources = config.get("_value_sources", {}) if isinstance(config.get("_value_sources"), dict) else {}
     source = sources.get("jquants_plan", "default")
+    resolution = config.get("_jquants_plan_resolution", {}) if isinstance(config.get("_jquants_plan_resolution"), dict) else {}
     status = jquants_capability_status(plan)
     compatibility = jquants_profile_compatibility(profile_id_from(config), plan)
+    _preflight_add(
+        results,
+        "OK",
+        "J-Quants Plan Resolution:",
+        {
+            "plan": plan,
+            "source": source,
+            "config_path": resolution.get("config_path"),
+            "capabilities": status,
+        },
+    )
     _preflight_add(results, "OK", f"J-Quants Plan: {plan} (source={source})", {"plan": plan, "source": source})
     _preflight_add(results, "OK", f"Rate Limit: {_jquants_requests_per_minute(config)} requests/min")
     _preflight_add(results, "OK", f"Parallel Fetch: {'enabled' if _jquants_parallel_fetch(config) else 'disabled'}")
@@ -8484,25 +8509,37 @@ def _apply_runtime_provider_settings(config: dict[str, Any]) -> None:
 
 
 def _apply_jquants_plan_settings(config: dict[str, Any]) -> None:
-    provider_config = _load_jquants_config_file()
     jquants = config.setdefault("jquants", {})
-    if provider_config:
-        jquants.update(provider_config)
+    class Args:
+        jquants_plan = JQUANTS_PLAN_OVERRIDE
 
-    raw_plan = JQUANTS_PLAN_OVERRIDE or jquants.get("plan", "free")
-    plan = normalize_jquants_plan(raw_plan)
+    resolution = resolve_jquants_plan(
+        args=Args(),
+        config={"jquants": jquants},
+        config_root=ROOT,
+        provider_config=_load_provider_runtime_config(),
+    )
+    plan = resolution.plan
     warnings = config.setdefault("_warnings", [])
-    if str(raw_plan or "").strip().lower() not in {"", "free", "light"}:
-        warnings.append(f"unknown J-Quants plan `{raw_plan}`; falling back to free")
+    warnings.extend(resolution.warnings)
 
+    jquants.update(resolution.config)
     jquants["plan"] = plan
-    jquants["capability_status"] = jquants_capability_status(plan)
-    plan_settings = _jquants_plan_settings(jquants, plan)
-    requests_per_minute = int(plan_settings.get("requests_per_minute", jquants.get("requests_per_minute", jquants.get("rate_limit_per_minute", 5))))
-    jquants["requests_per_minute"] = requests_per_minute
-    jquants["rate_limit_per_minute"] = requests_per_minute
-    jquants["parallel_fetch"] = bool(plan_settings.get("parallel_fetch", False)) and plan == "light"
-    jquants["max_parallel_requests"] = int(plan_settings.get("max_parallel_requests", 4))
+    jquants["capability_status"] = resolution.capabilities
+    jquants["requests_per_minute"] = resolution.requests_per_minute
+    jquants["rate_limit_per_minute"] = resolution.requests_per_minute
+    jquants["parallel_fetch"] = resolution.parallel_fetch
+    jquants["max_parallel_requests"] = resolution.max_parallel_requests
+    config.setdefault("_value_sources", {})["jquants_plan"] = resolution.source
+    config["_jquants_plan_resolution"] = {
+        "plan": resolution.plan,
+        "source": resolution.source,
+        "config_path": resolution.config_path,
+        "capabilities": resolution.capabilities,
+        "requests_per_minute": resolution.requests_per_minute,
+        "parallel_fetch": resolution.parallel_fetch,
+        "supported_date_ranges": resolution.supported_date_ranges,
+    }
 
     features = config.setdefault("features", {})
     if not jquants_has_capability(plan, "topix_prices"):
@@ -8529,23 +8566,20 @@ def _apply_jquants_plan_settings(config: dict[str, Any]) -> None:
 
 
 def _load_jquants_config_file() -> dict[str, Any]:
-    merged: dict[str, Any] = {}
-    for path in (ROOT / "config" / "jquants.yaml", PROVIDER_CONFIG_PATH):
-        if not path.exists():
-            continue
-        try:
-            if yaml is not None:
-                payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-            else:
-                payload = _load_simple_yaml(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        section = payload.get("jquants", payload)
-        if isinstance(section, dict):
-            merged.update(section)
-    return merged
+    path = ROOT / "config" / "jquants.yaml"
+    if not path.exists():
+        return {}
+    try:
+        if yaml is not None:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        else:
+            payload = _load_simple_yaml(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    section = payload.get("jquants", payload)
+    return section if isinstance(section, dict) else {}
 
 
 def _jquants_plan(config: dict[str, Any]) -> str:
@@ -8594,11 +8628,16 @@ def _jquants_plan_settings(jquants: dict[str, Any], plan: str) -> dict[str, Any]
 
 
 def _jquants_requests_per_minute(config: dict[str, Any]) -> int:
-    return int(config.get("jquants", {}).get("requests_per_minute", config.get("jquants", {}).get("rate_limit_per_minute", 5)))
+    jquants = config.get("jquants", {}) if isinstance(config.get("jquants"), dict) else {}
+    plan_settings = _jquants_plan_settings(jquants, _jquants_plan(config))
+    return int(plan_settings.get("requests_per_minute", jquants.get("requests_per_minute", jquants.get("rate_limit_per_minute", 5))))
 
 
 def _jquants_parallel_fetch(config: dict[str, Any]) -> bool:
-    return _jquants_plan(config) == "light" and bool(config.get("jquants", {}).get("parallel_fetch", False))
+    jquants = config.get("jquants", {}) if isinstance(config.get("jquants"), dict) else {}
+    plan = _jquants_plan(config)
+    plan_settings = _jquants_plan_settings(jquants, plan)
+    return plan == "light" and bool(plan_settings.get("parallel_fetch", jquants.get("parallel_fetch", False)))
 
 
 def _jquants_max_parallel_requests(config: dict[str, Any]) -> int:
