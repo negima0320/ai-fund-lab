@@ -1732,12 +1732,14 @@ def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_
 
     rows = [_profile_compare_row(config, db_path, start_date_text, end_date_text) for config in profiles]
     ranking = build_profile_ranking(rows)
-    profile_diff_analysis = build_profile_diff_analysis(profiles, db_path, start_date_text, end_date_text)
+    profile_diff_analyses = build_profile_diff_analyses(profiles, db_path, start_date_text, end_date_text)
+    profile_diff_analysis = profile_diff_analyses[0] if profile_diff_analyses else None
     payload = {
         "start_date": start_date_text,
         "end_date": end_date_text,
         "profiles": rows,
         "ranking": ranking,
+        "profile_diff_analyses": profile_diff_analyses,
         "profile_diff_analysis": profile_diff_analysis,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
@@ -1763,14 +1765,17 @@ def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_
         print("Profile Ranking")
         for item in ranking:
             print(f"{item['rank']}位 {item['profile_id']} score={_format_optional_number(item['score'])}")
-    if profile_diff_analysis:
+    if profile_diff_analyses:
         print("Profile Diff Analysis")
-        print(f"base_profile: {profile_diff_analysis['base_profile_id']}")
-        print(f"target_profile: {profile_diff_analysis['target_profile_id']}")
-        print(f"newly selected by target: {profile_diff_analysis['newly_selected_count']}")
-        print(f"removed by target: {profile_diff_analysis['removed_count']}")
-        if profile_diff_analysis.get("no_practical_effect"):
-            print("No practical effect")
+        for analysis in profile_diff_analyses:
+            print(f"base_profile: {analysis['base_profile_id']}")
+            print(f"target_profile: {analysis['target_profile_id']}")
+            print(f"newly selected by target: {analysis['newly_selected_count']}")
+            print(f"removed by target: {analysis['removed_count']}")
+            print(f"outcome diff count: {analysis.get('outcome_diff_count', 0)}")
+            print(f"practical effect: {analysis.get('practical_effect')}")
+            if analysis.get("no_practical_effect"):
+                print("No practical effect")
     print(f"markdown: {markdown_path.relative_to(ROOT)}")
     print(f"json: {json_path.relative_to(ROOT)}")
     return markdown_path, json_path
@@ -2006,7 +2011,12 @@ def build_experiment_batch_summary(
         registry_item = profiles[profile_id]
         row = rows_by_profile.get(profile_id, {"profile_id": profile_id})
         diff = _experiment_diff(base_profile_id, profile_id, db_path, start_date_text, end_date_text) if db_path.exists() else {}
-        practical_effect = bool(diff.get("newly_selected_count") or diff.get("removed_count"))
+        if "selection_diff_count" in diff:
+            selection_diff_count = int(diff.get("selection_diff_count") or 0)
+        else:
+            selection_diff_count = int(diff.get("newly_selected_count") or 0) + int(diff.get("removed_count") or 0)
+        outcome_diff_count = int(diff.get("outcome_diff_count") or 0)
+        practical_effect = diff.get("practical_effect") or _profile_practical_effect(selection_diff_count, outcome_diff_count)
         judgement = _experiment_judgement(base_row, row, diff)
         experiment_rows.append(
             {
@@ -2024,8 +2034,11 @@ def build_experiment_batch_summary(
                 "total_trades": row.get("total_trades"),
                 "newly_selected_count": diff.get("newly_selected_count", 0),
                 "removed_count": diff.get("removed_count", 0),
-                "practical_effect": "yes" if practical_effect else "no",
-                "no_practical_effect": "no" if practical_effect else "yes",
+                "selection_diff_count": selection_diff_count,
+                "outcome_diff_count": outcome_diff_count,
+                "practical_effect": practical_effect,
+                "effect_reason": diff.get("effect_reason") or _profile_effect_reason(selection_diff_count, outcome_diff_count),
+                "no_practical_effect": "yes" if practical_effect == "no_practical_effect" else "no",
                 "judgement": judgement["judgement"],
                 "judgement_reasons": judgement["reasons"],
                 "verdict": judgement["judgement"],
@@ -2104,7 +2117,15 @@ def _experiment_judgement(base_row: dict[str, Any], row: dict[str, Any], diff: d
     reasons: list[str] = []
     if None in {base_profit, target_profit, base_pf, target_pf, base_dd, target_dd, base_trades, target_trades}:
         return {"judgement": "needs_review", "reasons": ["missing_metrics"]}
-    no_practical_diff = diff is not None and not (diff.get("newly_selected_count") or diff.get("removed_count"))
+    selection_diff_count = 0
+    outcome_diff_count = 0
+    if diff is not None:
+        if "selection_diff_count" in diff:
+            selection_diff_count = int(diff.get("selection_diff_count") or 0)
+        else:
+            selection_diff_count = int(diff.get("newly_selected_count") or 0) + int(diff.get("removed_count") or 0)
+        outcome_diff_count = int(diff.get("outcome_diff_count") or 0)
+    no_practical_diff = diff is not None and selection_diff_count == 0 and outcome_diff_count == 0
     metrics_identical = (
         target_profit == base_profit
         and target_pf == base_pf
@@ -2113,6 +2134,10 @@ def _experiment_judgement(base_row: dict[str, Any], row: dict[str, Any], diff: d
     )
     if no_practical_diff:
         reasons.append("no_practical_effect")
+    elif diff is not None and selection_diff_count == 0 and outcome_diff_count > 0:
+        reasons.append("execution_or_exit_effect")
+    elif diff is not None and selection_diff_count > 0:
+        reasons.append("selection_effect")
     if no_practical_diff and metrics_identical:
         return {"judgement": "no_practical_effect", "reasons": reasons}
     trade_count_ok = target_trades >= base_trades * 0.5
@@ -2189,8 +2214,8 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             "",
             "## Results",
             "",
-            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | practical_effect | verdict | verdict_reason |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | selection_diff_count | outcome_diff_count | practical_effect | effect_reason | verdict | verdict_reason |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for row in summary.get("experiments", []):
@@ -2206,7 +2231,9 @@ def _experiment_summary_table_row(row: dict[str, Any]) -> str:
         f"{_format_optional_percent(row.get('win_rate'))} | {_format_optional_number(row.get('profit_factor'))} | "
         f"{_format_optional_percent(row.get('expectancy'))} | {_format_optional_percent(row.get('max_drawdown'))} | "
         f"{row.get('total_trades')} | {row.get('newly_selected_count')} | {row.get('removed_count')} | "
-        f"{row.get('practical_effect')} | {row.get('verdict', row.get('judgement', '-'))} | {row.get('verdict_reason', '-')} |"
+        f"{row.get('selection_diff_count')} | {row.get('outcome_diff_count')} | "
+        f"{row.get('practical_effect')} | {row.get('effect_reason', '-')} | "
+        f"{row.get('verdict', row.get('judgement', '-'))} | {row.get('verdict_reason', '-')} |"
     )
 
 
@@ -2230,7 +2257,10 @@ def render_experiment_profile_markdown(row: dict[str, Any]) -> str:
             f"- total_trades: {row.get('total_trades')}",
             f"- newly_selected_count: {row.get('newly_selected_count', 0)}",
             f"- removed_count: {row.get('removed_count', 0)}",
+            f"- selection_diff_count: {row.get('selection_diff_count', 0)}",
+            f"- outcome_diff_count: {row.get('outcome_diff_count', 0)}",
             f"- practical_effect: {row.get('practical_effect', 'no')}",
+            f"- effect_reason: {row.get('effect_reason', '-')}",
             f"- verdict: {row.get('verdict', row.get('judgement', '-'))}",
             f"- verdict_reason: {row.get('verdict_reason', ', '.join(row.get('judgement_reasons') or []) or '-')}",
             f"- candidate: {row.get('candidate', 'no')}",
@@ -2427,15 +2457,49 @@ def build_profile_diff_analysis(
     pair = _profile_diff_pair(configs)
     if pair is None:
         return None
-    base_config, target_config = pair
+    return _build_profile_diff_analysis_for_pair(pair[0], pair[1], db_path, start_date_text, end_date_text)
+
+
+def build_profile_diff_analyses(
+    configs: list[dict[str, Any]],
+    db_path: Path,
+    start_date_text: str,
+    end_date_text: str,
+) -> list[dict[str, Any]]:
+    if len(configs) < 2:
+        return []
+    base_config = configs[0]
+    analyses = []
+    for target_config in configs[1:]:
+        analyses.append(_build_profile_diff_analysis_for_pair(base_config, target_config, db_path, start_date_text, end_date_text))
+    return analyses
+
+
+def _build_profile_diff_analysis_for_pair(
+    base_config: dict[str, Any],
+    target_config: dict[str, Any],
+    db_path: Path,
+    start_date_text: str,
+    end_date_text: str,
+) -> dict[str, Any]:
     base_profile_id = profile_id_from(base_config)
     target_profile_id = profile_id_from(target_config)
     base_rows = _load_scoring_rows_for_profile(db_path, base_profile_id, start_date_text, end_date_text)
     target_rows = _load_scoring_rows_for_profile(db_path, target_profile_id, start_date_text, end_date_text)
+    base_trade_rows = _load_trade_rows_for_profile(db_path, base_profile_id, start_date_text, end_date_text)
+    target_trade_rows = _load_trade_rows_for_profile(db_path, target_profile_id, start_date_text, end_date_text)
     base_selected = _selected_key_map(base_rows)
     target_selected = _selected_key_map(target_rows)
     newly_selected_keys = sorted(set(target_selected) - set(base_selected))
     removed_keys = sorted(set(base_selected) - set(target_selected))
+    outcome_diff = _trade_outcome_diff(base_trade_rows, target_trade_rows)
+    summary_diff = _summary_diff(
+        _profile_compare_row(base_config, db_path, start_date_text, end_date_text),
+        _profile_compare_row(target_config, db_path, start_date_text, end_date_text),
+    )
+    selection_diff_count = len(newly_selected_keys) + len(removed_keys)
+    outcome_diff_count = outcome_diff["outcome_diff_count"]
+    practical_effect = _profile_practical_effect(selection_diff_count, outcome_diff_count)
     return {
         "base_profile_id": base_profile_id,
         "base_profile_name": profile_name_from(base_config),
@@ -2453,10 +2517,16 @@ def build_profile_diff_analysis(
         "target_conditional_rejected_count": _conditional_rejected_count(target_rows),
         "newly_selected_count": len(newly_selected_keys),
         "removed_count": len(removed_keys),
+        "selection_diff_count": selection_diff_count,
         "newly_selected": [_selection_diff_record(target_selected[key]) for key in newly_selected_keys],
         "removed": [_selection_diff_record(base_selected[key]) for key in removed_keys],
+        "trade_outcome_diff": outcome_diff,
+        "outcome_diff_count": outcome_diff_count,
+        "summary_diff": summary_diff,
+        "practical_effect": practical_effect,
+        "effect_reason": _profile_effect_reason(selection_diff_count, outcome_diff_count),
         "effective_config_differences": _effective_config_differences(base_config, target_config),
-        "no_practical_effect": len(newly_selected_keys) == 0 and len(removed_keys) == 0,
+        "no_practical_effect": selection_diff_count == 0 and outcome_diff_count == 0,
     }
 
 
@@ -2486,12 +2556,168 @@ def _load_scoring_rows_for_profile(db_path: Path, profile_id: str, start_date_te
         ]
 
 
+def _load_trade_rows_for_profile(db_path: Path, profile_id: str, start_date_text: str, end_date_text: str) -> list[dict[str, Any]]:
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        return [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT *
+                FROM trades
+                WHERE profile_id = ?
+                  AND COALESCE(exit_date, entry_date) BETWEEN ? AND ?
+                ORDER BY entry_date, exit_date, id
+                """,
+                (profile_id, start_date_text, end_date_text),
+            )
+        ]
+
+
 def _selected_key_map(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
     return {
         (str(row.get("date")), str(row.get("code"))): row
         for row in rows
         if bool(row.get("selected"))
     }
+
+
+def _closed_trade_key_map(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+    result = {}
+    for row in rows:
+        if not row.get("entry_date") or not row.get("code"):
+            continue
+        if not (row.get("exit_date") or str(row.get("action") or "").upper() == "SELL"):
+            continue
+        key = (str(row.get("entry_date")), str(row.get("code")))
+        if key not in result:
+            result[key] = row
+            continue
+        suffix = 2
+        while (key[0], f"{key[1]}#{suffix}") in result:
+            suffix += 1
+        result[(key[0], f"{key[1]}#{suffix}")] = row
+    return result
+
+
+def _trade_outcome_diff(base_rows: list[dict[str, Any]], target_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    base_trades = _closed_trade_key_map(base_rows)
+    target_trades = _closed_trade_key_map(target_rows)
+    common_keys = sorted(set(base_trades) & set(target_trades))
+    different_exit_date = []
+    different_exit_reason = []
+    different_profit = []
+    different_holding_days = []
+    outcome_diffs = []
+    for key in common_keys:
+        base = base_trades[key]
+        target = target_trades[key]
+        changes = []
+        if _normalized_value(base.get("exit_date")) != _normalized_value(target.get("exit_date")):
+            changes.append("exit_date")
+            different_exit_date.append(_trade_outcome_diff_record(key, base, target, ["exit_date"]))
+        if _normalized_value(base.get("exit_reason")) != _normalized_value(target.get("exit_reason")):
+            changes.append("exit_reason")
+            different_exit_reason.append(_trade_outcome_diff_record(key, base, target, ["exit_reason"]))
+        if not _numbers_close(_trade_profit_value(base), _trade_profit_value(target)):
+            changes.append("profit")
+            different_profit.append(_trade_outcome_diff_record(key, base, target, ["profit"]))
+        if _normalized_value(base.get("holding_days")) != _normalized_value(target.get("holding_days")):
+            changes.append("holding_days")
+            different_holding_days.append(_trade_outcome_diff_record(key, base, target, ["holding_days"]))
+        if changes:
+            outcome_diffs.append(_trade_outcome_diff_record(key, base, target, changes))
+    return {
+        "same_entry_count": len(common_keys),
+        "outcome_diff_count": len(outcome_diffs),
+        "same_entry_different_exit_date_count": len(different_exit_date),
+        "same_entry_different_exit_reason_count": len(different_exit_reason),
+        "same_entry_different_profit_count": len(different_profit),
+        "same_entry_different_holding_days_count": len(different_holding_days),
+        "same_entry_different_exit_date": different_exit_date[:50],
+        "same_entry_different_exit_reason": different_exit_reason[:50],
+        "same_entry_different_profit": different_profit[:50],
+        "same_entry_different_holding_days": different_holding_days[:50],
+        "outcome_diffs": outcome_diffs[:50],
+    }
+
+
+def _trade_outcome_diff_record(
+    key: tuple[str, str],
+    base: dict[str, Any],
+    target: dict[str, Any],
+    changed_fields: list[str],
+) -> dict[str, Any]:
+    code = str(base.get("code") or target.get("code") or key[1]).split("#", 1)[0]
+    return {
+        "entry_date": key[0],
+        "code": code,
+        "name": base.get("name") or target.get("name"),
+        "changed_fields": changed_fields,
+        "base_exit_date": base.get("exit_date"),
+        "target_exit_date": target.get("exit_date"),
+        "base_exit_reason": base.get("exit_reason"),
+        "target_exit_reason": target.get("exit_reason"),
+        "base_profit": _trade_profit_value(base),
+        "target_profit": _trade_profit_value(target),
+        "base_profit_rate": _trade_profit_rate_value(base),
+        "target_profit_rate": _trade_profit_rate_value(target),
+        "base_holding_days": base.get("holding_days"),
+        "target_holding_days": target.get("holding_days"),
+    }
+
+
+def _trade_profit_value(row: dict[str, Any]) -> float | None:
+    return _to_float(row.get("net_profit") if row.get("net_profit") is not None else row.get("profit"))
+
+
+def _trade_profit_rate_value(row: dict[str, Any]) -> float | None:
+    return _to_float(row.get("net_profit_rate") if row.get("net_profit_rate") is not None else row.get("profit_rate"))
+
+
+def _numbers_close(left: float | None, right: float | None, tolerance: float = 0.0001) -> bool:
+    if left is None or right is None:
+        return left is right
+    return abs(left - right) <= tolerance
+
+
+def _normalized_value(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def _summary_diff(base_row: dict[str, Any], target_row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "net_profit_diff": _number_diff(target_row.get("net_cumulative_profit"), base_row.get("net_cumulative_profit")),
+        "profit_factor_diff": _number_diff(target_row.get("profit_factor"), base_row.get("profit_factor")),
+        "win_rate_diff": _number_diff(target_row.get("win_rate"), base_row.get("win_rate")),
+        "trade_count_diff": _number_diff(target_row.get("total_trades"), base_row.get("total_trades")),
+    }
+
+
+def _number_diff(target: Any, base: Any) -> float | None:
+    target_number = _to_float(target)
+    base_number = _to_float(base)
+    if target_number is None or base_number is None:
+        return None
+    return round(target_number - base_number, 6)
+
+
+def _profile_practical_effect(selection_diff_count: int, outcome_diff_count: int) -> str:
+    if selection_diff_count == 0 and outcome_diff_count == 0:
+        return "no_practical_effect"
+    if selection_diff_count == 0 and outcome_diff_count > 0:
+        return "execution_or_exit_effect"
+    return "selection_effect"
+
+
+def _profile_effect_reason(selection_diff_count: int, outcome_diff_count: int) -> str:
+    if selection_diff_count == 0 and outcome_diff_count == 0:
+        return "selection_diff_count=0 and outcome_diff_count=0"
+    if selection_diff_count == 0:
+        return "same entries but trade outcomes differ"
+    if outcome_diff_count == 0:
+        return "entry selection differs"
+    return "entry selection and trade outcomes differ"
 
 
 def _risk_off_candidate_count(rows: list[dict[str, Any]]) -> int:
@@ -2665,9 +2891,11 @@ def render_compare_profiles_markdown(payload: dict[str, Any]) -> str:
                 "",
             ]
         )
-    if payload.get("profile_diff_analysis"):
+    analyses = payload.get("profile_diff_analyses") or ([payload.get("profile_diff_analysis")] if payload.get("profile_diff_analysis") else [])
+    if analyses:
         lines.extend(["", "## Profile Diff Analysis", ""])
-        lines.extend(_profile_diff_analysis_lines(payload["profile_diff_analysis"]))
+        for analysis in analyses:
+            lines.extend(_profile_diff_analysis_lines(analysis))
     lines.extend(["", "## Score Detail", ""])
     for row in payload["profiles"]:
         lines.extend(
@@ -2693,7 +2921,11 @@ def render_compare_profiles_markdown(payload: dict[str, Any]) -> str:
 
 
 def _profile_diff_analysis_lines(analysis: dict[str, Any]) -> list[str]:
+    outcome = analysis.get("trade_outcome_diff") or {}
+    summary = analysis.get("summary_diff") or {}
     lines = [
+        f"### {analysis.get('base_profile_id')} vs {analysis.get('target_profile_id')}",
+        "",
         f"- base_profile: {analysis.get('base_profile_id')} {analysis.get('base_profile_name') or ''}",
         f"- target_profile: {analysis.get('target_profile_id')} {analysis.get('target_profile_name') or ''}",
         f"- base selected count: {analysis.get('base_selected_count')}",
@@ -2708,9 +2940,37 @@ def _profile_diff_analysis_lines(analysis: dict[str, Any]) -> list[str]:
         f"- target conditional rejected count: {analysis.get('target_conditional_rejected_count')}",
         f"- newly selected by target: {analysis.get('newly_selected_count')}",
         f"- removed by target: {analysis.get('removed_count')}",
+        f"- selection_diff_count: {analysis.get('selection_diff_count')}",
+        f"- outcome_diff_count: {analysis.get('outcome_diff_count')}",
+        f"- practical_effect: {analysis.get('practical_effect')}",
+        f"- effect_reason: {analysis.get('effect_reason')}",
     ]
     if analysis.get("no_practical_effect"):
         lines.extend(["", "No practical effect"])
+    lines.extend(
+        [
+            "",
+            "### Summary Diff",
+            "",
+            f"- net profit diff: {_format_optional_yen(summary.get('net_profit_diff'))}",
+            f"- PF diff: {_format_optional_number(summary.get('profit_factor_diff'))}",
+            f"- win_rate diff: {_format_optional_percent(summary.get('win_rate_diff'))}",
+            f"- trade_count diff: {_format_optional_number(summary.get('trade_count_diff'))}",
+            "",
+            "### Entry Selection Diff",
+            "",
+            f"- newly_selected: {analysis.get('newly_selected_count')}",
+            f"- removed: {analysis.get('removed_count')}",
+            "",
+            "### Trade Outcome Diff",
+            "",
+            f"- same entry but different exit_date: {outcome.get('same_entry_different_exit_date_count', 0)}",
+            f"- same entry but different exit_reason: {outcome.get('same_entry_different_exit_reason_count', 0)}",
+            f"- same entry but different profit: {outcome.get('same_entry_different_profit_count', 0)}",
+            f"- same entry but different holding_days: {outcome.get('same_entry_different_holding_days_count', 0)}",
+        ]
+    )
+    lines.extend(_trade_outcome_diff_lines(outcome.get("outcome_diffs", [])))
     lines.extend(["", "### Effective Config Differences", ""])
     differences = analysis.get("effective_config_differences") or []
     if differences:
@@ -2727,6 +2987,22 @@ def _profile_diff_analysis_lines(analysis: dict[str, Any]) -> list[str]:
     lines.extend(["", "### Removed by Target", ""])
     lines.extend(_selection_diff_lines(analysis.get("removed", [])))
     return lines
+
+
+def _trade_outcome_diff_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- なし"]
+    return [
+        (
+            f"- {item.get('entry_date')} {item.get('code')} {item.get('name')}: "
+            f"fields {', '.join(item.get('changed_fields') or [])}, "
+            f"exit {item.get('base_exit_date')} -> {item.get('target_exit_date')}, "
+            f"reason {item.get('base_exit_reason') or 'N/A'} -> {item.get('target_exit_reason') or 'N/A'}, "
+            f"profit {_format_optional_yen(item.get('base_profit'))} -> {_format_optional_yen(item.get('target_profit'))}, "
+            f"holding {item.get('base_holding_days')} -> {item.get('target_holding_days')}"
+        )
+        for item in items[:50]
+    ]
 
 
 def _selection_diff_lines(items: list[dict[str, Any]]) -> list[str]:

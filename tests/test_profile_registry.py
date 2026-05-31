@@ -143,9 +143,20 @@ def test_run_experiments_skip_analyze_skips_analyze_step(tmp_path, monkeypatch) 
 def test_experiment_verdict_no_practical_effect() -> None:
     base = {"net_cumulative_profit": 100, "profit_factor": 1.2, "max_drawdown": -0.1, "total_trades": 10}
     same = {"net_cumulative_profit": 100, "profit_factor": 1.2, "max_drawdown": -0.1, "total_trades": 10}
-    diff = {"newly_selected_count": 0, "removed_count": 0}
+    diff = {"selection_diff_count": 0, "outcome_diff_count": 0}
 
     assert main_module._experiment_judgement(base, same, diff)["judgement"] == "no_practical_effect"
+
+
+def test_experiment_verdict_not_no_practical_effect_when_metrics_change_with_outcome_diff() -> None:
+    base = {"net_cumulative_profit": 100, "profit_factor": 1.2, "max_drawdown": -0.1, "total_trades": 10}
+    changed = {"net_cumulative_profit": 120, "profit_factor": 1.2, "max_drawdown": -0.1, "total_trades": 10}
+    diff = {"selection_diff_count": 0, "outcome_diff_count": 1}
+
+    result = main_module._experiment_judgement(base, changed, diff)
+
+    assert result["judgement"] != "no_practical_effect"
+    assert "execution_or_exit_effect" in result["reasons"]
 
 
 def test_experiment_capability_warning_for_light_profile_on_free_plan() -> None:

@@ -4,7 +4,14 @@ from copy import deepcopy
 
 import main
 from db import analyze_operation_data, get_database_path, initialize_database, save_portfolio_snapshot, save_scoring_results, save_trades
-from main import _profile_compare_row, build_profile_diff_analysis, build_profile_ranking, render_compare_profiles_markdown, write_backtest_summary
+from main import (
+    _profile_compare_row,
+    build_profile_diff_analysis,
+    build_profile_diff_analyses,
+    build_profile_ranking,
+    render_compare_profiles_markdown,
+    write_backtest_summary,
+)
 from profile_loader import load_profile
 
 
@@ -543,3 +550,118 @@ def test_profile_diff_analysis_marks_no_practical_effect(tmp_path) -> None:
         }
     )
     assert "No practical effect" in markdown
+
+
+def test_profile_diff_analysis_detects_trade_outcome_diff_without_entry_diff(tmp_path) -> None:
+    profile_21 = load_profile("rookie_dealer_02_v2_1")
+    profile_22 = load_profile("rookie_dealer_02_v2_2")
+    db_path = str(tmp_path / "ai_fund_lab.sqlite3")
+    profile_21["database"]["path"] = db_path
+    profile_22["database"]["path"] = db_path
+    initialize_database(profile_21, tmp_path)
+    for profile in [profile_21, profile_22]:
+        save_scoring_results(
+            profile,
+            tmp_path,
+            {
+                "date": "2026-03-06",
+                "scores": [
+                    {
+                        "code": "1001",
+                        "name": "Same Entry",
+                        "rank": 1,
+                        "total_score": 80,
+                        "selected": True,
+                    }
+                ],
+            },
+        )
+    save_trades(
+        profile_21,
+        tmp_path,
+        "2026-03-10",
+        [
+            {
+                "action": "SELL",
+                "status": "FILLED",
+                "code": "1001",
+                "name": "Same Entry",
+                "entry_date": "2026-03-06",
+                "exit_date": "2026-03-10",
+                "holding_days": 3,
+                "profit": 1000,
+                "profit_rate": 0.01,
+                "exit_reason": "利確",
+                "result": "WIN",
+            }
+        ],
+    )
+    save_trades(
+        profile_22,
+        tmp_path,
+        "2026-03-11",
+        [
+            {
+                "action": "SELL",
+                "status": "FILLED",
+                "code": "1001",
+                "name": "Same Entry",
+                "entry_date": "2026-03-06",
+                "exit_date": "2026-03-11",
+                "holding_days": 4,
+                "profit": 2000,
+                "profit_rate": 0.02,
+                "exit_reason": "最大保有期間到達",
+                "result": "WIN",
+            }
+        ],
+    )
+
+    analysis = build_profile_diff_analysis(
+        [profile_21, profile_22],
+        get_database_path(profile_21, tmp_path),
+        "2026-03-01",
+        "2026-03-31",
+    )
+
+    assert analysis is not None
+    assert analysis["selection_diff_count"] == 0
+    assert analysis["outcome_diff_count"] == 1
+    assert analysis["practical_effect"] == "execution_or_exit_effect"
+    assert analysis["no_practical_effect"] is False
+    assert analysis["trade_outcome_diff"]["same_entry_different_profit_count"] == 1
+
+
+def test_profile_diff_analyses_include_all_targets(tmp_path) -> None:
+    profile_21 = load_profile("rookie_dealer_02_v2_1")
+    profile_22 = load_profile("rookie_dealer_02_v2_2")
+    profile_24 = load_profile("rookie_dealer_02_v2_4")
+    db_path = str(tmp_path / "ai_fund_lab.sqlite3")
+    for profile in [profile_21, profile_22, profile_24]:
+        profile["database"]["path"] = db_path
+    initialize_database(profile_21, tmp_path)
+    save_scoring_results(
+        profile_21,
+        tmp_path,
+        {"date": "2026-03-06", "scores": [{"code": "1001", "name": "Base", "rank": 1, "selected": True}]},
+    )
+    save_scoring_results(
+        profile_22,
+        tmp_path,
+        {"date": "2026-03-06", "scores": [{"code": "1002", "name": "Target A", "rank": 1, "selected": True}]},
+    )
+    save_scoring_results(
+        profile_24,
+        tmp_path,
+        {"date": "2026-03-06", "scores": [{"code": "1003", "name": "Target B", "rank": 1, "selected": True}]},
+    )
+
+    analyses = build_profile_diff_analyses(
+        [profile_21, profile_22, profile_24],
+        get_database_path(profile_21, tmp_path),
+        "2026-03-01",
+        "2026-03-31",
+    )
+
+    assert [item["target_profile_id"] for item in analyses] == ["rookie_dealer_02_v2_2", "rookie_dealer_02_v2_4"]
+    assert [item["newly_selected_count"] for item in analyses] == [1, 1]
