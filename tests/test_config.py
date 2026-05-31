@@ -4,8 +4,11 @@ from profile_loader import load_profile
 
 
 def test_rookie_dealer_config_loads(config: dict) -> None:
-    assert config["dealer"]["id"] == "rookie_dealer_01"
-    assert config["profile_id"] == "rookie_dealer_01"
+    assert config["dealer"]["id"] == "rookie_dealer_02_v2_1"
+    assert config["profile_id"] == "rookie_dealer_02_v2_1"
+    assert config["data_provider"] == "jquants"
+    assert config["broker"]["provider"] == "paper"
+    assert config["_value_sources"]["profile"] == "config"
 
 
 def test_required_config_keys_exist(config: dict) -> None:
@@ -51,7 +54,10 @@ def test_rookie_dealer_02_v2_1_profile_uses_volume_filter() -> None:
     assert profile["profile_id"] == "rookie_dealer_02_v2_1"
     assert profile["profile_name"] == "新人ディーラー2号 v2.1"
     assert profile["execution"]["stop_loss_execution"] == "intraday_stop"
-    assert profile["selection"]["min_score"] == 70
+    assert profile["selection"]["min_score"] == 45
+    assert profile["selection"]["fallback_min_score"] == 40
+    assert profile["selection"]["top_pick_min_score"] == 40
+    assert profile["scoring"]["total_score_formula"] == "technical_plus_relative_strength_market_penalty"
     assert profile["selection"]["max_rsi_for_new_position"] == 65
     assert profile["selection"]["reject_overheated_rsi"] is True
     assert profile["volume_filter"]["enabled"] is True
@@ -74,14 +80,14 @@ def test_rookie_dealer_02_v2_2_profile_relaxes_risk_off_filter() -> None:
     assert profile["profile_id"] == "rookie_dealer_02_v2_2"
     assert profile["profile_name"] == "新人ディーラー2号 v2.2"
     assert profile["execution"]["stop_loss_execution"] == "intraday_stop"
-    assert profile["selection"]["min_score"] == 70
+    assert profile["selection"]["min_score"] == 45
     assert profile["selection"]["max_rsi_for_new_position"] == 65
     assert profile["selection"]["reject_overheated_rsi"] is True
     assert profile["volume_filter"]["enabled"] is True
     assert profile["volume_filter"]["min_volume_ratio"] == 2.0
     assert profile["market_filter"]["risk_off_buy_policy"] == "relaxed"
     assert profile["market_filter"]["risk_off_max_buy_orders"] == 2
-    assert profile["market_filter"]["risk_off_min_score"] == 75
+    assert profile["market_filter"]["risk_off_min_score"] == 50
     assert profile["broker"]["provider"] == "paper"
     assert profile["broker"]["live_trading_enabled"] is False
 
@@ -100,9 +106,9 @@ def test_rookie_dealer_02_v2_3_profile_raises_min_score_only() -> None:
 
     assert profile["profile_id"] == "rookie_dealer_02_v2_3"
     assert profile["profile_name"] == "新人ディーラー2号 v2.3"
-    assert profile["selection"]["min_score"] == 72
-    assert profile["selection"]["fallback_min_score"] == 72
-    assert profile["selection"]["top_pick_min_score"] == 72
+    assert profile["selection"]["min_score"] == 47
+    assert profile["selection"]["fallback_min_score"] == 47
+    assert profile["selection"]["top_pick_min_score"] == 47
     assert profile["selection"]["max_rsi_for_new_position"] == 65
     assert profile["selection"]["reject_overheated_rsi"] is True
     assert profile["volume_filter"]["enabled"] is True
@@ -110,16 +116,16 @@ def test_rookie_dealer_02_v2_3_profile_raises_min_score_only() -> None:
     assert profile["execution"]["stop_loss_execution"] == "intraday_stop"
     assert profile["broker"]["provider"] == "paper"
     assert profile["broker"]["live_trading_enabled"] is False
-    assert base["selection"]["min_score"] == 70
-    assert base["selection"]["fallback_min_score"] == 65
-    assert base["selection"]["top_pick_min_score"] == 65
+    assert base["selection"]["min_score"] == 45
+    assert base["selection"]["fallback_min_score"] == 40
+    assert base["selection"]["top_pick_min_score"] == 40
 
 
 def test_rookie_dealer_02_v2_dot_3_alias_loads() -> None:
     profile = load_profile("rookie_dealer_02_v2.3")
 
     assert profile["profile_id"] == "rookie_dealer_02_v2_3"
-    assert profile["selection"]["min_score"] == 72
+    assert profile["selection"]["min_score"] == 47
 
 
 def test_rookie_dealer_02_v2_4_profile_uses_conditional_selection() -> None:
@@ -129,11 +135,11 @@ def test_rookie_dealer_02_v2_4_profile_uses_conditional_selection() -> None:
 
     assert profile["profile_id"] == "rookie_dealer_02_v2_4"
     assert profile["profile_name"] == "新人ディーラー2号 v2.4"
-    assert profile["selection"]["min_score"] == 70
-    assert profile["selection"]["fallback_min_score"] == 65
-    assert profile["selection"]["top_pick_min_score"] == 65
+    assert profile["selection"]["min_score"] == 45
+    assert profile["selection"]["fallback_min_score"] == 40
+    assert profile["selection"]["top_pick_min_score"] == 40
     assert conditional["enabled"] is True
-    assert conditional["low_score_range"] == {"min": 65, "max": 69}
+    assert conditional["low_score_range"] == {"min": 40, "max": 44}
     assert conditional["allow_if"]["min_volume_ratio"] == 3.0
     assert conditional["allow_if"]["required_candlestick_signals"] == ["volume_confirmed_breakout"]
     assert conditional["allow_if"]["min_rsi"] == 50
@@ -149,13 +155,37 @@ def test_rookie_dealer_02_v2_dot_4_alias_loads() -> None:
     assert profile["selection"]["conditional_selection"]["enabled"] is True
 
 
+def test_rookie_dealer_02_v2_6_profile_uses_relative_strength_score() -> None:
+    base = load_profile("rookie_dealer_02_v2_1")
+    profile = load_profile("rookie_dealer_02_v2_6")
+
+    assert profile["profile_id"] == "rookie_dealer_02_v2_6"
+    assert profile["profile_name"] == "新人ディーラー2号 v2.6"
+    assert profile["features"]["relative_strength"] is True
+    assert profile["scoring"]["use_relative_strength_score"] is True
+    assert profile["scoring"]["total_score_formula"] == "technical_plus_relative_strength_market_penalty"
+    assert profile["scoring"]["relative_strength_score_weight"] == 10
+    assert profile["selection"]["min_score"] == 45
+    assert profile["selection"]["fallback_min_score"] == 40
+    assert profile["selection"]["top_pick_min_score"] == 40
+    assert base["features"].get("relative_strength") is None
+    assert "scoring" not in base or not base["scoring"].get("use_relative_strength_score")
+
+
+def test_rookie_dealer_02_v2_dot_6_alias_loads() -> None:
+    profile = load_profile("rookie_dealer_02_v2.6")
+
+    assert profile["profile_id"] == "rookie_dealer_02_v2_6"
+    assert profile["features"]["relative_strength"] is True
+
+
 def test_rookie_dealer_02_v3_profile_uses_score_and_volume_filters() -> None:
     profile = load_profile("rookie_dealer_02_v3")
 
     assert profile["profile_id"] == "rookie_dealer_02_v3"
     assert profile["profile_name"] == "新人ディーラー2号 v3"
     assert profile["execution"]["stop_loss_execution"] == "intraday_stop"
-    assert profile["selection"]["min_score"] == 74
+    assert profile["selection"]["min_score"] == 49
     assert profile["selection"]["max_rsi_for_new_position"] == 65
     assert profile["selection"]["reject_overheated_rsi"] is True
     assert profile["volume_filter"]["enabled"] is True

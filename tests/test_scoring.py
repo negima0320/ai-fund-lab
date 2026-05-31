@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from profile_loader import load_profile
 from scoring import _apply_selection_rules, _selection_config, score_real_candidates
 
 
@@ -59,12 +60,12 @@ def scored_item(
 def conditional_selection_config(config_copy: dict) -> dict:
     config_copy["selection"] = {
         **config_copy["selection"],
-        "min_score": 70,
-        "fallback_min_score": 65,
-        "top_pick_min_score": 65,
+        "min_score": 45,
+        "fallback_min_score": 40,
+        "top_pick_min_score": 40,
         "conditional_selection": {
             "enabled": True,
-            "low_score_range": {"min": 65, "max": 69},
+            "low_score_range": {"min": 40, "max": 44},
             "allow_if": {
                 "min_volume_ratio": 3.0,
                 "required_candlestick_signals": ["volume_confirmed_breakout"],
@@ -103,6 +104,60 @@ def test_scores_are_in_range(config_copy: dict) -> None:
     assert item["score_components"]["volume_score"] == item["volume_score"]
     assert item["score_components"]["rsi_score"] == item["rsi_score"]
     assert item["score_components"]["candlestick_score"] == item["candlestick_score"]
+
+
+def test_v2_1_total_score_uses_only_evaluated_components() -> None:
+    profile = load_profile("rookie_dealer_02_v2_1")
+    result = score_real_candidates(
+        [candidate("1001", volume_ratio=3.0, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02)],
+        "2026-03-06",
+        profile,
+        "test",
+    )
+    item = result["scores"][0]
+    expected_total = item["technical_score"] + item["market_context_score"] + item["penalty_score"]
+
+    assert "news" + "_score" not in item
+    assert "financial_score" not in item
+    assert "base_score" not in item
+    assert item["total_score"] == expected_total
+    assert item["score_components"]["component_total"] == item["total_score"]
+    assert item["score_components"]["matches_total_score"] is True
+
+
+def test_v2_1_old_70_threshold_maps_to_new_45_threshold() -> None:
+    profile = load_profile("rookie_dealer_02_v2_1")
+
+    assert profile["selection"]["min_score"] == 45
+    assert profile["selection"]["fallback_min_score"] == 40
+    assert profile["selection"]["top_pick_min_score"] == 40
+
+
+def test_v2_6_relative_strength_score_is_added_once() -> None:
+    profile = load_profile("rookie_dealer_02_v2_6")
+    item = score_real_candidates(
+        [
+            {
+                **candidate("1001", volume_ratio=3.0, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02),
+                "relative_strength_score": 10,
+            }
+        ],
+        "2026-03-06",
+        profile,
+        "test",
+    )["scores"][0]
+    expected_total = (
+        item["technical_score"]
+        + item["relative_strength_score"]
+        + item["market_context_score"]
+        + item["penalty_score"]
+    )
+
+    assert item["relative_strength_score"] == 10
+    assert "news" + "_score" not in item
+    assert "financial_score" not in item
+    assert item["total_score"] == expected_total
+    assert item["score_components"]["component_total"] == item["total_score"]
 
 
 def test_regular_selection_follows_config(config_copy: dict) -> None:
@@ -146,7 +201,7 @@ def test_conditional_selection_accepts_low_score_when_strong_conditions_match(co
     scored = [
         scored_item(
             "1001",
-            total_score=68,
+            total_score=43,
             volume_ratio=3.2,
             rsi=55,
             candlestick_signals=["volume_confirmed_breakout"],
@@ -165,7 +220,7 @@ def test_conditional_selection_rejects_low_score_when_conditions_do_not_match(co
     scored = [
         scored_item(
             "1001",
-            total_score=68,
+            total_score=43,
             volume_ratio=2.9,
             rsi=55,
             candlestick_signals=["bullish_candle"],
@@ -182,11 +237,11 @@ def test_conditional_selection_rejects_low_score_when_conditions_do_not_match(co
     assert "candlestick_signal" in scored[0]["rejected_reason"]
 
 
-def test_conditional_selection_keeps_regular_selection_for_score_70_or_more(config_copy: dict) -> None:
+def test_conditional_selection_keeps_regular_selection_for_regular_score_or_more(config_copy: dict) -> None:
     scored = [
         scored_item(
             "1001",
-            total_score=70,
+            total_score=45,
             volume_ratio=2.1,
             rsi=55,
             candlestick_signals=["bullish_candle"],
@@ -200,11 +255,11 @@ def test_conditional_selection_keeps_regular_selection_for_score_70_or_more(conf
     assert scored[0]["selection_reason"] == "スコア基準を満たしたため採用"
 
 
-def test_conditional_selection_rejects_score_under_65(config_copy: dict) -> None:
+def test_conditional_selection_rejects_score_under_fallback(config_copy: dict) -> None:
     scored = [
         scored_item(
             "1001",
-            total_score=64,
+            total_score=39,
             volume_ratio=4.0,
             rsi=55,
             candlestick_signals=["volume_confirmed_breakout"],
@@ -215,14 +270,14 @@ def test_conditional_selection_rejects_score_under_65(config_copy: dict) -> None
 
     assert scored[0]["selected"] is False
     assert scored[0]["conditional_selection_checked"] is False
-    assert scored[0]["rejected_reason"] == "トップピック基準65点を下回るため落選"
+    assert scored[0]["rejected_reason"] == "トップピック基準40点を下回るため落選"
 
 
 def test_v2_1_style_selection_still_allows_top_pick_without_conditional_rules(config_copy: dict) -> None:
     scored = [
         scored_item(
             "1001",
-            total_score=68,
+            total_score=43,
             volume_ratio=2.1,
             rsi=55,
             candlestick_signals=["bullish_candle"],
@@ -233,7 +288,7 @@ def test_v2_1_style_selection_still_allows_top_pick_without_conditional_rules(co
     _apply_selection_rules(scored, selection_config, disabled_market_filter(), "neutral")
 
     assert scored[0]["selected"] is True
-    assert scored[0]["selection_reason"] == "通常基準70点には届かなかったが、ノートレード回避ルールにより最上位候補として採用"
+    assert scored[0]["selection_reason"] == "通常基準45点には届かなかったが、ノートレード回避ルールにより最上位候補として採用"
 
 
 def test_risk_off_blocks_low_score_candidate(config_copy: dict) -> None:
@@ -287,6 +342,7 @@ def test_neutral_keeps_existing_top_pick_behavior(config_copy: dict) -> None:
 
 
 def test_existing_profile_keeps_rsi_filter_disabled(config_copy: dict) -> None:
+    config_copy = load_profile("rookie_dealer_01")
     result = score_real_candidates(
         [candidate("1001", volume_ratio=3.0, turnover_value=2_500_000_000, rsi=71, volatility=0.02)],
         "2026-03-06",

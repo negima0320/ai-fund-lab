@@ -5,10 +5,12 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
 from argparse import ArgumentParser
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -20,9 +22,11 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only on minimal loca
     yaml = None
 
 from article import generate_note_article
+from benchmark_provider import build_relative_strength_benchmark
 from ai_decision import apply_ai_decision, build_ai_decision_log, build_ai_decision_provider
 from ai_analysis import export_ai_dataset, export_ai_summary, record_ai_analysis_export
 from charts import generate_charts_from_summary
+from broker import LiveTradingDisabledError, account_snapshot, build_broker, render_account_snapshot
 from commentary import (
     generate_buy_comment,
     generate_daily_comment,
@@ -32,6 +36,8 @@ from commentary import (
 )
 from config_version import attach_config_version, config_version_from, load_config as load_versioned_config
 from data_provider import DummyDataProvider, JQuantsDataProvider
+from demo_auto_order import DemoAutoOrderBlocked, execute_demo_auto_orders, latest_order_preview_path, load_operation_schedule
+from earnings_calendar import earnings_counts
 from db import (
     analyze_operation_data,
     get_database_path,
@@ -49,6 +55,8 @@ from db import (
 )
 from feature_analysis import build_feature_analysis, render_feature_analysis_markdown, score_detail_groups
 from indicators import calculate_indicators
+from investor_context import INVESTOR_CONTEXT_EMPTY, build_investor_context
+from jquants_plan import jquants_capability_status, jquants_has_capability, jquants_profile_compatibility, normalize_jquants_plan
 from market_context import build_market_context, neutral_market_context
 from news_provider import build_news_provider
 from paper_trade import execute_paper_trade_day, execute_real_data_paper_trade, initial_live_paper_state, initial_paper_state
@@ -70,34 +78,63 @@ from trade_metrics import profit_factor_metrics
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config" / "rookie_dealer.yaml"
+PROVIDER_CONFIG_PATH = ROOT / "config" / "provider.yaml"
 ACTIVE_PROFILE_ID = DEFAULT_PROFILE_ID
 BACKTEST_MODE_ACTIVE = False
 BACKTEST_DAY_LOG_PREFIX = ""
+FAST_ANALYSIS_ACTIVE = False
+JQUANTS_PLAN_OVERRIDE: str | None = None
+FORCE_REFRESH_ACTIVE = False
+BACKTEST_PROFILE_TIMINGS: dict[str, float] = {}
+RUNTIME_SETTINGS: dict[str, Any] = {}
 
 
 def main() -> None:
-    global ACTIVE_PROFILE_ID
+    global ACTIVE_PROFILE_ID, FAST_ANALYSIS_ACTIVE, JQUANTS_PLAN_OVERRIDE, FORCE_REFRESH_ACTIVE, RUNTIME_SETTINGS
     _enable_line_buffered_output()
     args = parse_args()
-    ACTIVE_PROFILE_ID = args.profile
+    RUNTIME_SETTINGS = resolve_runtime_settings(args)
+    ACTIVE_PROFILE_ID = RUNTIME_SETTINGS["profile_id"]
+    FAST_ANALYSIS_ACTIVE = bool(args.fast_analysis)
+    JQUANTS_PLAN_OVERRIDE = args.jquants_plan
+    FORCE_REFRESH_ACTIVE = bool(args.force_refresh)
+    provider_name = RUNTIME_SETTINGS["provider"]
     if args.mode == "help":
         run_help()
         return
     if args.mode == "preflight":
-        run_preflight(args.profile)
+        run_preflight(RUNTIME_SETTINGS["profile_id"])
+        return
+    if args.mode == "list-profiles":
+        run_list_profiles()
+        return
+    if args.mode == "profile-info":
+        run_profile_info(RUNTIME_SETTINGS["profile_id"])
         return
     if args.mode == "compare-profiles":
         run_compare_profiles(args.profiles, args.start_date, args.end_date)
+        return
+    if args.mode == "compare-experiments":
+        run_compare_experiments(args.base_profile, args.start_date, args.end_date)
+        return
+    if args.mode == "run-experiments":
+        run_experiments(args.base_profile, args.start_date, args.end_date, args.profiles, args.skip_backtest)
         return
     config = load_config(CONFIG_PATH)
     if args.mode == "status":
         run_status(config, args.output_format)
         return
     if args.mode == "healthcheck":
-        run_healthcheck(args.provider)
+        run_healthcheck(provider_name)
         return
     if args.mode == "tachibana-healthcheck":
         run_tachibana_healthcheck(args.tachibana_env)
+        return
+    if args.mode == "account-snapshot":
+        run_account_snapshot(config)
+        return
+    if args.mode == "demo-auto-order":
+        run_demo_auto_order(config)
         return
     if args.mode == "init-db":
         run_init_db(config)
@@ -109,37 +146,37 @@ def main() -> None:
         run_release_notes(args.since, args.until)
         return
     if args.mode == "full-paper-run":
-        run_full_paper_run(args.provider, args.start_date, args.end_date)
+        run_full_paper_run(provider_name, args.start_date, args.end_date)
         return
     if args.mode == "list-stocks":
-        run_list_stocks(args.provider)
+        run_list_stocks(provider_name)
         return
     if args.mode == "fetch-prices":
-        run_fetch_prices(args.provider, args.date)
+        run_fetch_prices(provider_name, args.date)
         return
     if args.mode == "calculate-indicators":
-        run_calculate_indicators(args.provider, args.date)
+        run_calculate_indicators(provider_name, args.date)
         return
     if args.mode == "screen":
-        run_screen(args.provider, args.date)
+        run_screen(provider_name, args.date)
         return
     if args.mode == "score":
-        run_score(args.provider, args.date)
+        run_score(provider_name, args.date)
         return
     if args.mode == "trade":
-        run_trade(args.provider, args.date)
+        run_trade(provider_name, args.date)
         return
     if args.mode == "preview-orders":
-        run_preview_orders(args.provider, args.date)
+        run_preview_orders(provider_name, args.date)
         return
     if args.mode == "publish-article":
         run_publish_article(args.date, args.note_url)
         return
     if args.mode == "run-daily":
-        run_daily(args.provider, args.date)
+        run_daily(provider_name, args.date)
         return
     if args.mode == "backtest":
-        run_backtest(args.provider, args.start_date, args.end_date)
+        run_backtest(provider_name, args.start_date, args.end_date)
         return
     if args.mode == "export-ai-dataset":
         run_export_ai_dataset(config, args.start_date, args.end_date)
@@ -215,6 +252,7 @@ def main() -> None:
         write_json(paths["reflections"], reflection_log)
         write_text(paths["report"], report_md)
         write_text(paths["article"], article_md)
+        _update_article_index(paths["article"], run_date.isoformat(), "draft", config)
 
         daily_summaries.append(portfolio_summary)
         all_closed_trades = paper_trade_log["all_closed_trades"]
@@ -258,8 +296,12 @@ def parse_args() -> Any:
             "release-notes",
             "full-paper-run",
             "preflight",
+            "list-profiles",
+            "profile-info",
             "healthcheck",
             "tachibana-healthcheck",
+            "account-snapshot",
+            "demo-auto-order",
             "list-stocks",
             "fetch-prices",
             "calculate-indicators",
@@ -273,6 +315,8 @@ def parse_args() -> Any:
             "export-ai-dataset",
             "export-ai-summary",
             "compare-profiles",
+            "compare-experiments",
+            "run-experiments",
         ],
         default="demo",
         help="Execution mode. Use demo, healthcheck, list-stocks, fetch-prices, or calculate-indicators.",
@@ -280,19 +324,37 @@ def parse_args() -> Any:
     parser.add_argument(
         "--provider",
         choices=["dummy", "jquants"],
-        default="dummy",
-        help="Provider for healthcheck mode.",
+        default=None,
+        help="Temporary provider override. If omitted, config/provider.yaml is used.",
+    )
+    parser.add_argument(
+        "--jquants-plan",
+        choices=["free", "light"],
+        default=None,
+        help="Override J-Quants contract plan. Config default: free.",
     )
     parser.add_argument(
         "--profile",
-        default=DEFAULT_PROFILE_ID,
-        help="AI fund profile id under config/profiles. Default: rookie_dealer_01.",
+        default=None,
+        help="Temporary profile override. If omitted, config/provider.yaml profile.default is used.",
     )
     parser.add_argument(
         "--profiles",
         nargs="+",
         default=None,
         help="Profile ids for compare-profiles mode.",
+    )
+    parser.add_argument(
+        "--base",
+        dest="base_profile",
+        default=None,
+        help="Baseline profile id for compare-experiments mode.",
+    )
+    parser.add_argument(
+        "--base-profile",
+        dest="base_profile",
+        default=None,
+        help="Baseline profile id for experiment batch modes.",
     )
     parser.add_argument(
         "--env",
@@ -338,7 +400,23 @@ def parse_args() -> Any:
         default="text",
         help="Output format for status mode.",
     )
+    parser.add_argument(
+        "--fast-analysis",
+        action="store_true",
+        help="Reduce heavy backtest analysis logs without changing trading results.",
+    )
+    parser.add_argument(
+        "--force-refresh",
+        action="store_true",
+        help="Refresh cached provider data such as J-Quants earnings calendar.",
+    )
+    parser.add_argument(
+        "--skip-backtest",
+        action="store_true",
+        help="Use existing backtest/analyze results for run-experiments.",
+    )
     args = parser.parse_args()
+    _apply_configured_date_defaults(args)
     if args.days < 1:
         parser.error("--days must be 1 or greater.")
     if args.mode in {"fetch-prices", "calculate-indicators", "screen", "score", "trade", "preview-orders", "publish-article", "run-daily"} and not args.date:
@@ -367,6 +445,26 @@ def parse_args() -> Any:
             parser.error("--start-date and --end-date must be in YYYY-MM-DD format.")
         if start_date > end_date:
             parser.error("--start-date must be earlier than or equal to --end-date.")
+    if args.mode == "compare-experiments" and (args.start_date or args.end_date):
+        if not args.start_date or not args.end_date:
+            parser.error("--start-date and --end-date must be specified together for compare-experiments mode.")
+        try:
+            start_date = date.fromisoformat(args.start_date)
+            end_date = date.fromisoformat(args.end_date)
+        except ValueError:
+            parser.error("--start-date and --end-date must be in YYYY-MM-DD format.")
+        if start_date > end_date:
+            parser.error("--start-date must be earlier than or equal to --end-date.")
+    if args.mode == "run-experiments":
+        if not args.start_date or not args.end_date:
+            parser.error("--start-date YYYY-MM-DD and --end-date YYYY-MM-DD are required for run-experiments mode.")
+        try:
+            start_date = date.fromisoformat(args.start_date)
+            end_date = date.fromisoformat(args.end_date)
+        except ValueError:
+            parser.error("--start-date and --end-date must be in YYYY-MM-DD format.")
+        if start_date > end_date:
+            parser.error("--start-date must be earlier than or equal to --end-date.")
     if args.mode == "release-notes":
         if not args.since or not args.until:
             parser.error("--since YYYY-MM-DD and --until YYYY-MM-DD are required for release-notes mode.")
@@ -380,12 +478,80 @@ def parse_args() -> Any:
     return args
 
 
+def _apply_configured_date_defaults(args: Any) -> None:
+    if args.mode not in {"backtest", "full-paper-run", "export-ai-dataset", "export-ai-summary", "compare-profiles", "run-experiments"}:
+        return
+    provider_config = _load_provider_runtime_config()
+    if not args.start_date:
+        args.start_date = _config_get(provider_config, ("backtest", "start_date"))
+    if not args.end_date:
+        args.end_date = _config_get(provider_config, ("backtest", "end_date"))
+
+
+def resolve_runtime_settings(args: Any, provider_config: dict[str, Any] | None = None) -> dict[str, Any]:
+    config = provider_config if provider_config is not None else _load_provider_runtime_config()
+    profile_id, profile_source = _resolve_setting_value(
+        getattr(args, "profile", None),
+        _config_get(config, ("profile", "default")),
+        DEFAULT_PROFILE_ID,
+    )
+    provider_name, provider_source = _resolve_setting_value(
+        getattr(args, "provider", None),
+        config.get("data_provider") or _config_get(config, ("provider", "default")),
+        "jquants",
+    )
+    jquants_plan, jquants_plan_source = _resolve_setting_value(
+        getattr(args, "jquants_plan", None),
+        _config_get(config, ("jquants", "plan")),
+        "free",
+    )
+    broker_mode, broker_source = _resolve_setting_value(
+        None,
+        _config_get(config, ("broker", "mode")) or _config_get(config, ("broker", "provider")),
+        "paper",
+    )
+    auto_order_enabled, auto_order_source = _resolve_setting_value(
+        None,
+        _config_get(config, ("operation", "auto_order_enabled")),
+        False,
+    )
+    return {
+        "profile_id": str(profile_id),
+        "provider": str(provider_name),
+        "jquants_plan": normalize_jquants_plan(str(jquants_plan)),
+        "broker_mode": str(broker_mode),
+        "auto_order_enabled": bool(auto_order_enabled),
+        "sources": {
+            "profile": profile_source,
+            "provider": provider_source,
+            "jquants_plan": jquants_plan_source,
+            "broker": broker_source,
+            "auto_order_enabled": auto_order_source,
+        },
+    }
+
+
+def _resolve_setting_value(cli_value: Any, config_value: Any, default_value: Any) -> tuple[Any, str]:
+    if cli_value is not None and cli_value != "":
+        return cli_value, "cli"
+    if config_value is not None and config_value != "":
+        return config_value, "config"
+    return default_value, "default"
+
+
 def run_healthcheck(provider_name: str) -> None:
     if provider_name != "jquants":
         raise SystemExit("healthcheck mode currently supports --provider jquants only.")
 
+    config = load_config(CONFIG_PATH)
     try:
-        provider = JQuantsDataProvider(ROOT / ".env")
+        provider = JQuantsDataProvider(
+            ROOT / ".env",
+            plan=_jquants_plan(config),
+            requests_per_minute=_jquants_requests_per_minute(config),
+            parallel_fetch=_jquants_parallel_fetch(config),
+            max_parallel_requests=_jquants_max_parallel_requests(config),
+        )
         listed_stocks = provider.get_listed_stocks()
     except RuntimeError as exc:
         print(f"J-Quants connection failed: {exc}")
@@ -394,6 +560,7 @@ def run_healthcheck(provider_name: str) -> None:
     payload = {
         "checked_at": datetime.now().isoformat(timespec="seconds"),
         "provider": "jquants",
+        "plan": _jquants_plan(config),
         "endpoint": "/equities/master",
         "listed_stocks_count": len(listed_stocks),
         "sample": listed_stocks[:5],
@@ -402,6 +569,7 @@ def run_healthcheck(provider_name: str) -> None:
 
     print("J-Quants connection successful")
     print("provider: jquants")
+    print(f"plan: {_jquants_plan(config)}")
     print(f"listed stocks: {len(listed_stocks)}")
 
 
@@ -527,6 +695,53 @@ def run_init_db(config: dict[str, Any]) -> None:
     print(f"path: {db_path.relative_to(ROOT)}")
 
 
+def run_account_snapshot(config: dict[str, Any]) -> None:
+    state_path = ROOT / "logs" / "portfolio" / profile_id_from(config) / "state.json"
+    state = read_json(state_path) if state_path.exists() else initial_live_paper_state(config)
+    try:
+        broker = build_broker(state, config)
+        snapshot = account_snapshot(broker)
+    except (LiveTradingDisabledError, NotImplementedError, ValueError) as exc:
+        raise SystemExit(f"account-snapshot failed: {exc}") from exc
+    output_dir = ROOT / "reports" / profile_id_from(config) / "broker"
+    json_path = output_dir / "account_snapshot_latest.json"
+    markdown_path = output_dir / "account_snapshot_latest.md"
+    write_json(json_path, snapshot)
+    write_text(markdown_path, render_account_snapshot(snapshot))
+    print(render_account_snapshot(snapshot))
+    print(f"json: {json_path.relative_to(ROOT)}")
+    print(f"markdown: {markdown_path.relative_to(ROOT)}")
+
+
+def run_demo_auto_order(config: dict[str, Any]) -> None:
+    schedule = load_operation_schedule(ROOT / "config" / "operation_schedule.yaml")
+    profile_id = profile_id_from(config)
+    preview_path = latest_order_preview_path(ROOT, profile_id)
+    preview = read_json(preview_path)
+    orders = preview.get("preview_orders", [])
+    state_path = ROOT / "logs" / "portfolio" / profile_id / "state.json"
+    state = read_json(state_path) if state_path.exists() else initial_live_paper_state(config)
+    try:
+        broker = build_broker(state, config)
+        result = execute_demo_auto_orders(config, schedule, orders, broker)
+    except (DemoAutoOrderBlocked, LiveTradingDisabledError, NotImplementedError, ValueError, FileNotFoundError) as exc:
+        raise SystemExit(f"demo-auto-order stopped: {exc}") from exc
+    log_dir = ROOT / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "demo_orders.log"
+    record = {
+        "generated_at": datetime.now(ZoneInfo("Asia/Tokyo")).isoformat(timespec="seconds"),
+        "profile_id": profile_id,
+        "preview_path": str(preview_path.relative_to(ROOT)),
+        **result,
+    }
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    print(f"demo auto order status: {result['status']}")
+    print(f"orders: {len(result['orders'])}")
+    print(f"log: {log_path.relative_to(ROOT)}")
+
+
 def run_analyze(config: dict[str, Any], start_date: str | None = None, end_date: str | None = None) -> None:
     try:
         analysis = analyze_operation_data(config, ROOT)
@@ -647,6 +862,417 @@ def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_
             print("No practical effect")
     print(f"markdown: {markdown_path.relative_to(ROOT)}")
     print(f"json: {json_path.relative_to(ROOT)}")
+
+
+PROFILE_REGISTRY_PATH = ROOT / "config" / "profile_registry.yaml"
+
+
+def load_profile_registry(path: Path = PROFILE_REGISTRY_PATH) -> dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"Profile registry not found: {path}")
+    return load_versioned_config(path)
+
+
+def registry_profiles(registry: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
+    payload = registry or load_profile_registry()
+    profiles = payload.get("profiles", {})
+    if not isinstance(profiles, dict):
+        raise ValueError("profile_registry.yaml must contain a profiles mapping")
+    return {str(profile_id): dict(value or {}) for profile_id, value in profiles.items()}
+
+
+def registry_profile_ids(registry: dict[str, Any] | None = None) -> list[str]:
+    return sorted(registry_profiles(registry).keys())
+
+
+def registry_experiment_profile_ids(base_profile_id: str, registry: dict[str, Any] | None = None) -> list[str]:
+    profiles = registry_profiles(registry)
+    return [
+        profile_id
+        for profile_id, item in sorted(profiles.items())
+        if item.get("role") == "experiment" and str(item.get("compare_to") or base_profile_id) == base_profile_id
+    ]
+
+
+def run_list_profiles() -> None:
+    rows = build_profile_registry_rows(load_profile_registry())
+    print("profile_id | role | required_plan | enabled_features | description")
+    for row in rows:
+        print(
+            f"{row['profile_id']} | {row['role']} | {row['required_plan']} | "
+            f"{row['enabled_features'] or '-'} | {row['description']}"
+        )
+
+
+def build_profile_registry_rows(registry: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    for profile_id, item in registry_profiles(registry).items():
+        features = item.get("features", {}) if isinstance(item.get("features"), dict) else {}
+        enabled_features = [feature for feature, enabled in features.items() if bool(enabled)]
+        rows.append(
+            {
+                "profile_id": profile_id,
+                "role": item.get("role", ""),
+                "required_plan": item.get("required_plan", ""),
+                "enabled_features": ", ".join(enabled_features),
+                "description": item.get("description", ""),
+            }
+        )
+    return sorted(rows, key=lambda row: row["profile_id"])
+
+
+def run_profile_info(profile_id: str) -> None:
+    info = build_profile_info(profile_id, load_profile_registry())
+    print(f"profile_id: {info['profile_id']}")
+    print(f"role: {info['role']}")
+    print(f"description: {info['description']}")
+    print(f"required_plan: {info['required_plan']}")
+    print(f"score formula: {info['score_formula']}")
+    print(f"required capabilities: {', '.join(info['required_capabilities']) or 'none'}")
+    print(f"enabled features: {', '.join(info['enabled_features']) or 'none'}")
+    print(f"enabled filters: {', '.join(info['enabled_filters']) or 'none'}")
+    print(f"recommended compare command: {info['recommended_compare_command']}")
+
+
+def build_profile_info(profile_id: str, registry: dict[str, Any]) -> dict[str, Any]:
+    profiles = registry_profiles(registry)
+    if profile_id not in profiles:
+        raise SystemExit(f"Profile not found in registry: {profile_id}")
+    item = profiles[profile_id]
+    config = load_profile(profile_id)
+    features = item.get("features", {}) if isinstance(item.get("features"), dict) else {}
+    enabled_features = [feature for feature, enabled in features.items() if bool(enabled)]
+    enabled_filters = []
+    if config.get("volume_filter", {}).get("enabled"):
+        enabled_filters.append("volume_filter")
+    if config.get("earnings_filter", {}).get("enabled"):
+        enabled_filters.append("earnings_filter")
+    if config.get("market_filter", {}).get("enabled", True):
+        enabled_filters.append("market_filter")
+    compare_to = item.get("compare_to") or ""
+    command = (
+        f"python src/main.py --mode compare-profiles --profiles {compare_to} {profile_id} "
+        "--start-date YYYY-MM-DD --end-date YYYY-MM-DD"
+        if compare_to
+        else "N/A"
+    )
+    return {
+        "profile_id": profile_id,
+        "role": item.get("role", ""),
+        "description": item.get("description", ""),
+        "required_plan": item.get("required_plan", ""),
+        "score_formula": config.get("scoring", {}).get("total_score_formula", "technical_score + market_context_score + penalty_score"),
+        "required_capabilities": sorted(jquants_profile_compatibility(profile_id, item.get("required_plan", "free"))["profile_required_capabilities"]),
+        "enabled_features": enabled_features,
+        "enabled_filters": enabled_filters,
+        "recommended_compare_command": command,
+    }
+
+
+def run_compare_experiments(base_profile_id: str | None, start_date_text: str | None = None, end_date_text: str | None = None) -> None:
+    registry = load_profile_registry()
+    base = base_profile_id or _registry_baseline_profile_id(registry)
+    summary = build_experiment_comparison_summary(base, registry, start_date_text, end_date_text)
+    output_dir = ROOT / "reports" / "profile_comparisons"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    markdown_path = output_dir / "experiment_summary.md"
+    json_path = output_dir / "experiment_summary.json"
+    write_text(markdown_path, render_experiment_summary_markdown(summary))
+    write_json(json_path, summary)
+    print("experiment comparison summary completed")
+    print(f"base_profile: {base}")
+    print(f"experiments: {', '.join(summary['experiment_profiles']) or 'none'}")
+    print(f"markdown: {markdown_path.relative_to(ROOT)}")
+    print(f"json: {json_path.relative_to(ROOT)}")
+
+
+def run_experiments(
+    base_profile_id: str | None,
+    start_date_text: str,
+    end_date_text: str,
+    requested_profiles: list[str] | None = None,
+    skip_backtest: bool = False,
+) -> None:
+    global ACTIVE_PROFILE_ID
+    registry = load_profile_registry()
+    base = base_profile_id or _registry_baseline_profile_id(registry)
+    experiment_ids = select_experiment_profiles(base, registry, requested_profiles)
+    profile_ids = [base, *experiment_ids]
+    previous_profile = ACTIVE_PROFILE_ID
+    try:
+        if not skip_backtest:
+            for profile_id in profile_ids:
+                ACTIVE_PROFILE_ID = profile_id
+                print(f"run-experiments backtest start: {profile_id}")
+                run_backtest("jquants", start_date_text, end_date_text)
+                print(f"run-experiments analyze start: {profile_id}")
+                run_analyze(load_config(CONFIG_PATH), start_date_text, end_date_text)
+        try:
+            run_compare_profiles(profile_ids, start_date_text, end_date_text)
+        except SystemExit as exc:
+            print(f"run-experiments compare warning: {exc}")
+        summary = build_experiment_batch_summary(base, experiment_ids, registry, start_date_text, end_date_text)
+        write_experiment_batch_outputs(summary, start_date_text, end_date_text)
+    finally:
+        ACTIVE_PROFILE_ID = previous_profile
+
+
+def select_experiment_profiles(
+    base_profile_id: str,
+    registry: dict[str, Any],
+    requested_profiles: list[str] | None = None,
+) -> list[str]:
+    experiments = registry_experiment_profile_ids(base_profile_id, registry)
+    if not requested_profiles:
+        return experiments
+    requested = [profile_id for profile_id in requested_profiles if profile_id != base_profile_id]
+    unknown = sorted(set(requested) - set(experiments))
+    if unknown:
+        raise SystemExit(f"Profiles are not experiments for base {base_profile_id}: {', '.join(unknown)}")
+    return [profile_id for profile_id in experiments if profile_id in set(requested)]
+
+
+def build_experiment_batch_summary(
+    base_profile_id: str,
+    experiment_ids: list[str],
+    registry: dict[str, Any],
+    start_date_text: str,
+    end_date_text: str,
+) -> dict[str, Any]:
+    profiles = registry_profiles(registry)
+    db_path = get_database_path(load_profile(base_profile_id), ROOT)
+    rows_by_profile: dict[str, dict[str, Any]] = {}
+    if db_path.exists():
+        for profile_id in [base_profile_id, *experiment_ids]:
+            rows_by_profile[profile_id] = _profile_compare_row(load_profile(profile_id), db_path, start_date_text, end_date_text)
+    base_row = rows_by_profile.get(base_profile_id, {})
+    experiment_rows = []
+    for profile_id in experiment_ids:
+        registry_item = profiles[profile_id]
+        row = rows_by_profile.get(profile_id, {"profile_id": profile_id})
+        diff = _experiment_diff(base_profile_id, profile_id, db_path, start_date_text, end_date_text) if db_path.exists() else {}
+        practical_effect = bool(diff.get("newly_selected_count") or diff.get("removed_count"))
+        candidate = _experiment_candidate(base_row, row)
+        experiment_rows.append(
+            {
+                "profile_id": profile_id,
+                "description": registry_item.get("description", ""),
+                "required_plan": registry_item.get("required_plan", ""),
+                "enabled_features": _enabled_registry_features(registry_item),
+                "final_assets": row.get("final_assets"),
+                "net_cumulative_profit": row.get("net_cumulative_profit"),
+                "win_rate": row.get("win_rate"),
+                "profit_factor": row.get("profit_factor"),
+                "expectancy": row.get("expectancy"),
+                "max_drawdown": row.get("max_drawdown"),
+                "total_trades": row.get("total_trades"),
+                "newly_selected_count": diff.get("newly_selected_count", 0),
+                "removed_count": diff.get("removed_count", 0),
+                "practical_effect": "yes" if practical_effect else "no",
+                "candidate": "yes" if candidate else "no",
+            }
+        )
+    return {
+        "base_profile": base_profile_id,
+        "start_date": start_date_text,
+        "end_date": end_date_text,
+        "profiles": [base_profile_id, *experiment_ids],
+        "base": {
+            "profile_id": base_profile_id,
+            "description": profiles.get(base_profile_id, {}).get("description", ""),
+            "required_plan": profiles.get(base_profile_id, {}).get("required_plan", ""),
+            "enabled_features": _enabled_registry_features(profiles.get(base_profile_id, {})),
+            **base_row,
+        },
+        "experiments": experiment_rows,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def _experiment_diff(base_profile_id: str, target_profile_id: str, db_path: Path, start_date_text: str, end_date_text: str) -> dict[str, Any]:
+    try:
+        payload = build_profile_diff_analysis(
+            [load_profile(base_profile_id), load_profile(target_profile_id)],
+            db_path,
+            start_date_text,
+            end_date_text,
+        )
+    except Exception:
+        return {}
+    return payload or {}
+
+
+def _enabled_registry_features(item: dict[str, Any]) -> list[str]:
+    features = item.get("features", {}) if isinstance(item.get("features"), dict) else {}
+    return [feature for feature, enabled in features.items() if bool(enabled)]
+
+
+def _experiment_candidate(base_row: dict[str, Any], row: dict[str, Any]) -> bool:
+    base_profit = _to_float(base_row.get("net_cumulative_profit"))
+    target_profit = _to_float(row.get("net_cumulative_profit"))
+    base_pf = _to_float(base_row.get("profit_factor"))
+    target_pf = _to_float(row.get("profit_factor"))
+    base_dd = _to_float(base_row.get("max_drawdown"))
+    target_dd = _to_float(row.get("max_drawdown"))
+    base_trades = _to_float(base_row.get("total_trades"))
+    target_trades = _to_float(row.get("total_trades"))
+    if None in {base_profit, target_profit, base_pf, target_pf, base_dd, target_dd, base_trades, target_trades}:
+        return False
+    trade_count_ok = target_trades >= base_trades * 0.5
+    return bool(target_profit > base_profit and target_pf >= base_pf and target_dd >= base_dd and trade_count_ok)
+
+
+def write_experiment_batch_outputs(summary: dict[str, Any], start_date_text: str, end_date_text: str) -> tuple[Path, Path]:
+    output_dir = ROOT / "reports" / "experiments" / f"{start_date_text}_to_{end_date_text}"
+    profiles_dir = output_dir / "profiles"
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    markdown_path = output_dir / "experiment_summary.md"
+    json_path = output_dir / "experiment_summary.json"
+    write_text(markdown_path, render_experiment_batch_markdown(summary))
+    write_json(json_path, summary)
+    for row in [summary.get("base", {}), *summary.get("experiments", [])]:
+        profile_id = row.get("profile_id")
+        if profile_id:
+            write_text(profiles_dir / f"{profile_id}.md", render_experiment_profile_markdown(row))
+    print("experiment batch completed")
+    print(f"summary_md: {markdown_path.relative_to(ROOT)}")
+    print(f"summary_json: {json_path.relative_to(ROOT)}")
+    return markdown_path, json_path
+
+
+def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
+    lines = [
+        "# Experiment Batch Summary",
+        "",
+        f"- base_profile: {summary.get('base_profile')}",
+        f"- period: {summary.get('start_date')} to {summary.get('end_date')}",
+        f"- generated_at: {summary.get('generated_at')}",
+        "",
+        "## Results",
+        "",
+        "| profile_id | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | practical_effect | candidate |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for row in summary.get("experiments", []):
+        lines.append(_experiment_summary_table_row(row))
+    return "\n".join(lines)
+
+
+def _experiment_summary_table_row(row: dict[str, Any]) -> str:
+    enabled = ", ".join(row.get("enabled_features") or []) or "-"
+    return (
+        f"| {row.get('profile_id')} | {row.get('description', '')} | {row.get('required_plan', '')} | {enabled} | "
+        f"{_format_optional_number(row.get('final_assets'))} | {_format_optional_number(row.get('net_cumulative_profit'))} | "
+        f"{_format_optional_percent(row.get('win_rate'))} | {_format_optional_number(row.get('profit_factor'))} | "
+        f"{_format_optional_percent(row.get('expectancy'))} | {_format_optional_percent(row.get('max_drawdown'))} | "
+        f"{row.get('total_trades')} | {row.get('newly_selected_count')} | {row.get('removed_count')} | "
+        f"{row.get('practical_effect')} | {row.get('candidate')} |"
+    )
+
+
+def render_experiment_profile_markdown(row: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            f"# {row.get('profile_id')}",
+            "",
+            f"- description: {row.get('description', '')}",
+            f"- required_plan: {row.get('required_plan', '')}",
+            f"- enabled_features: {', '.join(row.get('enabled_features') or []) or '-'}",
+            f"- final_assets: {_format_optional_number(row.get('final_assets'))}",
+            f"- net_cumulative_profit: {_format_optional_number(row.get('net_cumulative_profit'))}",
+            f"- win_rate: {_format_optional_percent(row.get('win_rate'))}",
+            f"- profit_factor: {_format_optional_number(row.get('profit_factor'))}",
+            f"- expectancy: {_format_optional_percent(row.get('expectancy'))}",
+            f"- max_drawdown: {_format_optional_percent(row.get('max_drawdown'))}",
+            f"- total_trades: {row.get('total_trades')}",
+            f"- newly_selected_count: {row.get('newly_selected_count', 0)}",
+            f"- removed_count: {row.get('removed_count', 0)}",
+            f"- practical_effect: {row.get('practical_effect', 'no')}",
+            f"- candidate: {row.get('candidate', 'no')}",
+        ]
+    )
+
+
+def _registry_baseline_profile_id(registry: dict[str, Any]) -> str:
+    for profile_id, item in registry_profiles(registry).items():
+        if item.get("role") == "baseline":
+            return profile_id
+    raise SystemExit("No baseline profile found in profile_registry.yaml")
+
+
+def build_experiment_comparison_summary(
+    base_profile_id: str,
+    registry: dict[str, Any],
+    start_date_text: str | None = None,
+    end_date_text: str | None = None,
+) -> dict[str, Any]:
+    profiles = registry_profiles(registry)
+    if base_profile_id not in profiles:
+        raise SystemExit(f"Base profile not found in registry: {base_profile_id}")
+    experiment_ids = registry_experiment_profile_ids(base_profile_id, registry)
+    rows = []
+    metrics = []
+    db_warning = ""
+    if start_date_text and end_date_text:
+        try:
+            base_config = load_profile(base_profile_id)
+            db_path = get_database_path(base_config, ROOT)
+            if db_path.exists():
+                metrics = [_profile_compare_row(load_profile(profile_id), db_path, start_date_text, end_date_text) for profile_id in [base_profile_id, *experiment_ids]]
+            else:
+                db_warning = f"SQLite DB not found: {db_path}"
+        except Exception as exc:
+            db_warning = str(exc)
+    for profile_id in experiment_ids:
+        item = profiles[profile_id]
+        rows.append(
+            {
+                "profile_id": profile_id,
+                "description": item.get("description", ""),
+                "required_plan": item.get("required_plan", ""),
+                "compare_to": item.get("compare_to") or base_profile_id,
+                "recommended_command": (
+                    f"python src/main.py --mode compare-profiles --profiles {base_profile_id} {profile_id} "
+                    "--start-date YYYY-MM-DD --end-date YYYY-MM-DD"
+                ),
+            }
+        )
+    return {
+        "base_profile": base_profile_id,
+        "experiment_profiles": experiment_ids,
+        "experiments": rows,
+        "start_date": start_date_text,
+        "end_date": end_date_text,
+        "metrics": metrics,
+        "db_warning": db_warning,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def render_experiment_summary_markdown(summary: dict[str, Any]) -> str:
+    lines = [
+        "# Experiment Summary",
+        "",
+        f"- base_profile: {summary.get('base_profile')}",
+        f"- generated_at: {summary.get('generated_at')}",
+        "",
+        "## Experiments",
+        "",
+        "| profile | required_plan | compare_to | description |",
+        "| --- | --- | --- | --- |",
+    ]
+    for item in summary.get("experiments", []):
+        lines.append(f"| {item['profile_id']} | {item['required_plan']} | {item['compare_to']} | {item['description']} |")
+    lines.extend(["", "## Recommended Commands", ""])
+    for item in summary.get("experiments", []):
+        lines.append(f"- `{item['recommended_command']}`")
+    if summary.get("metrics"):
+        lines.extend(["", "## Result Summary", ""])
+        for item in build_profile_ranking(summary["metrics"]):
+            lines.append(f"- {item['rank']}位 {item['profile_id']}: score={_format_optional_number(item.get('score'))}")
+    if summary.get("db_warning"):
+        lines.extend(["", f"[WARN] {summary['db_warning']}"])
+    return "\n".join(lines)
 
 
 def _profile_compare_row(config: dict[str, Any], db_path: Path, start_date_text: str, end_date_text: str) -> dict[str, Any]:
@@ -1221,7 +1847,7 @@ def build_full_paper_run_summary(
     backtest_log_path = ROOT / "logs" / "backtests" / range_key / "backtest_summary.json"
     analysis_json_path = ROOT / "reports" / "backtests" / "analysis_latest.json"
     release_notes_path = ROOT / "reports" / "backtests" / f"release_notes_{range_key}.md"
-    article_dir = ROOT / "articles" / "drafts" / "backtests" / range_key
+    article_dir = ROOT / "reports" / "articles" / "daily"
 
     backtest_summary = read_json(backtest_json_path) if backtest_json_path.exists() else {}
     backtest_log = read_json(backtest_log_path) if backtest_log_path.exists() else {}
@@ -1239,7 +1865,7 @@ def build_full_paper_run_summary(
         if selected_count == 0:
             no_trade_days += 1
 
-    generated_articles_count = len(list(article_dir.glob("*.md"))) if article_dir.exists() else 0
+    generated_articles_count = _article_index_count(profile_id_from(config), start_date_text, end_date_text)
     trade_analysis = analysis.get("trade_analysis", {})
     portfolio_analysis = analysis.get("portfolio_analysis", {})
     gross_profit = sum(float(trade.get("gross_profit", trade.get("profit", 0)) or 0) for trade in closed_trades)
@@ -1364,6 +1990,8 @@ def run_help() -> None:
 - init-db: SQLite DBを初期化またはマイグレーション
 - healthcheck: J-Quants APIキーの疎通確認
 - tachibana-healthcheck: 立花証券デモ接続前の設定確認
+- account-snapshot: Broker共通IFで口座スナップショットを読み取り表示
+- demo-auto-order: tachibana_demo向け自動発注。live環境では停止
 - list-stocks: J-Quantsから東証プライム銘柄一覧を取得
 - fetch-prices: 指定日の株価データを取得
 - calculate-indicators: 指定日のテクニカル指標を計算
@@ -1402,7 +2030,8 @@ def run_help() -> None:
 - 現在はPaperBrokerのみ使用します。
 - Broker候補: paper / tachibana_demo / tachibana_live / kabu_station
 - Mac/Linuxでの実売買API候補は、立花証券 e支店 API を第一候補にします。
-- tachibana_demo / tachibana_live は未実装スタブで、実注文は出しません。
+- tachibana_demo / tachibana_live はRead Onlyモードで、実注文は出しません。
+- demo-auto-order は tachibana_demo のみ対象です。tachibana_live では必ず停止します。
 - APIキーや口座情報は表示しません。
 """
     )
@@ -1418,8 +2047,7 @@ def run_status(config: dict[str, Any], output_format: str = "text") -> None:
 
 def build_status_payload(config: dict[str, Any]) -> dict[str, Any]:
     db_status = _status_database(config)
-    drafts = _article_files(ROOT / "articles" / "drafts" / profile_id_from(config))
-    published = _article_files(ROOT / "articles" / "published" / profile_id_from(config))
+    article_status = _article_index_status(profile_id_from(config))
     safety = config.get("safety", {})
     broker = config.get("broker", {})
     stop_file = Path(safety.get("emergency_stop_file", "storage/STOP_TRADING"))
@@ -1454,12 +2082,7 @@ def build_status_payload(config: dict[str, Any]) -> dict[str, Any]:
             "news_provider": config.get("news", {}).get("provider"),
         },
         "database": db_status,
-        "articles": {
-            "drafts_count": len(drafts),
-            "published_count": len(published),
-            "latest_draft": _relative_or_none(drafts[-1]) if drafts else None,
-            "latest_published": _relative_or_none(published[-1]) if published else None,
-        },
+        "articles": article_status,
         "safety": {
             "stop_trading_exists": stop_file.exists(),
             "emergency_stop_file": str(stop_file.relative_to(ROOT)) if stop_file.is_relative_to(ROOT) else str(stop_file),
@@ -1524,10 +2147,28 @@ def _table_has_column(connection: sqlite3.Connection, table: str, column: str) -
     return column in {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
 
 
-def _article_files(directory: Path) -> list[Path]:
-    if not directory.exists():
-        return []
-    return sorted((path for path in directory.glob("**/*.md") if path.is_file()), key=lambda path: path.stat().st_mtime)
+def _article_index_status(profile_id: str) -> dict[str, Any]:
+    index_path = ROOT / "reports" / "articles" / "index.json"
+    if not index_path.exists():
+        return {
+            "drafts_count": 0,
+            "published_count": 0,
+            "latest_draft": None,
+            "latest_published": None,
+        }
+    articles = [
+        item
+        for item in read_json(index_path).get("articles", [])
+        if item.get("profile_id") == profile_id
+    ]
+    drafts = sorted((item for item in articles if item.get("status") == "draft"), key=lambda item: item.get("updated_at", ""))
+    published = sorted((item for item in articles if item.get("status") == "published"), key=lambda item: item.get("updated_at", ""))
+    return {
+        "drafts_count": len(drafts),
+        "published_count": len(published),
+        "latest_draft": drafts[-1].get("path") if drafts else None,
+        "latest_published": published[-1].get("path") if published else None,
+    }
 
 
 def _relative_or_none(path: Path | None) -> str | None:
@@ -1630,6 +2271,10 @@ def run_preflight(profile_id: str | None = None) -> None:
 
     if config:
         _check_required_config(results, config)
+        _check_runtime_value_sources(results, config)
+        _check_jquants_plan_capabilities(results, config)
+        _check_earnings_filter_preflight(results, config)
+        _check_investor_context_preflight(results, config)
 
     env_path = ROOT / ".env"
     if env_path.exists():
@@ -1686,7 +2331,7 @@ def run_preflight(profile_id: str | None = None) -> None:
         _preflight_add(results, "SKIP", "database check skipped because config is unavailable")
 
     if jquants_key_set:
-        _check_jquants_health(results)
+        _check_jquants_health(results, config)
     else:
         _preflight_add(results, "WARN", "J-Quants healthcheck skipped because JQUANTS_API_KEY is not set")
 
@@ -1784,6 +2429,20 @@ def _check_required_config(results: list[dict[str, Any]], config: dict[str, Any]
         _check_kabu_station_configuration(results, config)
 
 
+def _check_runtime_value_sources(results: list[dict[str, Any]], config: dict[str, Any]) -> None:
+    sources = config.get("_value_sources", {}) if isinstance(config.get("_value_sources"), dict) else {}
+    broker_mode = config.get("broker", {}).get("mode") or config.get("broker", {}).get("provider", "paper")
+    auto_order_enabled = bool(config.get("operation", {}).get("auto_order_enabled", False))
+    _preflight_add(results, "OK", f"Profile: {profile_id_from(config)} (source={sources.get('profile', 'default')})")
+    _preflight_add(results, "OK", f"Data Provider: {config.get('data_provider', 'jquants')} (source={sources.get('provider', 'default')})")
+    _preflight_add(results, "OK", f"Broker: {broker_mode} (source={sources.get('broker', 'default')})")
+    _preflight_add(
+        results,
+        "OK" if not auto_order_enabled else "WARN",
+        f"operation.auto_order_enabled: {str(auto_order_enabled).lower()} (source={sources.get('auto_order_enabled', 'default')})",
+    )
+
+
 def _config_has_path(config: dict[str, Any], path: tuple[str, ...]) -> bool:
     current: Any = config
     for key in path:
@@ -1820,6 +2479,9 @@ def _ensure_required_directories(results: list[dict[str, Any]]) -> None:
         ROOT / "reports",
         ROOT / "reports" / "charts",
         ROOT / "reports" / "backtests",
+        ROOT / "reports" / "articles",
+        ROOT / "reports" / "articles" / "daily",
+        ROOT / "reports" / "paper",
         ROOT / "articles" / "drafts",
         ROOT / "articles" / "published",
         ROOT / "logs",
@@ -1896,14 +2558,110 @@ def _database_path_from_config(config: dict[str, Any]) -> Path:
     return path
 
 
-def _check_jquants_health(results: list[dict[str, Any]]) -> None:
+def _check_jquants_plan_capabilities(results: list[dict[str, Any]], config: dict[str, Any]) -> None:
+    plan = _jquants_plan(config)
+    sources = config.get("_value_sources", {}) if isinstance(config.get("_value_sources"), dict) else {}
+    source = sources.get("jquants_plan", "default")
+    status = jquants_capability_status(plan)
+    compatibility = jquants_profile_compatibility(profile_id_from(config), plan)
+    _preflight_add(results, "OK", f"J-Quants Plan: {plan} (source={source})", {"plan": plan, "source": source})
+    _preflight_add(results, "OK", f"Rate Limit: {_jquants_requests_per_minute(config)} requests/min")
+    _preflight_add(results, "OK", f"Parallel Fetch: {'enabled' if _jquants_parallel_fetch(config) else 'disabled'}")
+    _preflight_add(results, "OK", "Available capabilities:", status)
+    for capability in ["prices", "earnings_calendar", "topix_prices", "investor_breakdown", "investor_types"]:
+        capability_status = status.get(capability, "disabled")
+        _preflight_add(
+            results,
+            "OK" if capability_status == "OK" else "SKIP",
+            f"J-Quants capability {capability}: {capability_status}",
+            {"plan": plan, "capability": capability},
+        )
+    missing = compatibility["missing_capabilities"]
+    fallback_applied = compatibility["fallback_applied"]
+    _preflight_add(results, "OK", f"profile required capabilities: {', '.join(compatibility['profile_required_capabilities']) or 'none'}")
+    _preflight_add(results, "OK", f"current plan capabilities: {', '.join(compatibility['current_plan_capabilities']) or 'none'}")
+    _preflight_add(results, "WARN" if missing else "OK", f"missing capabilities: {', '.join(missing) if missing else 'none'}")
+    _preflight_add(
+        results,
+        "WARN" if fallback_applied else "OK",
+        "fallback applied: "
+        + (
+            "; ".join(f"{item['capability']} -> {item['policy']}" for item in fallback_applied)
+            if fallback_applied
+            else "none"
+        ),
+        compatibility,
+    )
+    _preflight_add(results, "OK" if compatibility["can_run_backtest"] else "FAIL", f"can_run_backtest: {str(compatibility['can_run_backtest']).lower()}")
+    _preflight_add(results, "OK" if compatibility["can_run_paper"] else "FAIL", f"can_run_live/paper: {str(compatibility['can_run_paper']).lower()}")
+
+
+def _check_investor_context_preflight(results: list[dict[str, Any]], config: dict[str, Any]) -> None:
+    enabled = bool(config.get("features", {}).get("investor_context")) and bool(config.get("scoring", {}).get("use_investor_context_score"))
+    capability_status = config.get("jquants", {}).get("capability_status", {}).get("investor_types", "disabled")
+    _preflight_add(results, "OK" if capability_status == "OK" else "SKIP", f"investor_types capability: {capability_status}")
+    _preflight_add(results, "OK" if enabled else "SKIP", f"investor_context {'enabled' if enabled else 'disabled'}")
+    if not enabled:
+        return
+    payload = _load_investor_context_for_date(date.today(), config, force_refresh=False)
+    metadata = payload.get("metadata", {})
+    status = "OK" if metadata.get("available", False) else "WARN"
+    _preflight_add(
+        results,
+        status,
+        f"investor_types cache: {metadata.get('cache_path') or 'N/A'}",
+        {
+            "from_cache": metadata.get("from_cache"),
+            "fallback_used": metadata.get("fallback_used"),
+            "warning": metadata.get("warning"),
+        },
+    )
+    _preflight_add(results, status, f"latest investor data week: {metadata.get('latest_investor_data_week') or 'N/A'}")
+
+
+def _check_earnings_filter_preflight(results: list[dict[str, Any]], config: dict[str, Any]) -> None:
+    filter_config = config.get("earnings_filter", {})
+    enabled = bool(filter_config.get("enabled", False))
+    capability_status = config.get("jquants", {}).get("capability_status", {}).get("earnings_calendar", "OK")
+    _preflight_add(results, "OK" if capability_status == "OK" else "SKIP", f"earnings_calendar capability: {capability_status}")
+    _preflight_add(results, "OK" if enabled else "SKIP", f"earnings_filter {'enabled' if enabled else 'disabled'}")
+    if not enabled:
+        return
+    payload = _load_earnings_calendar_for_date(date.today(), config, force_refresh=False)
+    metadata = payload.get("metadata", {})
+    records = payload.get("records", [])
+    counts = earnings_counts(records, date.today()) if records else {"today": 0, "next_business_day": 0}
+    status = "OK" if metadata.get("filter_available", False) else "WARN"
+    _preflight_add(
+        results,
+        status,
+        f"earnings calendar cache date: {metadata.get('cache_date') or 'N/A'}",
+        {
+            "cache_path": metadata.get("cache_path"),
+            "from_cache": metadata.get("from_cache"),
+            "fallback_used": metadata.get("fallback_used"),
+            "warning": metadata.get("warning"),
+        },
+    )
+    _preflight_add(results, "OK", f"today earnings count: {counts['today']}")
+    _preflight_add(results, "OK", f"next business day earnings count: {counts['next_business_day']}")
+
+
+def _check_jquants_health(results: list[dict[str, Any]], config: dict[str, Any] | None = None) -> None:
     try:
-        provider = JQuantsDataProvider(ROOT / ".env")
+        plan_config = config or {}
+        provider = JQuantsDataProvider(
+            ROOT / ".env",
+            plan=_jquants_plan(plan_config),
+            requests_per_minute=_jquants_requests_per_minute(plan_config),
+            parallel_fetch=_jquants_parallel_fetch(plan_config),
+            max_parallel_requests=_jquants_max_parallel_requests(plan_config),
+        )
         listed = provider.get_listed_stocks()
     except Exception as exc:
         _preflight_add(results, "WARN", f"J-Quants healthcheck skipped or failed: {exc}")
         return
-    _preflight_add(results, "OK", "J-Quants healthcheck successful", {"listed_stocks": len(listed)})
+    _preflight_add(results, "OK", "J-Quants healthcheck successful", {"listed_stocks": len(listed), "plan": provider.plan})
 
 
 def _check_openai_configuration(results: list[dict[str, Any]], api_key_set: bool, fallback_enabled: bool) -> None:
@@ -2031,8 +2789,15 @@ def run_list_stocks(provider_name: str) -> None:
     if provider_name != "jquants":
         raise SystemExit("list-stocks mode currently supports --provider jquants only.")
 
+    config = load_config(CONFIG_PATH)
     try:
-        provider = JQuantsDataProvider(ROOT / ".env")
+        provider = JQuantsDataProvider(
+            ROOT / ".env",
+            plan=_jquants_plan(config),
+            requests_per_minute=_jquants_requests_per_minute(config),
+            parallel_fetch=_jquants_parallel_fetch(config),
+            max_parallel_requests=_jquants_max_parallel_requests(config),
+        )
         listed_stocks = provider.get_listed_stocks()
         prime_stocks = [_normalize_prime_stock(record) for record in listed_stocks if _is_prime_stock(record)]
     except RuntimeError as exc:
@@ -2074,8 +2839,15 @@ def run_fetch_prices(provider_name: str, target_date_text: str) -> None:
     if not prime_codes:
         raise SystemExit("Prime stock list is empty. Re-run list-stocks and check the result.")
 
+    config = load_config(CONFIG_PATH)
     try:
-        provider = JQuantsDataProvider(ROOT / ".env")
+        provider = JQuantsDataProvider(
+            ROOT / ".env",
+            plan=_jquants_plan(config),
+            requests_per_minute=_jquants_requests_per_minute(config),
+            parallel_fetch=_jquants_parallel_fetch(config),
+            max_parallel_requests=_jquants_max_parallel_requests(config),
+        )
         daily_prices = provider.get_daily_prices(target_date)
     except RuntimeError as exc:
         print(f"J-Quants daily prices fetch failed: {exc}")
@@ -2129,11 +2901,21 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
 
     config = load_config(CONFIG_PATH)
     indicator_mode = _backtest_indicator_mode(config) if BACKTEST_MODE_ACTIVE else "full"
+    enable_relative_strength = _relative_strength_enabled_for_indicators(config)
     output_path = ROOT / "data" / "processed" / f"indicators_{target_date_text}.json"
     profile_output_path = processed_profile_path(config, f"indicators_{target_date_text}.json")
     if BACKTEST_MODE_ACTIVE and profile_output_path.exists():
         cached_payload = read_json(profile_output_path)
-        if cached_payload.get("indicator_mode") == indicator_mode:
+        expected_benchmark_source = _expected_relative_strength_benchmark_source(config) if enable_relative_strength else "unavailable"
+        benchmark_cache_matches = (
+            not enable_relative_strength
+            or str(cached_payload.get("benchmark_source") or "") == expected_benchmark_source
+        )
+        if (
+            cached_payload.get("indicator_mode") == indicator_mode
+            and bool(cached_payload.get("relative_strength_enabled")) == enable_relative_strength
+            and benchmark_cache_matches
+        ):
             write_json(output_path, cached_payload)
             print(f"{BACKTEST_DAY_LOG_PREFIX} indicators cache hit: {profile_output_path.relative_to(ROOT)}")
             return
@@ -2149,17 +2931,22 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
             provider = JQuantsDataProvider(
                 ROOT / ".env",
                 timeout_seconds=int(config.get("jquants", {}).get("request_timeout_seconds", 20)),
+                plan=_jquants_plan(config),
+                requests_per_minute=_jquants_requests_per_minute(config),
+                parallel_fetch=_jquants_parallel_fetch(config),
+                max_parallel_requests=_jquants_max_parallel_requests(config),
             )
             price_rows = fetch_price_history(
                 provider,
                 target_date,
                 prime_codes,
                 lookback_business_days=60,
-                rate_limit_per_minute=int(config.get("jquants", {}).get("rate_limit_per_minute", 5)),
+                rate_limit_per_minute=_jquants_requests_per_minute(config),
                 fetch_dates=fetch_dates,
                 continue_on_error=True,
                 verbose=False,
             )
+            _print_fetch_statistics(provider)
         except RuntimeError as exc:
             price_rows = load_cached_price_history(fetch_dates)
             if price_rows:
@@ -2173,8 +2960,12 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
 
     input_days = len({row.get("date") for row in price_rows if row.get("date")})
     target_stocks = len({row.get("code") for row in price_rows if row.get("date") == target_date_text})
+    benchmark_payload = _relative_strength_benchmark_payload(price_rows, target_date, fetch_dates, config) if enable_relative_strength else {"benchmark_returns": {}, "benchmark_source": "unavailable"}
     if BACKTEST_MODE_ACTIVE:
         print(f"{BACKTEST_DAY_LOG_PREFIX} indicators mode: {indicator_mode}")
+        print(f"{BACKTEST_DAY_LOG_PREFIX} relative_strength indicators: {'enabled' if enable_relative_strength else 'disabled'}")
+        if enable_relative_strength:
+            print(f"{BACKTEST_DAY_LOG_PREFIX} benchmark_source: {benchmark_payload.get('benchmark_source')}")
         print(f"{BACKTEST_DAY_LOG_PREFIX} indicators input days: {input_days}")
         print(f"{BACKTEST_DAY_LOG_PREFIX} indicators input rows: {len(price_rows)}")
         print(f"{BACKTEST_DAY_LOG_PREFIX} indicators target stocks: {target_stocks}")
@@ -2191,6 +2982,9 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
             stock_sectors,
             indicator_mode=indicator_mode,
             progress_callback=progress_callback if BACKTEST_MODE_ACTIVE else None,
+            enable_relative_strength=enable_relative_strength,
+            benchmark_returns=benchmark_payload.get("benchmark_returns"),
+            benchmark_source=str(benchmark_payload.get("benchmark_source") or "unavailable"),
         )
     except TechnicalIndicatorDependencyError as exc:
         raise SystemExit(str(exc)) from exc
@@ -2204,6 +2998,8 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
         "provider": "jquants",
         "date": target_date_text,
         "indicator_mode": indicator_mode,
+        "relative_strength_enabled": enable_relative_strength,
+        "benchmark_source": benchmark_payload.get("benchmark_source"),
         "lookback_business_days": lookback_days,
         "input_days": input_days,
         "input_rows": len(price_rows),
@@ -2358,15 +3154,23 @@ def run_score(provider_name: str, target_date_text: str) -> None:
         raise SystemExit(f"No candidates found in {candidates_path.relative_to(ROOT)}.")
 
     market_context = load_market_context_for_date(target_date_text, provider_name)
-    news_by_code = fetch_candidate_news(candidates, target_date_text, config)
+    target_date = date.fromisoformat(target_date_text)
+    earnings_payload = _load_earnings_calendar_for_date(target_date, config)
+    if config.get("earnings_filter", {}).get("enabled") and earnings_payload["metadata"].get("filter_available", False):
+        config["_earnings_calendar_records"] = earnings_payload["records"]
+        config["_earnings_calendar_metadata"] = earnings_payload["metadata"]
+    investor_context_payload = _load_investor_context_for_date(target_date, config)
+    config["_investor_context"] = investor_context_payload["context"]
+    config["_investor_context_metadata"] = investor_context_payload["metadata"]
     scoring_log = score_real_candidates(
         candidates,
         target_date_text,
         config,
         provider_name,
-        news_by_code=news_by_code,
         market_context=market_context,
     )
+    scoring_log["earnings_calendar"] = earnings_payload.get("metadata", {})
+    scoring_log["investor_context"] = investor_context_payload.get("metadata", {})
     attach_config_version(scoring_log, config)
     ai_decision_log = run_ai_decision_if_enabled(scoring_log, config, target_date_text)
     scores = scoring_log["scores"]
@@ -2377,7 +3181,8 @@ def run_score(provider_name: str, target_date_text: str) -> None:
     scoring_log.setdefault("profile_name", profile_name_from(config))
     scoring_path = ROOT / "logs" / "scoring" / profile_id_from(config) / f"scoring_{target_date_text}.json"
     scored_candidates_path = processed_profile_path(config, f"scored_candidates_{target_date_text}.json")
-    write_json(scoring_path, scoring_log)
+    storage_scoring_log = _scoring_log_for_storage(scoring_log, config)
+    write_json(scoring_path, storage_scoring_log)
     write_json(
         scored_candidates_path,
         {
@@ -2389,15 +3194,16 @@ def run_score(provider_name: str, target_date_text: str) -> None:
             "candidate_count": len(candidates),
             "scored_count": len(scores),
             "selected_count": len(selected),
+            "earnings_calendar": earnings_payload.get("metadata", {}),
+            "investor_context": investor_context_payload.get("metadata", {}),
             "selection_config": scoring_log.get("selection_config", {}),
             "market_context": scoring_log.get("market_context", {}),
             "market_filter": scoring_log.get("market_filter", {}),
-            "news_config": config.get("news", {}),
             "ai_decision": scoring_log.get("ai_decision", {}),
-            "scores": scores,
+            "scores": _scores_for_storage(scores, config),
         },
     )
-    save_scoring_results(config, ROOT, scoring_log)
+    save_scoring_results(config, ROOT, storage_scoring_log)
     if ai_decision_log:
         save_ai_decision(config, ROOT, ai_decision_log)
     write_daily_ai_dataset(config, target_date_text)
@@ -2406,6 +3212,8 @@ def run_score(provider_name: str, target_date_text: str) -> None:
     print(f"scored: {len(scores)}")
     print(f"selected: {len(selected)}")
     print(f"highest_score: {highest_score}")
+    if len(storage_scoring_log.get("scores", [])) != len(scores):
+        print(f"scoring storage: saved {len(storage_scoring_log.get('scores', []))}/{len(scores)} scores (rejected candidate detail disabled)")
     if ai_decision_log:
         print(f"ai_decision: {ai_decision_log['provider']} fallback={ai_decision_log['fallback_used']}")
     print(f"scoring saved: {scoring_path.relative_to(ROOT)}")
@@ -2650,9 +3458,10 @@ def run_preview_orders(provider_name: str, target_date_text: str) -> None:
 def run_publish_article(target_date_text: str, note_url: str) -> None:
     _validate_date(target_date_text)
     config = load_config(CONFIG_PATH)
+    migrate_report_articles_layout(config)
     draft_path = _find_article_draft(target_date_text)
     if draft_path is None:
-        raise SystemExit(f"Draft article not found: articles/drafts/day_{target_date_text}.md")
+        raise SystemExit(f"Draft article not found for {target_date_text}. Run run-daily first.")
 
     published_at = datetime.now(ZoneInfo("Asia/Tokyo")).isoformat(timespec="seconds")
     body = draft_path.read_text(encoding="utf-8")
@@ -2666,7 +3475,7 @@ def run_publish_article(target_date_text: str, note_url: str) -> None:
             "config_version": config_version_from(config),
         },
     )
-    published_path = ROOT / "articles" / "published" / profile_id_from(config) / f"day_{target_date_text}.md"
+    published_path = _published_article_path(config, target_date_text, profile_id_from(config))
     write_text(published_path, published_body)
     keep_draft = bool(config.get("articles", {}).get("keep_draft_after_publish", False))
     if not keep_draft:
@@ -2687,24 +3496,115 @@ def run_publish_article(target_date_text: str, note_url: str) -> None:
             "body": published_body,
         },
     )
+    _update_article_index(published_path, target_date_text, "published", config)
     print(f"published article path: {published_path.relative_to(ROOT)}")
     print(f"note_url: {note_url}")
     print(f"draft removed: {str(not keep_draft).lower()}")
 
 
 def _find_article_draft(target_date_text: str) -> Path | None:
-    profile_id = ACTIVE_PROFILE_ID
+    config = load_config(CONFIG_PATH)
+    profile_id = profile_id_from(config)
+    run_date = date.fromisoformat(target_date_text)
+    compact = target_date_text.replace("-", "")
     candidates = [
+        _daily_article_path(config, target_date_text, profile_id),
+        ROOT / "reports" / "articles" / "daily" / run_date.strftime("%Y") / run_date.strftime("%m") / profile_id / f"{compact}_day.md",
         ROOT / "articles" / "drafts" / profile_id / f"day_{target_date_text}.md",
         ROOT / "articles" / "drafts" / f"day_{target_date_text}.md",
+        ROOT / "articles" / "drafts" / profile_id / run_date.strftime("%Y-%m") / f"{compact}_day_001.md",
     ]
-    candidates.extend(sorted((ROOT / "articles" / "drafts" / profile_id).glob(f"**/*{target_date_text}*.md")))
-    compact = target_date_text.replace("-", "")
-    candidates.extend(sorted((ROOT / "articles" / "drafts" / profile_id).glob(f"**/*{compact}*.md")))
     for candidate in candidates:
         if candidate.exists():
             return candidate
     return None
+
+
+def _daily_article_path(config: dict[str, Any], target_date_text: str, profile_id: str) -> Path:
+    target_date = date.fromisoformat(target_date_text)
+    return (
+        ROOT
+        / "reports"
+        / "articles"
+        / "daily"
+        / target_date.strftime("%Y")
+        / target_date.strftime("%m")
+        / profile_id
+        / f"day_{target_date_text}.md"
+    )
+
+
+def _backtest_article_path(config: dict[str, Any], target_date_text: str, profile_id: str) -> Path:
+    target_date = date.fromisoformat(target_date_text)
+    return (
+        ROOT
+        / "reports"
+        / "articles"
+        / "backtests"
+        / target_date.strftime("%Y")
+        / target_date.strftime("%m")
+        / profile_id
+        / f"day_{target_date_text}.md"
+    )
+
+
+def _published_article_path(config: dict[str, Any], target_date_text: str, profile_id: str) -> Path:
+    target_date = date.fromisoformat(target_date_text)
+    return (
+        ROOT
+        / "reports"
+        / "articles"
+        / "published"
+        / target_date.strftime("%Y")
+        / target_date.strftime("%m")
+        / profile_id
+        / f"day_{target_date_text}.md"
+    )
+
+
+def _paper_report_path(config: dict[str, Any], target_date_text: str) -> Path:
+    target_date = date.fromisoformat(target_date_text)
+    return ROOT / "reports" / "paper" / profile_id_from(config) / target_date.strftime("%Y-%m") / f"day_{target_date_text}.md"
+
+
+def _update_article_index(path: Path, target_date_text: str, status: str, config: dict[str, Any]) -> None:
+    index_path = ROOT / "reports" / "articles" / "index.json"
+    existing = read_json(index_path) if index_path.exists() else {"articles": []}
+    articles = [
+        item
+        for item in existing.get("articles", [])
+        if not (item.get("date") == target_date_text and item.get("profile_id") == profile_id_from(config) and item.get("status") == status)
+    ]
+    articles.append(
+        {
+            "date": target_date_text,
+            "profile_id": profile_id_from(config),
+            "profile_name": profile_name_from(config),
+            "status": status,
+            "path": str(path.relative_to(ROOT)),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    )
+    latest_item = articles[-1]
+    write_json(index_path, {"articles": sorted(articles, key=lambda item: (item.get("date", ""), item.get("profile_id", ""), item.get("status", "")))})
+    latest_json = ROOT / "reports" / "articles" / "latest.json"
+    write_json(latest_json, latest_item)
+    if path.exists():
+        write_text(ROOT / "reports" / "articles" / "latest.md", path.read_text(encoding="utf-8"))
+
+
+def _article_index_count(profile_id: str, start_date_text: str, end_date_text: str) -> int:
+    index_path = ROOT / "reports" / "articles" / "index.json"
+    if not index_path.exists():
+        return 0
+    payload = read_json(index_path)
+    return sum(
+        1
+        for item in payload.get("articles", [])
+        if item.get("profile_id") == profile_id
+        and start_date_text <= str(item.get("date", "")) <= end_date_text
+        and item.get("status") == "draft"
+    )
 
 
 def upsert_article_front_matter(body: str, metadata: dict[str, str]) -> str:
@@ -2763,6 +3663,7 @@ def build_order_preview(
     buy_candidates = []
     skipped = []
     safety_results = []
+    positions = _preview_position_rows(state.get("positions", []), price_by_code)
 
     for position in state.get("positions", []):
         market = price_by_code.get(position.get("code"), {})
@@ -2782,10 +3683,11 @@ def build_order_preview(
             "exit_price": current_price,
             "amount": round(shares * current_price, 2),
             "reason": reason,
+            "sell_reason": reason,
             "profit_rate": round(profit_rate, 4),
             "safety_checked": True,
             "live_trading": False,
-            "broker_provider": "preview",
+            "broker_provider": "paper",
             "order_status": "PREVIEW",
         }
         validation = can_trade(order, _preview_safety_portfolio(state, today_orders, order), config)
@@ -2822,9 +3724,14 @@ def build_order_preview(
             "amount": amount,
             "score": item.get("total_score"),
             "reason": item.get("selection_reason") or item.get("selected_reason") or item.get("reason", ""),
+            "buy_reason": item.get("selection_reason") or item.get("selected_reason") or item.get("reason", ""),
+            "excluded_reason": item.get("rejected_reason") or "",
+            "sector_name": item.get("sector_name"),
+            "market_regime": item.get("market_regime"),
+            "candlestick_signals": item.get("candlestick_signals", []),
             "safety_checked": True,
             "live_trading": False,
-            "broker_provider": "preview",
+            "broker_provider": "paper",
             "order_status": "PREVIEW",
         }
         validation = can_trade(order, _preview_safety_portfolio(state, today_orders, order), config)
@@ -2839,20 +3746,37 @@ def build_order_preview(
                     "estimated_amount": amount,
                     "score": item.get("total_score"),
                     "reason": order["reason"],
+                    "buy_reason": order["buy_reason"],
+                    "sector_name": item.get("sector_name"),
+                    "market_regime": item.get("market_regime"),
+                    "candlestick_signals": item.get("candlestick_signals", []),
                 }
             )
             today_orders.append(order)
         else:
             skipped.append(_preview_skipped(order, validation))
 
+    skipped.extend(_preview_rejected_candidate_rows(scored_candidates, held_codes))
     live_enabled = bool(config.get("broker", {}).get("live_trading_enabled", False) and config.get("safety", {}).get("allow_live_trading", False))
     broker_provider = config.get("broker", {}).get("provider", "paper")
+    preview_orders = _preview_orders(sell_candidates, buy_candidates)
+    risk_check_summary = _preview_risk_check_summary(safety_results)
     return {
         "date": target_date_text,
-        "mode": "LIVE_DISABLED" if not live_enabled else "PAPER",
+        "mode": "MANUAL_APPROVAL_PREVIEW",
         "provider": "jquants",
-        "broker_provider": broker_provider,
-        "broker_candidates": ["paper", "tachibana_demo", "tachibana_live", "kabu_station"],
+        "broker_provider": "paper",
+        "broker_candidates": ["paper"],
+        "order_submission_enabled": False,
+        "manual_approval_required": True,
+        "manual_approval_flow": {
+            "status": "PENDING_MANUAL_APPROVAL",
+            "order_submission_enabled": False,
+            "broker_provider": "paper",
+            "live_trading_enabled": False,
+            "message": "preview_orders を確認するだけです。このモードでは発注しません。",
+        },
+        "positions": positions,
         "sell_candidates": [
             {
                 "code": item["code"],
@@ -2861,21 +3785,120 @@ def build_order_preview(
                 "estimated_price": item["exit_price"],
                 "estimated_amount": item["amount"],
                 "reason": item["reason"],
+                "sell_reason": item["sell_reason"],
                 "profit_rate": item["profit_rate"],
             }
             for item in sell_candidates
         ],
         "buy_candidates": buy_candidates,
+        "preview_orders": preview_orders,
         "skipped": skipped,
         "safety": safety_results,
+        "risk_check_summary": risk_check_summary,
         "summary": {
             "buy_count": len(buy_candidates),
             "sell_count": len(sell_candidates),
+            "position_count": len(positions),
+            "unrealized_pnl": round(sum(float(item.get("unrealized_pnl") or 0.0) for item in positions), 2),
             "estimated_buy_amount": round(sum(item["estimated_amount"] for item in buy_candidates), 2),
-            "estimated_sell_amount": round(sum(item["estimated_amount"] for item in sell_candidates), 2),
-            "live_trading_enabled": live_enabled,
-            "broker_provider": broker_provider,
+            "estimated_sell_amount": round(sum(item["amount"] for item in sell_candidates), 2),
+            "risk_check_passed": risk_check_summary["rejected_count"] == 0,
+            "live_trading_enabled": False,
+            "broker_provider": "paper",
+            "configured_broker_provider": broker_provider,
+            "configured_live_trading_enabled": live_enabled,
         },
+    }
+
+
+def _preview_position_rows(positions: list[dict[str, Any]], price_by_code: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for position in positions:
+        market = price_by_code.get(position.get("code"), {})
+        current_price = float(market.get("close") or position.get("current_price") or position.get("entry_price") or 0)
+        entry_price = float(position.get("entry_price") or current_price or 0)
+        shares = int(position.get("shares") or position.get("quantity") or 0)
+        market_value = round(current_price * shares, 2)
+        unrealized_pnl = round((current_price - entry_price) * shares, 2)
+        unrealized_pnl_rate = round((current_price - entry_price) / entry_price, 4) if entry_price else None
+        rows.append(
+            {
+                "code": position.get("code"),
+                "name": position.get("name"),
+                "shares": shares,
+                "entry_price": entry_price,
+                "current_price": current_price,
+                "market_value": market_value,
+                "unrealized_pnl": unrealized_pnl,
+                "unrealized_pnl_rate": unrealized_pnl_rate,
+                "holding_days": int(position.get("holding_days") or position.get("holding_business_days") or 0),
+                "sector_name": position.get("sector_name") or market.get("sector_name"),
+            }
+        )
+    return rows
+
+
+def _preview_rejected_candidate_rows(scored_candidates: list[dict[str, Any]], held_codes: set[Any]) -> list[dict[str, Any]]:
+    rows = []
+    for item in scored_candidates:
+        if item.get("selected") or item.get("code") in held_codes:
+            continue
+        reason = item.get("rejected_reason") or item.get("reason") or item.get("selection_reason") or "selected=false のため買い候補から除外"
+        rows.append(
+            {
+                "code": item.get("code"),
+                "name": item.get("name"),
+                "reason": reason,
+                "score": item.get("total_score"),
+                "market_regime": item.get("market_regime"),
+                "sector_name": item.get("sector_name"),
+            }
+        )
+    return rows
+
+
+def _preview_orders(sell_candidates: list[dict[str, Any]], buy_candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    orders = []
+    for item in sell_candidates:
+        orders.append(
+            {
+                "approval_status": "PENDING_MANUAL_APPROVAL",
+                "order_status": "PREVIEW",
+                "action": "SELL",
+                "code": item.get("code"),
+                "name": item.get("name"),
+                "shares": item.get("shares"),
+                "estimated_price": item.get("exit_price"),
+                "estimated_amount": item.get("amount"),
+                "reason": item.get("sell_reason") or item.get("reason"),
+                "broker_provider": "paper",
+                "live_trading": False,
+            }
+        )
+    for item in buy_candidates:
+        orders.append(
+            {
+                "approval_status": "PENDING_MANUAL_APPROVAL",
+                "order_status": "PREVIEW",
+                "action": "BUY",
+                "code": item.get("code"),
+                "name": item.get("name"),
+                "shares": item.get("shares"),
+                "estimated_price": item.get("estimated_price"),
+                "estimated_amount": item.get("estimated_amount"),
+                "reason": item.get("buy_reason") or item.get("reason"),
+                "broker_provider": "paper",
+                "live_trading": False,
+            }
+        )
+    return orders
+
+
+def _preview_risk_check_summary(safety_results: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "checked_count": len(safety_results),
+        "passed_count": sum(1 for item in safety_results if item.get("passed")),
+        "rejected_count": sum(1 for item in safety_results if not item.get("passed")),
     }
 
 
@@ -2961,21 +3984,36 @@ def render_order_preview_console(preview: dict[str, Any]) -> str:
 
 def render_order_preview_markdown(preview: dict[str, Any]) -> str:
     lines = [
-        "# Order Preview",
+        "# Daily Paper Report",
         "",
         f"Date: {preview['date']}",
         f"Mode: {preview['mode']}",
         f"Broker: {preview.get('broker_provider', 'paper')}",
+        f"Order Submission Enabled: {str(preview.get('order_submission_enabled', False)).lower()}",
+        f"Manual Approval Required: {str(preview.get('manual_approval_required', True)).lower()}",
         "",
-        "## Sell Candidates",
+        "## Manual Approval Flow",
+        "",
+        *_manual_approval_flow_lines(preview.get("manual_approval_flow", {})),
+        "",
+        "## preview_orders",
+        "",
+        *_preview_order_approval_lines(preview.get("preview_orders", [])),
+        "",
+        "## 今日の買い候補",
         "",
     ]
-    lines.extend(_preview_order_lines(preview["sell_candidates"], is_sell=True))
-    lines.extend(["", "## Buy Candidates", ""])
     lines.extend(_preview_order_lines(preview["buy_candidates"], is_sell=False))
-    lines.extend(["", "## Skipped", ""])
+    lines.extend(["", "## 今日の売り候補", ""])
+    lines.extend(_preview_order_lines(preview["sell_candidates"], is_sell=True))
+    lines.extend(["", "## 保有中ポジション", ""])
+    lines.extend(_preview_position_lines(preview.get("positions", [])))
+    lines.extend(["", "## 含み損益", ""])
+    lines.extend(_preview_unrealized_lines(preview.get("summary", {})))
+    lines.extend(["", "## 除外理由", ""])
     lines.extend(_preview_skipped_lines(preview["skipped"]))
-    lines.extend(["", "## Safety", ""])
+    lines.extend(["", "## リスクチェック結果", ""])
+    lines.extend(_preview_risk_check_summary_lines(preview.get("risk_check_summary", {})))
     lines.extend(_preview_safety_lines(preview["safety"]))
     summary = preview["summary"]
     lines.extend(
@@ -2985,13 +4023,48 @@ def render_order_preview_markdown(preview: dict[str, Any]) -> str:
             "",
             f"- buy_count: {summary['buy_count']}",
             f"- sell_count: {summary['sell_count']}",
+            f"- position_count: {summary.get('position_count', 0)}",
+            f"- unrealized_pnl: {summary.get('unrealized_pnl', 0):,.0f}",
             f"- estimated_buy_amount: {summary['estimated_buy_amount']:,.0f}",
             f"- estimated_sell_amount: {summary['estimated_sell_amount']:,.0f}",
+            f"- risk_check_passed: {str(summary.get('risk_check_passed', True)).lower()}",
             f"- broker_provider: {summary.get('broker_provider', 'paper')}",
             f"- live_trading_enabled: {str(summary['live_trading_enabled']).lower()}",
         ]
     )
     return "\n".join(lines)
+
+
+def _manual_approval_flow_lines(flow: dict[str, Any]) -> list[str]:
+    if not flow:
+        return [
+            "- status: PENDING_MANUAL_APPROVAL",
+            "- order_submission_enabled: false",
+            "- broker_provider: paper",
+            "- live_trading_enabled: false",
+        ]
+    return [
+        f"- status: {flow.get('status', 'PENDING_MANUAL_APPROVAL')}",
+        f"- order_submission_enabled: {str(flow.get('order_submission_enabled', False)).lower()}",
+        f"- broker_provider: {flow.get('broker_provider', 'paper')}",
+        f"- live_trading_enabled: {str(flow.get('live_trading_enabled', False)).lower()}",
+        f"- message: {flow.get('message', '')}",
+    ]
+
+
+def _preview_order_approval_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- preview order なし"]
+    return [
+        (
+            f"- [{item.get('approval_status')}] {item.get('action')} {item.get('code')} {item.get('name')}: "
+            f"shares={item.get('shares')}, estimated_price={float(item.get('estimated_price') or 0):,.0f}, "
+            f"estimated_amount={float(item.get('estimated_amount') or 0):,.0f}, "
+            f"reason={item.get('reason')}, broker={item.get('broker_provider', 'paper')}, "
+            f"live_trading={str(item.get('live_trading', False)).lower()}"
+        )
+        for item in items
+    ]
 
 
 def _preview_order_lines(items: list[dict[str, Any]], is_sell: bool) -> list[str]:
@@ -3003,27 +4076,70 @@ def _preview_order_lines(items: list[dict[str, Any]], is_sell: bool) -> list[str
             lines.append(
                 f"- {item['code']} {item['name']}: shares={item['shares']}, "
                 f"estimated_price={item['estimated_price']:,.0f}, estimated_amount={item['estimated_amount']:,.0f}, "
-                f"reason={item['reason']}, profit_rate={item['profit_rate']:.2%}"
+                f"売り理由={item.get('sell_reason', item['reason'])}, profit_rate={item['profit_rate']:.2%}"
             )
         else:
             lines.append(
                 f"- {item['code']} {item['name']}: shares={item['shares']}, "
                 f"estimated_price={item['estimated_price']:,.0f}, estimated_amount={item['estimated_amount']:,.0f}, "
-                f"score={item['score']}, reason={item['reason']}"
+                f"score={item['score']}, 買い理由={item.get('buy_reason', item['reason'])}"
             )
     return lines
+
+
+def _preview_position_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- 保有中ポジションなし"]
+    return [
+        (
+            f"- {item.get('code')} {item.get('name')}: shares={item.get('shares')}, "
+            f"entry_price={float(item.get('entry_price') or 0):,.0f}, "
+            f"current_price={float(item.get('current_price') or 0):,.0f}, "
+            f"market_value={float(item.get('market_value') or 0):,.0f}, "
+            f"含み損益={float(item.get('unrealized_pnl') or 0):+,.0f} "
+            f"({_format_optional_percent(item.get('unrealized_pnl_rate'))}), "
+            f"holding_days={item.get('holding_days')}, sector={item.get('sector_name') or 'N/A'}"
+        )
+        for item in items
+    ]
+
+
+def _preview_unrealized_lines(summary: dict[str, Any]) -> list[str]:
+    return [f"- 含み損益合計: {float(summary.get('unrealized_pnl') or 0):+,.0f}"]
 
 
 def _preview_skipped_lines(items: list[dict[str, Any]]) -> list[str]:
     if not items:
         return ["- None"]
-    return [f"- {item.get('code')} {item.get('name')}: {item.get('reason')}" for item in items]
+    return [
+        (
+            f"- {item.get('code')} {item.get('name')}: {item.get('reason')}"
+            + (f" (score={item.get('score')})" if item.get("score") is not None else "")
+        )
+        for item in items
+    ]
+
+
+def _preview_risk_check_summary_lines(summary: dict[str, Any]) -> list[str]:
+    if not summary:
+        return ["- checked_count: 0", "- passed_count: 0", "- rejected_count: 0"]
+    return [
+        f"- checked_count: {summary.get('checked_count', 0)}",
+        f"- passed_count: {summary.get('passed_count', 0)}",
+        f"- rejected_count: {summary.get('rejected_count', 0)}",
+    ]
 
 
 def _preview_safety_lines(items: list[dict[str, Any]]) -> list[str]:
     if not items:
         return ["- passed: true / rule: no_order"]
-    return [f"- {item['action']} {item['code']} {item['name']}: {'passed' if item['passed'] else 'rejected'} / rule: {item['rule']}" for item in items]
+    return [
+        (
+            f"- {item['action']} {item['code']} {item['name']}: "
+            f"{'passed' if item['passed'] else 'rejected'} / rule: {item['rule']} / reason: {item.get('reason') or ''}"
+        )
+        for item in items
+    ]
 
 
 def run_daily(provider_name: str, target_date_text: str) -> None:
@@ -3066,7 +4182,7 @@ def run_daily(provider_name: str, target_date_text: str) -> None:
 
 
 def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -> None:
-    global BACKTEST_MODE_ACTIVE
+    global BACKTEST_MODE_ACTIVE, BACKTEST_PROFILE_TIMINGS
     if provider_name != "jquants":
         raise SystemExit("backtest mode currently supports --provider jquants only.")
     start_date = date.fromisoformat(start_date_text)
@@ -3074,13 +4190,13 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
     range_key = f"{start_date_text}_to_{end_date_text}"
     config = load_config(CONFIG_PATH)
     BACKTEST_MODE_ACTIVE = True
+    BACKTEST_PROFILE_TIMINGS = {}
+    total_started_at = time.perf_counter()
     profile_id = profile_id_from(config)
     backtest_dir = ROOT / "logs" / "backtests" / profile_id / range_key
     report_dir = ROOT / "reports" / "backtests" / profile_id / range_key
-    article_dir = ROOT / "articles" / "drafts" / "backtests" / profile_id / range_key
     backtest_dir.mkdir(parents=True, exist_ok=True)
     report_dir.mkdir(parents=True, exist_ok=True)
-    article_dir.mkdir(parents=True, exist_ok=True)
     state = initial_live_paper_state(config)
     daily_summaries = []
     all_trades = []
@@ -3096,6 +4212,8 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
         print(f"backtest news fetch: {'disabled' if _backtest_disable_news(config) else 'enabled'}")
         print(f"backtest OpenAI: {'disabled' if _backtest_disable_openai(config) else 'configured by profile'}")
         print(f"backtest indicator_mode: {_backtest_indicator_mode(config)}")
+        print(f"backtest relative_strength: {'enabled' if _relative_strength_enabled_for_indicators(config) else 'disabled'}")
+        print(f"backtest fast_analysis: {'enabled' if _fast_analysis_enabled(config) else 'disabled'}")
         for index, trading_date in enumerate(trading_dates, start=1):
             target_date_text = trading_date.isoformat()
             global BACKTEST_DAY_LOG_PREFIX
@@ -3135,8 +4253,18 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
             report_context: dict[str, Any] = {}
 
             def run_reports_step() -> tuple[Path, Path, Path]:
-                reflection_path = write_backtest_reflections(backtest_dir, target_date_text, trade_result)
-                report_path, article_path = write_backtest_daily_markdown(report_dir, article_dir, target_date_text, trade_result, scoring_log)
+                reflection_path = backtest_dir / f"reflections_{target_date_text}.json"
+                report_path = report_dir / f"day_{target_date_text}.md"
+                article_path = _backtest_article_path(config, target_date_text, profile_id)
+                if _generate_backtest_daily_markdown(config) and _generate_articles_in_backtest(config):
+                    reflection_path = write_backtest_reflections(backtest_dir, target_date_text, trade_result)
+                    report_path, article_path = write_backtest_daily_markdown(report_dir, article_path.parent, target_date_text, trade_result, scoring_log)
+                elif _generate_backtest_daily_markdown(config):
+                    reflection_path = write_backtest_reflections(backtest_dir, target_date_text, trade_result)
+                    report_path = write_backtest_report_markdown(report_dir, target_date_text, trade_result, scoring_log)
+                elif _generate_articles_in_backtest(config):
+                    reflection_path = write_backtest_reflections(backtest_dir, target_date_text, trade_result)
+                    article_path = write_backtest_article_markdown(article_path, target_date_text, trade_result)
                 report_context.update({"reflection_path": reflection_path, "report_path": report_path, "article_path": article_path})
                 return reflection_path, report_path, article_path
 
@@ -3199,6 +4327,7 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
     print(f"cumulative_profit: {summary['cumulative_profit']}")
     print(f"summary_md: {Path(summary['report_markdown_path']).relative_to(ROOT)}")
     print(f"summary_json: {Path(summary['report_json_path']).relative_to(ROOT)}")
+    _print_backtest_profile_timings(time.perf_counter() - total_started_at)
     if _is_rule_based_backtest(config):
         print("")
         print(_rule_based_backtest_completed_label(start_date, end_date))
@@ -3215,6 +4344,7 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
 
 def _run_daily_step(step_number: int, total_steps: int, step_name: str, action: Any) -> Any:
     print(f"[{step_number}/{total_steps}] {step_name} start")
+    started_at = time.perf_counter()
     try:
         result = action()
     except SystemExit as exc:
@@ -3225,6 +4355,8 @@ def _run_daily_step(step_number: int, total_steps: int, step_name: str, action: 
         setattr(exc, "step_name", step_name)
         print(f"[{step_number}/{total_steps}] {step_name} failed")
         raise
+    elapsed = time.perf_counter() - started_at
+    _record_backtest_profile_timing(step_name, elapsed)
     print(f"[{step_number}/{total_steps}] {step_name} done")
     return result
 
@@ -3259,11 +4391,54 @@ def _run_backtest_day_step(
         print(f"{prefix} failed after {elapsed:.1f}s")
         raise
     elapsed = time.perf_counter() - started_at
+    _record_backtest_profile_timing(step_name, elapsed)
     print(f"{prefix} done in {elapsed:.1f}s")
     if metrics:
         for line in metrics() or []:
             print(f"  {line}")
     return result
+
+
+def _record_backtest_profile_timing(step_name: str, elapsed: float) -> None:
+    if not BACKTEST_MODE_ACTIVE:
+        return
+    bucket = {
+        "fetch-period-prices": "fetch_prices",
+        "calculate-indicators": "indicator",
+        "screen": "screening",
+        "score": "scoring",
+        "trade": "trading",
+        "reports/articles": "report",
+        "backtest-summary": "report",
+    }.get(step_name)
+    if not bucket:
+        return
+    BACKTEST_PROFILE_TIMINGS[bucket] = BACKTEST_PROFILE_TIMINGS.get(bucket, 0.0) + elapsed
+
+
+def _print_backtest_profile_timings(total_seconds: float) -> None:
+    print("backtest profile timings:")
+    for key in ["fetch_prices", "indicator", "screening", "scoring", "trading", "report"]:
+        print(f"- {key} seconds: {BACKTEST_PROFILE_TIMINGS.get(key, 0.0):.2f}")
+    print(f"- total seconds: {total_seconds:.2f}")
+    print("")
+    print("Performance Summary")
+    for key in ["fetch_prices", "indicator", "screening", "scoring", "trading", "report"]:
+        print(f"- {key}: {BACKTEST_PROFILE_TIMINGS.get(key, 0.0):.2f}s")
+    print(f"- total_runtime: {total_seconds:.2f}s")
+
+
+def _print_fetch_statistics(provider: Any) -> None:
+    stats = getattr(provider, "fetch_stats", {}) or {}
+    api_calls = int(stats.get("api_calls", 0) or 0)
+    total_fetch_time = float(stats.get("total_fetch_time", 0.0) or 0.0)
+    average_fetch_time = total_fetch_time / api_calls if api_calls else 0.0
+    print("fetch statistics")
+    print(f"- api_calls: {api_calls}")
+    print(f"- cache_hits: {int(stats.get('cache_hits', 0) or 0)}")
+    print(f"- cache_misses: {int(stats.get('cache_misses', 0) or 0)}")
+    print(f"- average_fetch_time: {average_fetch_time:.3f}s")
+    print(f"- rate_limit_wait_time: {float(stats.get('rate_limit_wait_time', 0.0) or 0.0):.3f}s")
 
 
 def _backtest_indicator_metrics(target_date_text: str) -> list[str]:
@@ -3367,9 +4542,19 @@ def _backtest_disable_openai(config: dict[str, Any]) -> bool:
     return bool(config.get("backtest", {}).get("disable_openai", True))
 
 
+def _fast_analysis_enabled(config: dict[str, Any]) -> bool:
+    return FAST_ANALYSIS_ACTIVE or bool(config.get("backtest", {}).get("fast_analysis")) or bool(config.get("analysis", {}).get("fast_analysis"))
+
+
 def _backtest_indicator_mode(config: dict[str, Any]) -> str:
     mode = str(config.get("backtest", {}).get("indicator_mode", "fast"))
     return mode if mode in {"full", "fast", "minimal"} else "fast"
+
+
+def _relative_strength_enabled_for_indicators(config: dict[str, Any]) -> bool:
+    return bool(config.get("features", {}).get("relative_strength")) and bool(
+        config.get("scoring", {}).get("use_relative_strength_score")
+    )
 
 
 def _rule_based_backtest_completed_label(start_date: date, end_date: date) -> str:
@@ -3391,14 +4576,19 @@ def ensure_indicators(provider_name: str, target_date_text: str) -> None:
     path = ROOT / "data" / "processed" / f"indicators_{target_date_text}.json"
     profile_path = processed_profile_path(config, f"indicators_{target_date_text}.json")
     indicator_mode = _backtest_indicator_mode(config) if BACKTEST_MODE_ACTIVE else "full"
+    enable_relative_strength = _relative_strength_enabled_for_indicators(config)
     if BACKTEST_MODE_ACTIVE and profile_path.exists():
         payload = read_json(profile_path)
-        if payload.get("indicator_mode") == indicator_mode:
+        if payload.get("indicator_mode") == indicator_mode and bool(payload.get("relative_strength_enabled")) == enable_relative_strength:
             write_json(path, payload)
             print(f"{BACKTEST_DAY_LOG_PREFIX} indicators cache hit: {profile_path.relative_to(ROOT)}")
             return
-    if path.exists() and (not BACKTEST_MODE_ACTIVE or read_json(path).get("indicator_mode") == indicator_mode):
+    if path.exists() and not BACKTEST_MODE_ACTIVE:
         return
+    if path.exists() and BACKTEST_MODE_ACTIVE:
+        payload = read_json(path)
+        if payload.get("indicator_mode") == indicator_mode and bool(payload.get("relative_strength_enabled")) == enable_relative_strength:
+            return
     run_calculate_indicators(provider_name, target_date_text)
 
 
@@ -3446,6 +4636,50 @@ def score_for_date(provider_name: str, target_date_text: str) -> dict[str, Any]:
         "candidate_count": processed.get("candidate_count", len(scoring_log.get("scores", []))),
         "scored_count": processed.get("scored_count", len(scoring_log.get("scores", []))),
         "selected_count": processed.get("selected_count", len(scoring_log.get("selected", []))),
+    }
+
+
+def _save_rejected_candidates(config: dict[str, Any]) -> bool:
+    return bool(config.get("analysis", {}).get("save_rejected_candidates", True))
+
+
+def _save_backtest_daily_reports(config: dict[str, Any]) -> bool:
+    return _generate_backtest_daily_markdown(config)
+
+
+def _reporting_config(config: dict[str, Any]) -> dict[str, Any]:
+    return config.get("reporting", {}) if isinstance(config.get("reporting"), dict) else {}
+
+
+def _generate_articles_in_backtest(config: dict[str, Any]) -> bool:
+    reporting = _reporting_config(config)
+    if "generate_articles_in_backtest" in reporting:
+        return bool(reporting.get("generate_articles_in_backtest"))
+    return bool(config.get("analysis", {}).get("save_backtest_daily_reports", False))
+
+
+def _generate_backtest_daily_markdown(config: dict[str, Any]) -> bool:
+    reporting = _reporting_config(config)
+    if "generate_daily_markdown_in_backtest" in reporting:
+        return bool(reporting.get("generate_daily_markdown_in_backtest"))
+    return bool(config.get("analysis", {}).get("save_backtest_daily_reports", False))
+
+
+def _scores_for_storage(scores: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
+    if _save_rejected_candidates(config):
+        return scores
+    return [item for item in scores if item.get("selected")]
+
+
+def _scoring_log_for_storage(scoring_log: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    if _save_rejected_candidates(config):
+        return scoring_log
+    scores = _scores_for_storage(scoring_log.get("scores", []), config)
+    return {
+        **scoring_log,
+        "scores": scores,
+        "rejected_candidate_detail_saved": False,
+        "storage_note": "Rejected candidate details were omitted because analysis.save_rejected_candidates=false.",
     }
 
 
@@ -3630,6 +4864,7 @@ def write_real_daily_markdown(
     scoring_log: dict[str, Any],
 ) -> tuple[Path, Path]:
     config = load_config(CONFIG_PATH)
+    migrate_report_articles_layout(config)
     summary = normalize_real_summary_for_markdown(trade_result["portfolio_summary"], target_date_text)
     summary["market_context"] = load_market_context_for_date(target_date_text, "jquants")
     attach_paper_trading_report_context(summary, config)
@@ -3654,8 +4889,6 @@ def write_real_daily_markdown(
                 "reason": item.get("selection_reason") or item.get("selected_reason") or item.get("rejected_reason") or item.get("reason", ""),
                 "total_score": item["total_score"],
                 "technical_score": item.get("technical_score"),
-                "news_score": item.get("news_score"),
-                "financial_score": item.get("financial_score"),
                 "candle_type": item.get("candle_type"),
                 "candlestick_signals": item.get("candlestick_signals", []),
                 "candlestick_score": item.get("candlestick_score"),
@@ -3668,7 +4901,6 @@ def write_real_daily_markdown(
                 "macd_hist": item.get("macd_hist"),
                 "bb_position": item.get("bb_position"),
                 "atr": item.get("atr"),
-                "news_reason": item.get("news_reason", "ニュース材料は中立です"),
                 "confidence": item["confidence"],
                 "market_filter_applied": item.get("market_filter_applied", False),
                 "market_regime": item.get("market_regime"),
@@ -3680,8 +4912,8 @@ def write_real_daily_markdown(
     }
     report_md = generate_daily_report(summary, paper_trade_log, decisions, config)
     article_md = generate_note_article(summary, paper_trade_log, config)
-    report_path = ROOT / "reports" / profile_id_from(config) / f"day_{target_date_text}.md"
-    article_path = ROOT / "articles" / "drafts" / profile_id_from(config) / f"day_{target_date_text}.md"
+    report_path = _paper_report_path(config, target_date_text)
+    article_path = _daily_article_path(config, target_date_text, profile_id_from(config))
     write_text(report_path, report_md)
     write_text(article_path, article_md)
     save_article(
@@ -3697,7 +4929,34 @@ def write_real_daily_markdown(
             "body": article_md,
         },
     )
+    _update_article_index(article_path, target_date_text, "draft", config)
     return report_path, article_path
+
+
+def migrate_report_articles_layout(config: dict[str, Any]) -> None:
+    base_dir = ROOT / "reports" / "articles"
+    if not base_dir.exists():
+        return
+    profile_id = profile_id_from(config)
+    for path in base_dir.glob("*.md"):
+        date_text = _date_text_from_filename(path.name)
+        if not date_text:
+            continue
+        target = _daily_article_path(config, date_text, profile_id)
+        if target == path:
+            continue
+        if target.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        path.rename(target)
+        _update_article_index(target, date_text, "draft", config)
+
+
+def _date_text_from_filename(name: str) -> str | None:
+    match = re.search(r"(20\d{2})-?(\d{2})-?(\d{2})", name)
+    if not match:
+        return None
+    return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
 
 
 def write_backtest_daily_markdown(
@@ -3732,8 +4991,6 @@ def write_backtest_daily_markdown(
                 "reason": item.get("selection_reason") or item.get("selected_reason") or item.get("rejected_reason") or item.get("reason", ""),
                 "total_score": item["total_score"],
                 "technical_score": item.get("technical_score"),
-                "news_score": item.get("news_score"),
-                "financial_score": item.get("financial_score"),
                 "candle_type": item.get("candle_type"),
                 "candlestick_signals": item.get("candlestick_signals", []),
                 "candlestick_score": item.get("candlestick_score"),
@@ -3746,7 +5003,6 @@ def write_backtest_daily_markdown(
                 "macd_hist": item.get("macd_hist"),
                 "bb_position": item.get("bb_position"),
                 "atr": item.get("atr"),
-                "news_reason": item.get("news_reason", "ニュース材料は中立です"),
                 "confidence": item["confidence"],
                 "market_filter_applied": item.get("market_filter_applied", False),
                 "market_regime": item.get("market_regime"),
@@ -3775,7 +5031,154 @@ def write_backtest_daily_markdown(
             "body": article_md,
         },
     )
+    _update_article_index(article_path, target_date_text, "draft", config)
     return report_path, article_path
+
+
+def write_backtest_report_markdown(
+    report_dir: Path,
+    target_date_text: str,
+    trade_result: dict[str, Any],
+    scoring_log: dict[str, Any],
+) -> Path:
+    config = load_config(CONFIG_PATH)
+    summary = normalize_real_summary_for_markdown(trade_result["portfolio_summary"], target_date_text)
+    summary["market_context"] = load_market_context_for_date(target_date_text, "jquants")
+    attach_paper_trading_report_context(summary, config)
+    paper_trade_log = normalize_real_trade_for_markdown(
+        trade_result["state"],
+        trade_result["trades"],
+        target_date_text,
+        trade_result.get("safety_events", []),
+    )
+    decisions = {"date": target_date_text, "decisions": _daily_decision_rows(scoring_log, config)}
+    report_path = report_dir / f"day_{target_date_text}.md"
+    write_text(report_path, generate_daily_report(summary, paper_trade_log, decisions, config))
+    return report_path
+
+
+def write_backtest_article_markdown(
+    article_path: Path,
+    target_date_text: str,
+    trade_result: dict[str, Any],
+) -> Path:
+    config = load_config(CONFIG_PATH)
+    summary = normalize_real_summary_for_markdown(trade_result["portfolio_summary"], target_date_text)
+    summary["market_context"] = load_market_context_for_date(target_date_text, "jquants")
+    attach_paper_trading_report_context(summary, config)
+    paper_trade_log = normalize_real_trade_for_markdown(
+        trade_result["state"],
+        trade_result["trades"],
+        target_date_text,
+        trade_result.get("safety_events", []),
+    )
+    article_md = generate_note_article(summary, paper_trade_log, config)
+    write_text(article_path, article_md)
+    save_article(
+        config,
+        ROOT,
+        {
+            "date": target_date_text,
+            "day": summary["day_number"],
+            "title": _extract_markdown_title(article_md),
+            "status": "draft",
+            "path": str(article_path.relative_to(ROOT)),
+            "config_version": config_version_from(config),
+            "body": article_md,
+        },
+    )
+    _update_article_index(article_path, target_date_text, "draft", config)
+    return article_path
+
+
+def write_fast_backtest_daily_artifacts(
+    backtest_dir: Path,
+    report_dir: Path,
+    article_dir: Path,
+    target_date_text: str,
+    trade_result: dict[str, Any],
+) -> tuple[Path, Path, Path]:
+    reflection_path = backtest_dir / f"reflections_{target_date_text}.json"
+    report_path = report_dir / f"day_{target_date_text}.md"
+    article_path = article_dir / f"day_{target_date_text}.md"
+    portfolio_summary = trade_result.get("portfolio_summary", {})
+    trades = trade_result.get("trades", [])
+    buy_count = sum(1 for trade in trades if trade.get("action") == "BUY")
+    sell_count = sum(1 for trade in trades if trade.get("action") == "SELL")
+    write_json(
+        reflection_path,
+        {
+            "date": target_date_text,
+            "skipped": True,
+            "reason": "fast_analysis disabled daily reflection generation",
+        },
+    )
+    write_text(
+        report_path,
+        "\n".join(
+            [
+                f"# Backtest Daily Report {target_date_text}",
+                "",
+                "fast_analysis: true",
+                "detail: skipped daily markdown generation",
+                f"total_assets: {portfolio_summary.get('total_assets')}",
+                f"candidate_count: {trade_result.get('candidate_count', 0)}",
+                f"selected_count: {trade_result.get('selected_count', 0)}",
+                f"buy_count: {buy_count}",
+                f"sell_count: {sell_count}",
+                "",
+            ]
+        ),
+    )
+    write_text(
+        article_path,
+        "\n".join(
+            [
+                f"# Backtest Article {target_date_text}",
+                "",
+                "fast_analysis: true",
+                "detail: skipped note article generation",
+                "",
+            ]
+        ),
+    )
+    return reflection_path, report_path, article_path
+
+
+def _daily_decision_rows(scoring_log: dict[str, Any], config: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "code": item["code"],
+            "name": item["name"],
+            "sector_name": item.get("sector_name"),
+            "sector_momentum_score": item.get("sector_momentum_score"),
+            "sector_rank": item.get("sector_rank"),
+            "sector_comment": item.get("sector_comment"),
+            "sector_score_adjustment": item.get("sector_score_adjustment"),
+            "decision": "BUY" if item.get("selected") else "PASS",
+            "reason": item.get("selection_reason") or item.get("selected_reason") or item.get("rejected_reason") or item.get("reason", ""),
+            "total_score": item["total_score"],
+            "technical_score": item.get("technical_score"),
+            "candle_type": item.get("candle_type"),
+            "candlestick_signals": item.get("candlestick_signals", []),
+            "candlestick_score": item.get("candlestick_score"),
+            "trend_score": item.get("trend_score"),
+            "volume_score": item.get("volume_score"),
+            "rsi_score": item.get("rsi_score"),
+            "ma5": item.get("ma5"),
+            "ma25": item.get("ma25"),
+            "volume_ratio": item.get("volume_ratio"),
+            "macd_hist": item.get("macd_hist"),
+            "bb_position": item.get("bb_position"),
+            "atr": item.get("atr"),
+            "confidence": item["confidence"],
+            "market_filter_applied": item.get("market_filter_applied", False),
+            "market_regime": item.get("market_regime"),
+            "market_filter_reason": item.get("market_filter_reason", ""),
+            "dealer_comment": generate_buy_comment(item, config) if item.get("selected") else "",
+        }
+        for item in scoring_log.get("scores", [])
+    ]
 
 
 def normalize_real_summary_for_markdown(summary: dict[str, Any], target_date_text: str) -> dict[str, Any]:
@@ -4004,6 +5407,10 @@ def ensure_price_history_for_backtest(provider_name: str, start_date: date, end_
         provider = JQuantsDataProvider(
             ROOT / ".env",
             timeout_seconds=int(config.get("jquants", {}).get("request_timeout_seconds", 20)),
+            plan=_jquants_plan(config),
+            requests_per_minute=_jquants_requests_per_minute(config),
+            parallel_fetch=_jquants_parallel_fetch(config),
+            max_parallel_requests=_jquants_max_parallel_requests(config),
         )
     except RuntimeError as exc:
         usable_dates = available_cached_price_dates(start_date, end_date)
@@ -4020,13 +5427,15 @@ def ensure_price_history_for_backtest(provider_name: str, start_date: date, end_
             end_date,
             prime_codes,
             lookback_business_days=len(fetch_dates),
-            rate_limit_per_minute=int(config.get("jquants", {}).get("rate_limit_per_minute", 5)),
+            rate_limit_per_minute=_jquants_requests_per_minute(config),
             fetch_dates=fetch_dates,
             continue_on_error=True,
             verbose=True,
         )
+        _print_fetch_statistics(provider)
     except KeyboardInterrupt:
         print("fetch-period-prices interrupted. Existing cache is preserved.")
+        _print_fetch_statistics(provider)
         raise
 
     usable_dates = available_cached_price_dates(start_date, end_date)
@@ -4112,8 +5521,6 @@ def enrich_candidates_with_position_prices(
                 "sector_comment": indicator.get("sector_comment", ""),
                 "total_score": 0,
                 "technical_score": 0,
-                "news_score": 0,
-                "financial_score": 0,
                 "confidence": 0.0,
                 "rank": 0,
                 "selected": False,
@@ -4363,6 +5770,7 @@ def render_analysis_markdown(analysis: dict[str, Any]) -> str:
     yearly_performance = analysis.get("yearly_performance", [])
     monthly_performance = analysis.get("monthly_performance", [])
     walk_forward_validation = analysis.get("walk_forward_validation", {})
+    market_regime_performance = analysis.get("market_regime_performance", {})
     selection_quality = analysis.get("selection_quality_analysis", {})
     bands = scores["score_bands"]
     lines = [
@@ -4472,6 +5880,10 @@ def render_analysis_markdown(analysis: dict[str, Any]) -> str:
         "## Walk Forward Validation",
         "",
         *_walk_forward_validation_lines(walk_forward_validation),
+        "",
+        "## Market Regime Performance Analysis",
+        "",
+        *_market_regime_performance_lines(market_regime_performance),
         "",
         "## Yearly Performance",
         "",
@@ -4693,6 +6105,52 @@ def _walk_forward_validation_lines(analysis: dict[str, Any]) -> list[str]:
         "## Overfit Risk",
         "",
         *_overfit_risk_lines(analysis.get("overfit_risk", {})),
+    ]
+
+
+def _market_regime_performance_lines(analysis: dict[str, Any]) -> list[str]:
+    if not analysis:
+        return ["- Market Regime Performance データなし"]
+    lines = ["### Regime Results", ""]
+    lines.extend(_market_regime_result_lines(analysis.get("regimes", [])))
+    lines.extend(["", "## Best Regime", ""])
+    lines.extend(_market_regime_single_lines(analysis.get("best_regime")))
+    lines.extend(["", "## Worst Regime", ""])
+    lines.extend(_market_regime_single_lines(analysis.get("worst_regime")))
+    lines.extend(["", "## Candidate Regime Filters", ""])
+    lines.extend(_candidate_regime_filter_lines(analysis.get("candidate_regime_filters", [])))
+    return lines
+
+
+def _market_regime_result_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- レジーム別データなし"]
+    return [
+        (
+            f"- {item.get('market_regime')}: "
+            f"profit {_format_optional_yen(item.get('profit'))}, "
+            f"win_rate {_format_optional_percent(item.get('win_rate'))}, "
+            f"PF {_format_optional_number(item.get('profit_factor'))}, "
+            f"expectancy {_format_optional_percent(item.get('expectancy'))}, "
+            f"DD {_format_optional_percent(item.get('max_drawdown'))}, "
+            f"trade_count {item.get('trade_count')}"
+        )
+        for item in items
+    ]
+
+
+def _market_regime_single_lines(item: dict[str, Any] | None) -> list[str]:
+    if not item:
+        return ["- 該当なし"]
+    return _market_regime_result_lines([item])
+
+
+def _candidate_regime_filter_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- 候補なし"]
+    return [
+        f"- {item.get('rule')}: {item.get('reason')}"
+        for item in items
     ]
 
 
@@ -5039,100 +6497,147 @@ def fetch_price_history(
     continue_on_error: bool = False,
     verbose: bool = False,
 ) -> list[dict[str, Any]]:
-    rows = []
-    api_requests = 0
-    request_interval = 60 / max(rate_limit_per_minute, 1)
     target_fetch_dates = fetch_dates or previous_business_dates(target_date, lookback_business_days)
     total_dates = len(target_fetch_dates)
-    for index, fetch_date in enumerate(target_fetch_dates, start=1):
-        cached_rows = load_cached_prime_prices(fetch_date)
-        if cached_rows is not None:
-            if verbose:
-                print(
-                    f"fetch-period-prices [{index}/{total_dates}] "
-                    f"{fetch_date.isoformat()} cache ({len(cached_rows)} prime rows)"
+    if getattr(provider, "requests_per_minute", None) is None:
+        setattr(provider, "requests_per_minute", rate_limit_per_minute)
+    if getattr(provider, "parallel_fetch", False):
+        if verbose:
+            print(
+                "fetch-period-prices parallel fetch enabled "
+                f"workers={getattr(provider, 'max_parallel_requests', 4)} rpm={getattr(provider, 'requests_per_minute', rate_limit_per_minute)}"
+            )
+        with ThreadPoolExecutor(max_workers=int(getattr(provider, "max_parallel_requests", 4))) as executor:
+            parts = list(
+                executor.map(
+                    lambda item: _fetch_price_history_for_date(
+                        provider,
+                        item[1],
+                        prime_codes,
+                        item[0],
+                        total_dates,
+                        continue_on_error,
+                        verbose,
+                    ),
+                    enumerate(target_fetch_dates, start=1),
                 )
-            rows.extend(cached_rows)
-            continue
-        no_data_entry = load_no_data_day(fetch_date)
-        if no_data_entry is not None:
-            if verbose:
-                print(
-                    f"fetch-period-prices [{index}/{total_dates}] "
-                    f"{fetch_date.isoformat()} no-data cache hit reason={no_data_entry.get('reason', 'unknown')}"
-                )
-                print(
-                    f"fetch-period-prices skip no-data cache: "
-                    f"{fetch_date.isoformat()} reason={no_data_entry.get('reason', 'unknown')}"
-                )
-            continue
-        unsupported_entry = load_unsupported_day(fetch_date)
-        if unsupported_entry is not None:
-            if verbose:
-                print(
-                    f"fetch-period-prices [{index}/{total_dates}] "
-                    f"{fetch_date.isoformat()} unsupported cache hit reason={unsupported_entry.get('reason', 'unknown')}"
-                )
-                print(
-                    f"fetch-period-prices skip unsupported cache: "
-                    f"{fetch_date.isoformat()} reason={unsupported_entry.get('reason', 'unknown')}"
-                )
-            continue
+            )
+        return [row for part in parts for row in part]
 
-        if api_requests > 0:
-            if verbose:
-                print(f"fetch-period-prices waiting {request_interval:.1f}s for rate limit")
-            time.sleep(request_interval)
+    rows = []
+    for index, fetch_date in enumerate(target_fetch_dates, start=1):
+        rows.extend(
+            _fetch_price_history_for_date(
+                provider,
+                fetch_date,
+                prime_codes,
+                index,
+                total_dates,
+                continue_on_error,
+                verbose,
+            )
+        )
+    return rows
+
+
+def _fetch_price_history_for_date(
+    provider: JQuantsDataProvider,
+    fetch_date: date,
+    prime_codes: set[str],
+    index: int,
+    total_dates: int,
+    continue_on_error: bool,
+    verbose: bool,
+) -> list[dict[str, Any]]:
+    cached_rows = load_cached_prime_prices(fetch_date)
+    if cached_rows is not None:
+        _increment_provider_stat(provider, "cache_hits")
         if verbose:
             print(
                 f"fetch-period-prices [{index}/{total_dates}] "
-                f"{fetch_date.isoformat()} fetching J-Quants API"
+                f"{fetch_date.isoformat()} cache ({len(cached_rows)} prime rows)"
             )
-        try:
-            daily_prices = fetch_daily_prices_with_rate_limit_retry(provider, fetch_date, verbose=verbose)
-        except KeyboardInterrupt:
-            if verbose:
-                print(f"fetch-period-prices {fetch_date.isoformat()} interrupted by Ctrl+C")
-            raise
-        except RuntimeError as exc:
-            if is_bad_request_or_out_of_range_error(exc):
-                save_unsupported_day(
-                    fetch_date,
-                    reason="http_400_bad_request_or_out_of_range",
-                    source="fetch-period-prices",
-                )
-                if verbose:
-                    print(
-                        f"fetch-period-prices {fetch_date.isoformat()} "
-                        "HTTP 400 bad_request_or_out_of_range; saved unsupported cache"
-                    )
-                api_requests += 1
-                continue
-            if verbose:
-                print(f"fetch-period-prices {fetch_date.isoformat()} temporary API error; not cached: {exc}")
-            if continue_on_error:
-                api_requests += 1
-                continue
-            raise
-        prime_prices = [
-            _normalize_daily_price(record)
-            for record in daily_prices
-            if _get_first(record, ["code", "Code", "LocalCode"]) in prime_codes
-        ]
-        if prime_prices:
-            cache_price_snapshot(fetch_date, len(daily_prices), prime_prices)
-            rows.extend(prime_prices)
+        return cached_rows
+    no_data_entry = load_no_data_day(fetch_date)
+    if no_data_entry is not None:
+        _increment_provider_stat(provider, "cache_hits")
+        if verbose:
+            print(
+                f"fetch-period-prices [{index}/{total_dates}] "
+                f"{fetch_date.isoformat()} no-data cache hit reason={no_data_entry.get('reason', 'unknown')}"
+            )
+            print(
+                f"fetch-period-prices skip no-data cache: "
+                f"{fetch_date.isoformat()} reason={no_data_entry.get('reason', 'unknown')}"
+            )
+        return []
+    unsupported_entry = load_unsupported_day(fetch_date)
+    if unsupported_entry is not None:
+        _increment_provider_stat(provider, "cache_hits")
+        if verbose:
+            print(
+                f"fetch-period-prices [{index}/{total_dates}] "
+                f"{fetch_date.isoformat()} unsupported cache hit reason={unsupported_entry.get('reason', 'unknown')}"
+            )
+            print(
+                f"fetch-period-prices skip unsupported cache: "
+                f"{fetch_date.isoformat()} reason={unsupported_entry.get('reason', 'unknown')}"
+            )
+        return []
+
+    _increment_provider_stat(provider, "cache_misses")
+    if verbose:
+        print(
+            f"fetch-period-prices [{index}/{total_dates}] "
+            f"{fetch_date.isoformat()} fetching J-Quants API"
+        )
+    try:
+        daily_prices = fetch_daily_prices_with_rate_limit_retry(provider, fetch_date, verbose=verbose)
+    except KeyboardInterrupt:
+        if verbose:
+            print(f"fetch-period-prices {fetch_date.isoformat()} interrupted by Ctrl+C")
+        raise
+    except RuntimeError as exc:
+        if is_bad_request_or_out_of_range_error(exc):
+            save_unsupported_day(
+                fetch_date,
+                reason="http_400_bad_request_or_out_of_range",
+                source="fetch-period-prices",
+            )
             if verbose:
                 print(
-                    f"fetch-period-prices {fetch_date.isoformat()} saved "
-                    f"{len(prime_prices)} prime rows from {len(daily_prices)} rows"
+                    f"fetch-period-prices {fetch_date.isoformat()} "
+                    "HTTP 400 bad_request_or_out_of_range; saved unsupported cache"
                 )
-        else:
-            save_no_data_day(fetch_date, reason="no_prime_rows", source="fetch-period-prices")
-            if verbose:
-                print(f"fetch-period-prices {fetch_date.isoformat()} no prime rows; saved no-data cache")
-        api_requests += 1
-    return rows
+            return []
+        if verbose:
+            print(f"fetch-period-prices {fetch_date.isoformat()} temporary API error; not cached: {exc}")
+        if continue_on_error:
+            return []
+        raise
+    prime_prices = [
+        _normalize_daily_price(record)
+        for record in daily_prices
+        if _get_first(record, ["code", "Code", "LocalCode"]) in prime_codes
+    ]
+    if prime_prices:
+        cache_price_snapshot(fetch_date, len(daily_prices), prime_prices)
+        if verbose:
+            print(
+                f"fetch-period-prices {fetch_date.isoformat()} saved "
+                f"{len(prime_prices)} prime rows from {len(daily_prices)} rows"
+            )
+        return prime_prices
+    save_no_data_day(fetch_date, reason="no_prime_rows", source="fetch-period-prices")
+    if verbose:
+        print(f"fetch-period-prices {fetch_date.isoformat()} no prime rows; saved no-data cache")
+    return []
+
+
+def _increment_provider_stat(provider: Any, key: str, amount: float = 1.0) -> None:
+    stats = getattr(provider, "fetch_stats", None)
+    if isinstance(stats, dict):
+        stats[key] = stats.get(key, 0) + amount
 
 
 def fetch_daily_prices_with_rate_limit_retry(
@@ -5393,8 +6898,8 @@ def build_day_paths(run_date: date, day_key: str) -> dict[str, Path]:
         "portfolio": ROOT / "logs" / "portfolio" / profile_id / month_key / f"{file_key}.json",
         "portfolio_summary": ROOT / "logs" / "portfolio" / profile_id / month_key / f"{file_key}_summary.json",
         "reflections": ROOT / "logs" / "reflections" / profile_id / month_key / f"{file_key}_reflections.json",
-        "report": ROOT / "reports" / profile_id / month_key / f"{file_key}.md",
-        "article": ROOT / "articles" / "drafts" / profile_id / month_key / f"{file_key}.md",
+        "report": ROOT / "reports" / "paper" / profile_id / month_key / f"{file_key}.md",
+        "article": ROOT / "reports" / "articles" / "daily" / run_date.strftime("%Y") / run_date.strftime("%m") / profile_id / f"{file_key}.md",
     }
 
 
@@ -5403,12 +6908,385 @@ def build_data_provider(config: dict[str, Any], run_date: date, run_id: str) -> 
     if provider_name == "dummy":
         return DummyDataProvider(config, run_date, run_id)
     if provider_name == "jquants":
-        return JQuantsDataProvider(ROOT / ".env")
+        return JQuantsDataProvider(
+            ROOT / ".env",
+            plan=_jquants_plan(config),
+            requests_per_minute=_jquants_requests_per_minute(config),
+            parallel_fetch=_jquants_parallel_fetch(config),
+            max_parallel_requests=_jquants_max_parallel_requests(config),
+        )
     raise ValueError(f"Unsupported data_provider: {provider_name}")
 
 
 def load_config(path: Path) -> dict[str, Any]:
-    return load_profile(ACTIVE_PROFILE_ID)
+    runtime_settings = _runtime_settings_or_defaults()
+    profile_id = ACTIVE_PROFILE_ID
+    if not RUNTIME_SETTINGS and profile_id == DEFAULT_PROFILE_ID:
+        profile_id = str(runtime_settings["profile_id"])
+    config = load_profile(profile_id)
+    _apply_runtime_provider_settings(config)
+    _apply_jquants_plan_settings(config)
+    if _fast_analysis_enabled(config):
+        analysis = config.setdefault("analysis", {})
+        analysis["save_rejected_candidates"] = False
+        analysis["save_selection_quality_detail"] = False
+        analysis["save_replay_detail"] = False
+        analysis["save_recovery_detail"] = False
+        analysis["save_score_audit_detail"] = False
+        analysis["save_backtest_daily_reports"] = False
+        reporting = config.setdefault("reporting", {})
+        reporting["generate_articles_in_backtest"] = False
+        reporting["generate_daily_markdown_in_backtest"] = False
+    return config
+
+
+def _load_provider_runtime_config() -> dict[str, Any]:
+    if not PROVIDER_CONFIG_PATH.exists():
+        return {}
+    try:
+        payload = load_versioned_config(PROVIDER_CONFIG_PATH)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _config_get(config: dict[str, Any], path: tuple[str, ...], default: Any = None) -> Any:
+    current: Any = config
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            return default
+        current = current[key]
+    return current
+
+
+def _runtime_settings_or_defaults() -> dict[str, Any]:
+    if RUNTIME_SETTINGS:
+        return RUNTIME_SETTINGS
+    class EmptyArgs:
+        provider = None
+        profile = None
+        jquants_plan = None
+
+    return resolve_runtime_settings(EmptyArgs())
+
+
+def _apply_runtime_provider_settings(config: dict[str, Any]) -> None:
+    settings = _runtime_settings_or_defaults()
+    sources = dict(settings.get("sources", {}))
+    config["_value_sources"] = sources
+    config["data_provider"] = settings["provider"]
+    broker = config.setdefault("broker", {})
+    broker["mode"] = settings["broker_mode"]
+    broker["provider"] = settings["broker_mode"]
+    operation = config.setdefault("operation", {})
+    operation["auto_order_enabled"] = bool(settings["auto_order_enabled"])
+    jquants = config.setdefault("jquants", {})
+    jquants["plan"] = settings["jquants_plan"]
+
+
+def _apply_jquants_plan_settings(config: dict[str, Any]) -> None:
+    provider_config = _load_jquants_config_file()
+    jquants = config.setdefault("jquants", {})
+    if provider_config:
+        jquants.update(provider_config)
+
+    raw_plan = JQUANTS_PLAN_OVERRIDE or jquants.get("plan", "free")
+    plan = normalize_jquants_plan(raw_plan)
+    warnings = config.setdefault("_warnings", [])
+    if str(raw_plan or "").strip().lower() not in {"", "free", "light"}:
+        warnings.append(f"unknown J-Quants plan `{raw_plan}`; falling back to free")
+
+    jquants["plan"] = plan
+    jquants["capability_status"] = jquants_capability_status(plan)
+    plan_settings = _jquants_plan_settings(jquants, plan)
+    requests_per_minute = int(plan_settings.get("requests_per_minute", jquants.get("requests_per_minute", jquants.get("rate_limit_per_minute", 5))))
+    jquants["requests_per_minute"] = requests_per_minute
+    jquants["rate_limit_per_minute"] = requests_per_minute
+    jquants["parallel_fetch"] = bool(plan_settings.get("parallel_fetch", False)) and plan == "light"
+    jquants["max_parallel_requests"] = int(plan_settings.get("max_parallel_requests", 4))
+
+    features = config.setdefault("features", {})
+    if not jquants_has_capability(plan, "topix_prices"):
+        if features.get("topix_relative_strength"):
+            warnings.append("topix_relative_strength disabled because J-Quants plan is free")
+        features["topix_relative_strength"] = False
+        jquants["relative_strength_benchmark"] = "prime_market_average"
+    else:
+        jquants["relative_strength_benchmark"] = "topix" if features.get("topix_relative_strength") else "prime_market_average"
+
+    if not jquants_has_capability(plan, "investor_breakdown"):
+        if features.get("investor_breakdown_score"):
+            warnings.append("investor_breakdown_score disabled because J-Quants plan is free")
+        features["investor_breakdown_score"] = False
+
+    if not jquants_has_capability(plan, "investor_types"):
+        if features.get("investor_context"):
+            warnings.append("investor_context disabled because J-Quants plan is free")
+        features["investor_context"] = False
+
+    if plan != "light" and features.get("longer_history_backtest"):
+        warnings.append("longer_history_backtest disabled because J-Quants plan is free")
+        features["longer_history_backtest"] = False
+
+
+def _load_jquants_config_file() -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for path in (ROOT / "config" / "jquants.yaml", PROVIDER_CONFIG_PATH):
+        if not path.exists():
+            continue
+        try:
+            if yaml is not None:
+                payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            else:
+                payload = _load_simple_yaml(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        section = payload.get("jquants", payload)
+        if isinstance(section, dict):
+            merged.update(section)
+    return merged
+
+
+def _jquants_plan(config: dict[str, Any]) -> str:
+    return normalize_jquants_plan(config.get("jquants", {}).get("plan", "free"))
+
+
+def _jquants_plan_settings(jquants: dict[str, Any], plan: str) -> dict[str, Any]:
+    plans = jquants.get("plans", {})
+    if isinstance(plans, dict) and isinstance(plans.get(plan), dict):
+        return dict(plans[plan])
+    defaults = {
+        "free": {"requests_per_minute": 5, "parallel_fetch": False},
+        "light": {"requests_per_minute": 60, "parallel_fetch": True, "max_parallel_requests": 4},
+    }
+    return defaults.get(plan, defaults["free"])
+
+
+def _jquants_requests_per_minute(config: dict[str, Any]) -> int:
+    return int(config.get("jquants", {}).get("requests_per_minute", config.get("jquants", {}).get("rate_limit_per_minute", 5)))
+
+
+def _jquants_parallel_fetch(config: dict[str, Any]) -> bool:
+    return _jquants_plan(config) == "light" and bool(config.get("jquants", {}).get("parallel_fetch", False))
+
+
+def _jquants_max_parallel_requests(config: dict[str, Any]) -> int:
+    return max(1, int(config.get("jquants", {}).get("max_parallel_requests", 4)))
+
+
+def _load_earnings_calendar_for_date(target_date: date, config: dict[str, Any], force_refresh: bool | None = None) -> dict[str, Any]:
+    if not bool(config.get("earnings_filter", {}).get("enabled", False)):
+        return {"records": [], "metadata": {"filter_available": False, "reason": "earnings_filter disabled"}}
+    cache_root = ROOT / "data" / "cache"
+    cache_path = cache_root / "jquants" / "earnings_calendar" / f"{target_date.isoformat()}.json"
+    requested_force_refresh = FORCE_REFRESH_ACTIVE if force_refresh is None else force_refresh
+    if target_date < date.today():
+        if cache_path.exists():
+            payload = _read_earnings_calendar_cache(cache_path, target_date)
+        else:
+            payload = {
+                "records": [],
+                "cache_path": str(cache_path),
+                "cache_date": target_date.isoformat(),
+                "from_cache": False,
+                "fallback_used": False,
+                "warning": "historical earnings calendar cache unavailable; disabled to avoid future leak",
+                "filter_available": False,
+            }
+        if not payload.get("filter_available", False) and bool(config.get("earnings_filter", {}).get("fail_open", True)):
+            print(f"earnings filter warning: disabled by fail_open. reason={payload.get('warning')}")
+        return {
+            "records": payload.get("records", []),
+            "metadata": {
+                "cache_path": payload.get("cache_path"),
+                "cache_date": payload.get("cache_date"),
+                "from_cache": payload.get("from_cache"),
+                "fallback_used": payload.get("fallback_used"),
+                "warning": payload.get("warning"),
+                "filter_available": payload.get("filter_available", False),
+            },
+        }
+    try:
+        provider = JQuantsDataProvider(
+            ROOT / ".env",
+            timeout_seconds=int(config.get("jquants", {}).get("request_timeout_seconds", 20)),
+            plan=_jquants_plan(config),
+            requests_per_minute=_jquants_requests_per_minute(config),
+            parallel_fetch=_jquants_parallel_fetch(config),
+            max_parallel_requests=_jquants_max_parallel_requests(config),
+        )
+        payload = provider.fetch_earnings_calendar_cached(
+            cache_root,
+            target_date=target_date,
+            force_refresh=requested_force_refresh,
+        )
+    except Exception as exc:
+        payload = {
+            "records": [],
+            "cache_path": "",
+            "cache_date": target_date.isoformat(),
+            "from_cache": False,
+            "fallback_used": False,
+            "warning": str(exc),
+            "filter_available": False,
+        }
+    if not payload.get("filter_available", False) and bool(config.get("earnings_filter", {}).get("fail_open", True)):
+        print(f"earnings filter warning: disabled by fail_open. reason={payload.get('warning')}")
+    return {
+        "records": payload.get("records", []),
+        "metadata": {
+            "cache_path": payload.get("cache_path"),
+            "cache_date": payload.get("cache_date"),
+            "from_cache": payload.get("from_cache"),
+            "fallback_used": payload.get("fallback_used"),
+            "warning": payload.get("warning"),
+            "filter_available": payload.get("filter_available", False),
+        },
+    }
+
+
+def _read_earnings_calendar_cache(cache_path: Path, target_date: date) -> dict[str, Any]:
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "records": [],
+            "cache_path": str(cache_path),
+            "cache_date": target_date.isoformat(),
+            "from_cache": False,
+            "fallback_used": False,
+            "warning": str(exc),
+            "filter_available": False,
+        }
+    return {
+        "records": payload.get("records", []) if isinstance(payload, dict) else [],
+        "cache_path": str(cache_path),
+        "cache_date": target_date.isoformat(),
+        "from_cache": True,
+        "fallback_used": False,
+        "warning": "",
+        "filter_available": True,
+    }
+
+
+def _load_investor_context_for_date(target_date: date, config: dict[str, Any], force_refresh: bool | None = None) -> dict[str, Any]:
+    enabled = bool(config.get("features", {}).get("investor_context")) and bool(config.get("scoring", {}).get("use_investor_context_score"))
+    if not enabled:
+        return {
+            "records": [],
+            "context": dict(INVESTOR_CONTEXT_EMPTY),
+            "metadata": {"available": False, "reason": "investor_context disabled"},
+        }
+    if not jquants_has_capability(_jquants_plan(config), "investor_types"):
+        print("investor_context warning: investor_types disabled for current J-Quants plan.")
+        return {
+            "records": [],
+            "context": dict(INVESTOR_CONTEXT_EMPTY),
+            "metadata": {"available": False, "warning": "investor_types disabled for current J-Quants plan"},
+        }
+    start_date = target_date - timedelta(days=45)
+    try:
+        provider = JQuantsDataProvider(
+            ROOT / ".env",
+            timeout_seconds=int(config.get("jquants", {}).get("request_timeout_seconds", 20)),
+            plan=_jquants_plan(config),
+            requests_per_minute=_jquants_requests_per_minute(config),
+            parallel_fetch=_jquants_parallel_fetch(config),
+            max_parallel_requests=_jquants_max_parallel_requests(config),
+        )
+        payload = provider.fetch_investor_types_cached(
+            ROOT / "data" / "cache",
+            start_date=start_date,
+            end_date=target_date,
+            force_refresh=FORCE_REFRESH_ACTIVE if force_refresh is None else force_refresh,
+        )
+    except Exception as exc:
+        payload = {
+            "records": [],
+            "cache_path": "",
+            "from_cache": False,
+            "fallback_used": False,
+            "warning": str(exc),
+            "available": False,
+        }
+    records = payload.get("records", [])
+    context = build_investor_context(records, target_date) if payload.get("available", False) else dict(INVESTOR_CONTEXT_EMPTY)
+    if context.get("investor_context_source") == "unavailable" and payload.get("available", False):
+        payload["warning"] = payload.get("warning") or "investor_context unavailable"
+    return {
+        "records": records,
+        "context": context,
+        "metadata": {
+            "available": payload.get("available", False),
+            "cache_path": payload.get("cache_path"),
+            "from_cache": payload.get("from_cache"),
+            "fallback_used": payload.get("fallback_used"),
+            "warning": payload.get("warning"),
+            "latest_investor_data_week": context.get("investor_context_week"),
+            "investor_context_source": context.get("investor_context_source"),
+            "investor_context_score": context.get("investor_context_score"),
+        },
+    }
+
+
+def _relative_strength_benchmark_payload(
+    price_rows: list[dict[str, Any]],
+    target_date: date,
+    fetch_dates: list[date],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    topix_records: list[dict[str, Any]] = []
+    scoring_config = config.get("scoring", {}).get("relative_strength", {})
+    wants_topix = str(scoring_config.get("benchmark", "topix")) == "topix"
+    if wants_topix and _jquants_plan(config) == "light" and jquants_has_capability(_jquants_plan(config), "topix_prices"):
+        start_date = fetch_dates[0] if fetch_dates else target_date
+        payload = _load_topix_prices_for_period(start_date, target_date, config)
+        topix_records = payload.get("records", [])
+        if not topix_records:
+            print(f"relative_strength warning: TOPIX benchmark unavailable; fallback benchmark will be used. reason={payload.get('warning')}")
+    elif wants_topix:
+        print("relative_strength warning: TOPIX benchmark disabled for current J-Quants plan; fallback benchmark will be used.")
+    benchmark = build_relative_strength_benchmark(price_rows, target_date.isoformat(), topix_records)
+    if benchmark["benchmark_source"] == "unavailable":
+        print("relative_strength warning: benchmark unavailable; relative_strength_score will be 0.")
+    return benchmark
+
+
+def _expected_relative_strength_benchmark_source(config: dict[str, Any]) -> str:
+    scoring_config = config.get("scoring", {}).get("relative_strength", {})
+    wants_topix = str(scoring_config.get("benchmark", "topix")) == "topix"
+    if wants_topix and _jquants_plan(config) == "light" and jquants_has_capability(_jquants_plan(config), "topix_prices"):
+        return "topix"
+    return "prime_average"
+
+
+def _load_topix_prices_for_period(start_date: date, end_date: date, config: dict[str, Any]) -> dict[str, Any]:
+    try:
+        provider = JQuantsDataProvider(
+            ROOT / ".env",
+            timeout_seconds=int(config.get("jquants", {}).get("request_timeout_seconds", 20)),
+            plan=_jquants_plan(config),
+            requests_per_minute=_jquants_requests_per_minute(config),
+            parallel_fetch=_jquants_parallel_fetch(config),
+            max_parallel_requests=_jquants_max_parallel_requests(config),
+        )
+        return provider.fetch_topix_prices_cached(
+            ROOT / "data" / "cache",
+            start_date=start_date,
+            end_date=end_date,
+            force_refresh=FORCE_REFRESH_ACTIVE,
+        )
+    except Exception as exc:
+        return {
+            "records": [],
+            "cache_path": "",
+            "from_cache": False,
+            "fallback_used": False,
+            "warning": str(exc),
+            "available": False,
+        }
 
 
 def profile_id_from(config: dict[str, Any] | None = None) -> str:
@@ -5552,13 +7430,12 @@ def write_trades_csv(path: Path, trades: list[dict[str, Any]]) -> None:
         "volume_ratio",
         "total_score",
         "technical_score",
-        "news_score",
-        "financial_score",
         "ma_score",
         "rsi_score",
         "volume_score",
         "candlestick_score",
         "market_context_score",
+        "investor_context_score",
         "sector_score",
         "penalty_score",
         "score_components",
@@ -5566,7 +7443,21 @@ def write_trades_csv(path: Path, trades: list[dict[str, Any]]) -> None:
         "score_components_match",
         "market_regime",
         "advance_ratio",
+        "investor_context_source",
+        "investor_context_week",
+        "overseas_net_buy",
+        "overseas_net_buy_4w_sum",
+        "overseas_net_buy_4w_trend",
+        "overseas_buy_sell_ratio",
+        "individual_net_buy",
+        "institution_net_buy",
+        "trust_bank_net_buy",
+        "proprietary_net_buy",
         "candlestick_signals",
+        "earnings_filter_checked",
+        "earnings_filter_blocked",
+        "earnings_filter_reason",
+        "earnings_announcement_date",
         "selected_reason",
         "reason",
         "broker_provider",

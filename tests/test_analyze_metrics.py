@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from db import (
+    _market_regime_performance_analysis,
     _monthly_performance_analysis,
     _portfolio_analysis,
     _trade_analysis,
@@ -674,6 +675,91 @@ def test_walk_forward_validation_splits_stable_and_weak_periods(config_copy: dic
     }
 
 
+def test_market_regime_performance_identifies_best_worst_and_filters(config_copy: dict) -> None:
+    rows = [
+        {
+            "action": "SELL",
+            "entry_date": "2026-01-05",
+            "exit_date": "2026-01-08",
+            "profit": 10000,
+            "gross_profit": 10000,
+            "profit_rate": 0.05,
+            "result": "WIN",
+            "order_status": "FILLED",
+            "market_regime": "risk_on",
+        },
+        {
+            "action": "SELL",
+            "entry_date": "2026-01-10",
+            "exit_date": "2026-01-14",
+            "profit": -2000,
+            "gross_profit": -2000,
+            "profit_rate": -0.01,
+            "result": "LOSS",
+            "order_status": "FILLED",
+            "market_regime": "risk_on",
+        },
+        {
+            "action": "SELL",
+            "entry_date": "2026-01-15",
+            "exit_date": "2026-01-19",
+            "profit": 3000,
+            "gross_profit": 3000,
+            "profit_rate": 0.02,
+            "result": "WIN",
+            "order_status": "FILLED",
+            "market_regime": "neutral",
+        },
+        {
+            "action": "SELL",
+            "entry_date": "2026-01-20",
+            "exit_date": "2026-01-23",
+            "profit": -6000,
+            "gross_profit": -6000,
+            "profit_rate": -0.03,
+            "result": "LOSS",
+            "order_status": "FILLED",
+            "market_regime": "risk_off",
+        },
+        {
+            "action": "BUY",
+            "entry_date": "2026-01-24",
+            "profit": 999999,
+            "gross_profit": 999999,
+            "profit_rate": 9.99,
+            "result": "WIN",
+            "order_status": "FILLED",
+            "market_regime": "risk_off",
+        },
+    ]
+
+    analysis = _market_regime_performance_analysis(config_copy, rows)
+    by_regime = {item["market_regime"]: item for item in analysis["regimes"]}
+
+    assert by_regime["risk_on"] == {
+        "market_regime": "risk_on",
+        "profit": 8000.0,
+        "win_rate": 0.5,
+        "profit_factor": 5.0,
+        "expectancy": 0.02,
+        "max_drawdown": -0.002,
+        "trade_count": 2,
+    }
+    assert by_regime["neutral"]["profit"] == 3000.0
+    assert by_regime["neutral"]["profit_factor"] is None
+    assert by_regime["risk_off"]["profit"] == -6000.0
+    assert by_regime["risk_off"]["profit_factor"] == 0.0
+    assert analysis["best_regime"]["market_regime"] == "risk_on"
+    assert analysis["worst_regime"]["market_regime"] == "risk_off"
+    assert [
+        item["rule"] for item in analysis["candidate_regime_filters"]
+    ] == [
+        "market_regime = risk_on は採用維持",
+        "market_regime = risk_off は買付抑制候補",
+        "risk_off の新規買付制限を維持または強化",
+    ]
+
+
 def test_analysis_markdown_includes_yearly_and_monthly_sections() -> None:
     analysis = {
         "current_profile_id": "rookie_dealer_01",
@@ -897,6 +983,19 @@ def test_analysis_markdown_includes_yearly_and_monthly_sections() -> None:
             ],
             "overfit_risk": {"risk_level": "moderate", "stable_period_count": 1, "weak_period_count": 1, "reason": "安定期間と弱い期間が混在しています。"},
         },
+        "market_regime_performance": {
+            "regimes": [
+                {"market_regime": "risk_on", "profit": 10000, "win_rate": 1.0, "profit_factor": None, "expectancy": 0.05, "max_drawdown": 0.0, "trade_count": 1},
+                {"market_regime": "neutral", "profit": 2000, "win_rate": 0.5, "profit_factor": 2.0, "expectancy": 0.01, "max_drawdown": -0.01, "trade_count": 2},
+                {"market_regime": "risk_off", "profit": -6000, "win_rate": 0.0, "profit_factor": 0.0, "expectancy": -0.03, "max_drawdown": -0.02, "trade_count": 1},
+            ],
+            "best_regime": {"market_regime": "risk_on", "profit": 10000, "win_rate": 1.0, "profit_factor": None, "expectancy": 0.05, "max_drawdown": 0.0, "trade_count": 1},
+            "worst_regime": {"market_regime": "risk_off", "profit": -6000, "win_rate": 0.0, "profit_factor": 0.0, "expectancy": -0.03, "max_drawdown": -0.02, "trade_count": 1},
+            "candidate_regime_filters": [
+                {"rule": "market_regime = risk_on は採用維持", "reason": "risk_on が最も強い相場です。"},
+                {"rule": "market_regime = risk_off は買付抑制候補", "reason": "risk_off が最も弱い相場です。"},
+            ],
+        },
     }
 
     markdown = render_analysis_markdown(analysis)
@@ -956,3 +1055,10 @@ def test_analysis_markdown_includes_yearly_and_monthly_sections() -> None:
     assert "## Weak Periods" in markdown
     assert "## Overfit Risk" in markdown
     assert "risk_level: moderate" in markdown
+    assert "## Market Regime Performance Analysis" in markdown
+    assert "risk_on: profit 10,000円, win_rate 100.00%, PF N/A, expectancy 5.00%, DD 0.00%, trade_count 1" in markdown
+    assert "risk_off: profit -6,000円, win_rate 0.00%, PF 0.00, expectancy -3.00%, DD -2.00%, trade_count 1" in markdown
+    assert "## Best Regime" in markdown
+    assert "## Worst Regime" in markdown
+    assert "## Candidate Regime Filters" in markdown
+    assert "market_regime = risk_off は買付抑制候補" in markdown

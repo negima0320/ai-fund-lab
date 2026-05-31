@@ -52,6 +52,10 @@ def test_selection_quality_compares_selected_and_rejected_future_returns(config_
                     "name": "Selected Up",
                     "rank": 1,
                     "total_score": 80,
+                    "relative_strength_score": 10,
+                    "relative_strength_5d": 0.07,
+                    "relative_strength_10d": 0.09,
+                    "relative_strength_20d": 0.12,
                     "selected": True,
                     "market_regime": "risk_on",
                     "sector_name": "Tech",
@@ -62,6 +66,10 @@ def test_selection_quality_compares_selected_and_rejected_future_returns(config_
                     "name": "Missed Winner",
                     "rank": 2,
                     "total_score": 78,
+                    "relative_strength_score": 7,
+                    "relative_strength_5d": 0.04,
+                    "relative_strength_10d": 0.06,
+                    "relative_strength_20d": 0.01,
                     "selected": False,
                     "rejected_reason": "上限超過",
                     "market_regime": "neutral",
@@ -73,6 +81,10 @@ def test_selection_quality_compares_selected_and_rejected_future_returns(config_
                     "name": "False Positive",
                     "rank": 3,
                     "total_score": 76,
+                    "relative_strength_score": 0,
+                    "relative_strength_5d": -0.02,
+                    "relative_strength_10d": -0.04,
+                    "relative_strength_20d": -0.06,
                     "selected": True,
                     "market_regime": "risk_on",
                     "sector_name": "Tech",
@@ -83,6 +95,10 @@ def test_selection_quality_compares_selected_and_rejected_future_returns(config_
                     "name": "Correct Reject",
                     "rank": 4,
                     "total_score": 60,
+                    "relative_strength_score": 0,
+                    "relative_strength_5d": -0.03,
+                    "relative_strength_10d": -0.02,
+                    "relative_strength_20d": -0.01,
                     "selected": False,
                     "rejected_reason": "出来高倍率不足のため新規買付見送り",
                     "market_regime": "risk_off",
@@ -116,6 +132,9 @@ def test_selection_quality_compares_selected_and_rejected_future_returns(config_
     assert averages_by_feature["total_score"]["selected_average"] == 78
     assert averages_by_feature["total_score"]["rejected_average"] == 69
     assert averages_by_feature["total_score"]["difference"] == 9
+    assert averages_by_feature["relative_strength_score"]["selected_average"] == 5
+    assert averages_by_feature["relative_strength_score"]["rejected_average"] == 3.5
+    assert averages_by_feature["relative_strength_score"]["difference"] == 1.5
     selected_heavy_by_feature_value = {
         (item["feature"], item["value"]): item
         for item in lift_optimization["selected_heavy_features"]
@@ -181,6 +200,7 @@ def test_selection_quality_compares_selected_and_rejected_future_returns(config_
     assert "selected平均" in markdown
     assert "Selected側だけに多い特徴" in markdown
     assert "Rejected側だけに多い特徴" in markdown
+    assert "relative_strength_score" in markdown
     assert "Selection Lift Deep Analysis" in markdown
     assert "Positive Lift Features" in markdown
     assert "Negative Lift Features" in markdown
@@ -312,7 +332,7 @@ def test_low_score_deep_analysis_finds_rescue_rule_candidates(config_copy: dict,
                     "code": "3001",
                     "name": "Low Score Breakout A",
                     "rank": 1,
-                    "total_score": 68,
+                    "total_score": 43,
                     "selected": True,
                     "market_regime": "neutral",
                     "sector_name": "機械",
@@ -322,7 +342,7 @@ def test_low_score_deep_analysis_finds_rescue_rule_candidates(config_copy: dict,
                     "code": "3002",
                     "name": "Low Score Breakout B",
                     "rank": 2,
-                    "total_score": 66,
+                    "total_score": 41,
                     "selected": False,
                     "market_regime": "risk_on",
                     "sector_name": "機械",
@@ -333,7 +353,7 @@ def test_low_score_deep_analysis_finds_rescue_rule_candidates(config_copy: dict,
                     "code": "3003",
                     "name": "Low Score Weak",
                     "rank": 3,
-                    "total_score": 67,
+                    "total_score": 42,
                     "selected": False,
                     "market_regime": "risk_off",
                     "sector_name": "小売業",
@@ -344,7 +364,7 @@ def test_low_score_deep_analysis_finds_rescue_rule_candidates(config_copy: dict,
                     "code": "3004",
                     "name": "High Score Outside",
                     "rank": 4,
-                    "total_score": 72,
+                    "total_score": 47,
                     "selected": True,
                     "market_regime": "neutral",
                     "sector_name": "機械",
@@ -357,7 +377,7 @@ def test_low_score_deep_analysis_finds_rescue_rule_candidates(config_copy: dict,
     analysis = build_selection_quality_analysis(config_copy, tmp_path)
     low_score = analysis["low_score_deep_analysis"]
 
-    assert low_score["score_range"] == {"min": 65, "max": 69}
+    assert low_score["score_range"] == {"min": 40, "max": 44}
     assert low_score["low_score_count"] == 3
     assert low_score["winner_count"] == 2
     assert low_score["loser_count"] == 1
@@ -380,12 +400,12 @@ def test_low_score_deep_analysis_finds_rescue_rule_candidates(config_copy: dict,
     assert separation_by_feature_value[("long_lower_shadow_support", "yes")]["winner_count"] == 1
     assert all(item["code"] != "3004" for item in low_score["winners"] + low_score["losers"])
     assert low_score["candidate_rescue_rules"][0]["rule"] == (
-        "total_score 65-69 でも volume_ratio >= 3 かつ volume_confirmed_breakout なら採用候補"
+        "total_score 40-44 でも volume_ratio >= 3 かつ volume_confirmed_breakout なら採用候補"
     )
 
     markdown = render_selection_quality_markdown(analysis)
     assert "Low Score Deep Analysis" in markdown
-    assert "Winners in 65-69" in markdown
-    assert "Losers in 65-69" in markdown
+    assert "Winners in 40-44" in markdown
+    assert "Losers in 40-44" in markdown
     assert "Features with highest separation" in markdown
     assert "Candidate Rescue Rules" in markdown

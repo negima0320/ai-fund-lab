@@ -5,14 +5,20 @@ from __future__ import annotations
 import os
 import random
 import json
+from datetime import date, datetime
+import threading
+import time
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 from abc import ABC, abstractmethod
-from datetime import date
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlencode
 from urllib.request import Request
+
+from earnings_calendar import normalize_earnings_calendar_records
+from investor_context import normalize_investor_type_records
+from jquants_plan import jquants_capabilities, jquants_has_capability, normalize_jquants_plan
 
 
 SECTORS = [
@@ -27,6 +33,32 @@ SECTORS = [
     "銀行",
     "卸売",
 ]
+
+
+class RateLimiter:
+    """Simple thread-safe fixed-interval limiter for J-Quants API calls."""
+
+    def __init__(self, requests_per_minute: int, sleeper: Any = time.sleep, clock: Any = time.monotonic) -> None:
+        self.requests_per_minute = max(1, int(requests_per_minute))
+        self.interval_seconds = 60.0 / self.requests_per_minute
+        self._sleeper = sleeper
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._next_allowed_at = 0.0
+        self.acquire_count = 0
+        self.total_wait_time = 0.0
+
+    def acquire(self) -> float:
+        with self._lock:
+            now = self._clock()
+            wait_seconds = max(0.0, self._next_allowed_at - now)
+            if wait_seconds > 0:
+                self._sleeper(wait_seconds)
+                self.total_wait_time += wait_seconds
+                now = self._clock()
+            self._next_allowed_at = max(now, self._next_allowed_at) + self.interval_seconds
+            self.acquire_count += 1
+            return wait_seconds
 
 
 class BaseDataProvider(ABC):
@@ -113,7 +145,15 @@ class JQuantsDataProvider(BaseDataProvider):
     Real API fetches are intentionally left as TODO for the next phase.
     """
 
-    def __init__(self, env_path: Optional[Path] = None, timeout_seconds: int = 20) -> None:
+    def __init__(
+        self,
+        env_path: Optional[Path] = None,
+        timeout_seconds: int = 20,
+        plan: str = "free",
+        requests_per_minute: int = 5,
+        parallel_fetch: bool = False,
+        max_parallel_requests: int = 4,
+    ) -> None:
         _load_env(env_path)
         api_key = os.getenv("JQUANTS_API_KEY")
         if not api_key:
@@ -123,6 +163,19 @@ class JQuantsDataProvider(BaseDataProvider):
         self.base_url = "https://api.jquants.com/v2"
         self.default_headers = {"x-api-key": self.api_key}
         self.timeout_seconds = timeout_seconds
+        self.plan = normalize_jquants_plan(plan)
+        self.capabilities = jquants_capabilities(self.plan)
+        self.requests_per_minute = max(1, int(requests_per_minute))
+        self.parallel_fetch = bool(parallel_fetch) and self.plan == "light"
+        self.max_parallel_requests = max(1, int(max_parallel_requests))
+        self.rate_limiter = RateLimiter(self.requests_per_minute)
+        self.fetch_stats = {
+            "api_calls": 0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "total_fetch_time": 0.0,
+            "rate_limit_wait_time": 0.0,
+        }
 
     def get_listed_stocks(self) -> list[dict[str, Any]]:
         payload = self._get_json("/equities/master")
@@ -143,6 +196,237 @@ class JQuantsDataProvider(BaseDataProvider):
             },
         )
 
+    def get_topix_prices(self, start_date: date, end_date: Optional[date] = None) -> list[dict[str, Any]]:
+        if not self.has_capability("topix_prices"):
+            print("warning: J-Quants topix_prices is disabled for free plan; use Prime market average fallback.")
+            return []
+        params = {"from": start_date.isoformat()}
+        if end_date:
+            params["to"] = end_date.isoformat()
+        return self._get_paginated_records("/indices/topix", params)
+
+    def fetch_topix_prices(self, start_date: date, end_date: date) -> list[dict[str, Any]]:
+        return normalize_topix_price_records(self.get_topix_prices(start_date, end_date))
+
+    def fetch_topix_prices_cached(
+        self,
+        cache_root: Path,
+        start_date: date,
+        end_date: date,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        cache_path = cache_root / "jquants" / "topix_prices" / f"{start_date.isoformat()}_to_{end_date.isoformat()}.json"
+        if cache_path.exists() and not force_refresh:
+            _increment_fetch_stat(self, "cache_hits")
+            return {
+                "records": _read_cached_json(cache_path).get("records", []),
+                "cache_path": str(cache_path),
+                "from_cache": True,
+                "fallback_used": False,
+                "warning": "",
+                "available": True,
+            }
+        if not self.has_capability("topix_prices"):
+            return {
+                "records": [],
+                "cache_path": str(cache_path),
+                "from_cache": False,
+                "fallback_used": False,
+                "warning": "topix_prices disabled for current J-Quants plan",
+                "available": False,
+            }
+        try:
+            _increment_fetch_stat(self, "cache_misses")
+            records = self.fetch_topix_prices(start_date, end_date)
+        except Exception as exc:
+            if cache_path.exists():
+                _increment_fetch_stat(self, "cache_hits")
+                return {
+                    "records": _read_cached_json(cache_path).get("records", []),
+                    "cache_path": str(cache_path),
+                    "from_cache": True,
+                    "fallback_used": True,
+                    "warning": str(exc),
+                    "available": True,
+                }
+            return {
+                "records": [],
+                "cache_path": str(cache_path),
+                "from_cache": False,
+                "fallback_used": False,
+                "warning": str(exc),
+                "available": False,
+            }
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_cached_json(
+            cache_path,
+            {
+                "fetched_at": datetime.now().isoformat(timespec="seconds"),
+                "records": records,
+            },
+        )
+        return {
+            "records": records,
+            "cache_path": str(cache_path),
+            "from_cache": False,
+            "fallback_used": False,
+            "warning": "",
+            "available": True,
+        }
+
+    def get_investor_breakdown(self, start_date: date, end_date: Optional[date] = None) -> list[dict[str, Any]]:
+        if not self.has_capability("investor_breakdown"):
+            print("warning: J-Quants investor_breakdown is disabled for free plan.")
+            return []
+        params = {"from": start_date.isoformat()}
+        if end_date:
+            params["to"] = end_date.isoformat()
+        return self._get_paginated_records("/markets/trades_spec", params)
+
+    def fetch_investor_types(self, start_date: date, end_date: date) -> list[dict[str, Any]]:
+        if not self.has_capability("investor_types"):
+            print("warning: J-Quants investor_types is disabled for free plan.")
+            return []
+        records = self._get_paginated_records(
+            "/equities/investor-types",
+            {
+                "from": start_date.isoformat(),
+                "to": end_date.isoformat(),
+            },
+        )
+        return normalize_investor_type_records(records)
+
+    def fetch_investor_types_cached(
+        self,
+        cache_root: Path,
+        start_date: date,
+        end_date: date,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        cache_path = cache_root / "jquants" / "investor_types" / f"{start_date.isoformat()}_to_{end_date.isoformat()}.json"
+        if cache_path.exists() and not force_refresh:
+            _increment_fetch_stat(self, "cache_hits")
+            return {
+                "records": _read_cached_json(cache_path).get("records", []),
+                "cache_path": str(cache_path),
+                "from_cache": True,
+                "fallback_used": False,
+                "warning": "",
+                "available": True,
+            }
+        if not self.has_capability("investor_types"):
+            return {
+                "records": [],
+                "cache_path": str(cache_path),
+                "from_cache": False,
+                "fallback_used": False,
+                "warning": "investor_types disabled for current J-Quants plan",
+                "available": False,
+            }
+        try:
+            _increment_fetch_stat(self, "cache_misses")
+            records = self.fetch_investor_types(start_date, end_date)
+        except Exception as exc:
+            if cache_path.exists():
+                _increment_fetch_stat(self, "cache_hits")
+                return {
+                    "records": _read_cached_json(cache_path).get("records", []),
+                    "cache_path": str(cache_path),
+                    "from_cache": True,
+                    "fallback_used": True,
+                    "warning": str(exc),
+                    "available": True,
+                }
+            return {
+                "records": [],
+                "cache_path": str(cache_path),
+                "from_cache": False,
+                "fallback_used": False,
+                "warning": str(exc),
+                "available": False,
+            }
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_cached_json(
+            cache_path,
+            {
+                "fetched_at": datetime.now().isoformat(timespec="seconds"),
+                "records": records,
+            },
+        )
+        return {
+            "records": records,
+            "cache_path": str(cache_path),
+            "from_cache": False,
+            "fallback_used": False,
+            "warning": "",
+            "available": True,
+        }
+
+    def fetch_earnings_calendar(self) -> list[dict[str, Any]]:
+        records = self._get_paginated_records("/equities/earnings-calendar", {})
+        return normalize_earnings_calendar_records(records)
+
+    def fetch_earnings_calendar_cached(
+        self,
+        cache_root: Path,
+        target_date: Optional[date] = None,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        cache_date = target_date or date.today()
+        cache_path = cache_root / "jquants" / "earnings_calendar" / f"{cache_date.isoformat()}.json"
+        if cache_path.exists() and not force_refresh:
+            _increment_fetch_stat(self, "cache_hits")
+            return {
+                "records": _read_cached_json(cache_path).get("records", []),
+                "cache_path": str(cache_path),
+                "cache_date": cache_date.isoformat(),
+                "from_cache": True,
+                "fallback_used": False,
+                "warning": "",
+                "filter_available": True,
+            }
+        try:
+            _increment_fetch_stat(self, "cache_misses")
+            records = self.fetch_earnings_calendar()
+        except Exception as exc:
+            if cache_path.exists():
+                _increment_fetch_stat(self, "cache_hits")
+                return {
+                    "records": _read_cached_json(cache_path).get("records", []),
+                    "cache_path": str(cache_path),
+                    "cache_date": cache_date.isoformat(),
+                    "from_cache": True,
+                    "fallback_used": True,
+                    "warning": str(exc),
+                    "filter_available": True,
+                }
+            return {
+                "records": [],
+                "cache_path": str(cache_path),
+                "cache_date": cache_date.isoformat(),
+                "from_cache": False,
+                "fallback_used": False,
+                "warning": str(exc),
+                "filter_available": False,
+            }
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_cached_json(
+            cache_path,
+            {
+                "fetched_at": datetime.now().isoformat(timespec="seconds"),
+                "records": records,
+            },
+        )
+        return {
+            "records": records,
+            "cache_path": str(cache_path),
+            "cache_date": cache_date.isoformat(),
+            "from_cache": False,
+            "fallback_used": False,
+            "warning": "",
+            "filter_available": True,
+        }
+
     def get_stock_fundamentals(self, code: str) -> dict[str, Any]:
         # TODO: Fetch fundamentals/statements from J-Quants V2 API with x-api-key.
         raise NotImplementedError("J-Quants fundamentals fetch is not implemented yet.")
@@ -151,12 +435,17 @@ class JQuantsDataProvider(BaseDataProvider):
         # J-Quants does not provide news. Use another API or web search in a later phase.
         return []
 
+    def has_capability(self, capability: str) -> bool:
+        return jquants_has_capability(self.plan, capability)
+
     def _build_request(self, path: str) -> Request:
         """Build a future J-Quants V2 HTTP request with x-api-key authentication."""
         return Request(f"{self.base_url}{path}", headers=self.default_headers)
 
     def _get_json(self, path: str) -> Any:
         request = self._build_request(path)
+        wait_seconds = self.rate_limiter.acquire()
+        started_at = time.perf_counter()
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
                 body = response.read().decode("utf-8")
@@ -170,6 +459,11 @@ class JQuantsDataProvider(BaseDataProvider):
             raise RuntimeError(f"J-Quants network error: {exc.reason}") from exc
         except TimeoutError as exc:
             raise RuntimeError("J-Quants network error: request timed out.") from exc
+        finally:
+            elapsed = time.perf_counter() - started_at
+            _increment_fetch_stat(self, "api_calls")
+            _increment_fetch_stat(self, "total_fetch_time", elapsed)
+            _increment_fetch_stat(self, "rate_limit_wait_time", wait_seconds)
 
         try:
             return json.loads(body)
@@ -229,3 +523,56 @@ def _extract_records(payload: Any) -> list[dict[str, Any]]:
             return value
 
     raise RuntimeError("J-Quants response format is invalid: listed stock records not found.")
+
+
+def normalize_topix_price_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized = []
+    for record in records:
+        row = {
+            "date": _format_date(str(_first_value(record, ["Date", "date"]))),
+            "open": _number_value(record, ["Open", "open", "O"]),
+            "high": _number_value(record, ["High", "high", "H"]),
+            "low": _number_value(record, ["Low", "low", "L"]),
+            "close": _number_value(record, ["Close", "close", "C"]),
+        }
+        if row["date"] and row["close"] is not None:
+            normalized.append(row)
+    return normalized
+
+
+def _first_value(record: dict[str, Any], keys: list[str]) -> Any:
+    for key in keys:
+        if record.get(key) is not None:
+            return record.get(key)
+    return ""
+
+
+def _number_value(record: dict[str, Any], keys: list[str]) -> float | None:
+    value = _first_value(record, keys)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_date(value: str) -> str:
+    if len(value) == 8 and value.isdigit():
+        return f"{value[:4]}-{value[4:6]}-{value[6:]}"
+    return value
+
+
+def _read_cached_json(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def _write_cached_json(path: Path, payload: dict[str, Any]) -> None:
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2)
+        file.write("\n")
+
+
+def _increment_fetch_stat(provider: Any, key: str, amount: float = 1.0) -> None:
+    stats = getattr(provider, "fetch_stats", None)
+    if isinstance(stats, dict):
+        stats[key] = stats.get(key, 0) + amount

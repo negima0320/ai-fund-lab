@@ -18,6 +18,11 @@ PROFILE_ALIASES = {
     "rookie_dealer_02_v2.2": "rookie_dealer_02_v2_2",
     "rookie_dealer_02_v2.3": "rookie_dealer_02_v2_3",
     "rookie_dealer_02_v2.4": "rookie_dealer_02_v2_4",
+    "rookie_dealer_02_v2.6": "rookie_dealer_02_v2_6",
+    "rookie_dealer_02_v2.7": "rookie_dealer_02_v2_7",
+    "rookie_dealer_02_v2.8": "rookie_dealer_02_v2_8",
+    "rookie_dealer_02_v2.9": "rookie_dealer_02_v2_9",
+    "rookie_dealer_02_v2.10": "rookie_dealer_02_v2_10",
 }
 
 

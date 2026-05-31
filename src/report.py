@@ -153,9 +153,27 @@ def _paper_daily_report_lines(summary: dict[str, Any], paper_trade_log: dict[str
             "",
             f"- 勝率: {_format_optional_percent(summary.get('win_rate'))}",
             f"- PF: {_format_optional_number(_profit_factor(all_closed))}",
+            "",
+            "### 手動承認用 preview_orders",
+            "",
+            *_daily_preview_order_lines(paper_trade_log.get("preview_orders", [])),
         ]
     )
     return lines
+
+
+def _daily_preview_order_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- preview order なし"]
+    return [
+        (
+            f"- [{item.get('approval_status', 'PENDING_MANUAL_APPROVAL')}] {item.get('action')} "
+            f"{item.get('code')} {item.get('name')}: shares={item.get('shares')}, "
+            f"estimated_price={float(item.get('estimated_price') or 0):,.0f}円, "
+            f"reason={item.get('reason')}, order_status={item.get('order_status', 'PREVIEW')}"
+        )
+        for item in items
+    ]
 
 
 def _paper_weekly_report_lines(summary: dict[str, Any], paper_trade_log: dict[str, Any]) -> list[str]:

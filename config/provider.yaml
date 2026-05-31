@@ -1,0 +1,17 @@
+data_provider: jquants
+
+jquants:
+  plan: free
+
+broker:
+  mode: paper
+
+profile:
+  default: rookie_dealer_02_v2_1
+
+operation:
+  auto_order_enabled: false
+
+backtest:
+  start_date: "2026-01-05"
+  end_date: "2026-03-06"

@@ -1,0 +1,10 @@
+jquants:
+  plan: free
+  plans:
+    free:
+      requests_per_minute: 5
+      parallel_fetch: false
+    light:
+      requests_per_minute: 60
+      parallel_fetch: true
+      max_parallel_requests: 4

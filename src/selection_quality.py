@@ -9,12 +9,17 @@ from pathlib import Path
 from typing import Any
 
 from db import get_database_path
+from earnings_calendar import EARNINGS_FILTER_REJECTED_REASON
 
 
 NUMERIC_LIFT_FIELDS = [
     ("rsi", "RSI"),
     ("volume_ratio", "volume_ratio"),
     ("total_score", "total_score"),
+    ("relative_strength_score", "relative_strength_score"),
+    ("relative_strength_5d", "relative_strength_5d"),
+    ("relative_strength_10d", "relative_strength_10d"),
+    ("relative_strength_20d", "relative_strength_20d"),
 ]
 
 CATEGORICAL_LIFT_FIELDS = [
@@ -27,6 +32,10 @@ DEEP_ANALYSIS_FEATURES = [
     ("rsi", "RSI"),
     ("volume_ratio", "volume_ratio"),
     ("total_score", "total_score"),
+    ("relative_strength_score", "relative_strength_score"),
+    ("relative_strength_5d", "relative_strength_5d"),
+    ("relative_strength_10d", "relative_strength_10d"),
+    ("relative_strength_20d", "relative_strength_20d"),
     ("sector", "sector"),
     ("market_regime", "market_regime"),
     ("candlestick_signal", "candlestick_signal"),
@@ -102,8 +111,11 @@ def build_selection_quality_analysis(config: dict[str, Any], root: Path) -> dict
         },
         "selection_lift_optimization_analysis": _selection_lift_optimization_analysis(selected_records, rejected_records),
         "selection_lift_deep_analysis": _selection_lift_deep_analysis(selected_records, rejected_records),
+        "relative_strength_selection_quality": _relative_strength_selection_quality(selected_records, rejected_records),
+        "investor_context_selection_quality": _investor_context_selection_quality(selected_records, rejected_records),
         "sector_lift_analysis": _sector_lift_analysis(selected_records, rejected_records),
-        "low_score_deep_analysis": _low_score_deep_analysis(score_records),
+        "low_score_deep_analysis": _low_score_deep_analysis(score_records, config),
+        "earnings_filter_analysis": _earnings_filter_analysis(selected_records, rejected_records),
         "rejected_reason_analysis": _rejected_reason_analysis(selected_records, rejected_records),
         "missed_opportunity_by_reason": _missed_opportunity_by_reason(rejected_records),
         "top_missed_opportunities": _top_records(
@@ -180,6 +192,14 @@ def render_selection_quality_markdown(analysis: dict[str, Any]) -> str:
         "",
         *_candidate_rule_lines(analysis.get("selection_lift_deep_analysis", {}).get("candidate_new_rules", [])),
         "",
+        "## Relative Strength Selection Quality",
+        "",
+        *_relative_strength_selection_quality_lines(analysis.get("relative_strength_selection_quality", {})),
+        "",
+        "## Investor Context Selection Quality",
+        "",
+        *_investor_context_selection_quality_lines(analysis.get("investor_context_selection_quality", {})),
+        "",
         "## Sector Lift Analysis",
         "",
         *_sector_lift_lines(analysis.get("sector_lift_analysis", {}).get("sectors", [])),
@@ -195,6 +215,10 @@ def render_selection_quality_markdown(analysis: dict[str, Any]) -> str:
         "## Low Score Deep Analysis",
         "",
         *_low_score_deep_analysis_lines(analysis.get("low_score_deep_analysis", {})),
+        "",
+        "## Earnings Filter Analysis",
+        "",
+        *_earnings_filter_analysis_lines(analysis.get("earnings_filter_analysis", {})),
         "",
         "## Stage Comparison",
         "",
@@ -244,11 +268,35 @@ def _quality_record(
         "total_score": _number(row.get("total_score")),
         "rsi": _first_number(row.get("rsi"), screening.get("rsi")),
         "volume_ratio": _first_number(row.get("volume_ratio"), screening.get("volume_ratio")),
+        "stock_return_5d": _first_number(row.get("stock_return_5d"), screening.get("stock_return_5d")),
+        "stock_return_10d": _first_number(row.get("stock_return_10d"), screening.get("stock_return_10d")),
+        "stock_return_20d": _first_number(row.get("stock_return_20d"), screening.get("stock_return_20d")),
+        "benchmark_source": row.get("benchmark_source") or screening.get("benchmark_source") or "unknown",
+        "benchmark_return_5d": _first_number(row.get("benchmark_return_5d"), screening.get("benchmark_return_5d")),
+        "benchmark_return_10d": _first_number(row.get("benchmark_return_10d"), screening.get("benchmark_return_10d")),
+        "benchmark_return_20d": _first_number(row.get("benchmark_return_20d"), screening.get("benchmark_return_20d")),
+        "relative_strength_5d": _first_number(row.get("relative_strength_5d"), screening.get("relative_strength_5d")),
+        "relative_strength_10d": _first_number(row.get("relative_strength_10d"), screening.get("relative_strength_10d")),
+        "relative_strength_20d": _first_number(row.get("relative_strength_20d"), screening.get("relative_strength_20d")),
+        "relative_strength_score": _first_number(row.get("relative_strength_score"), screening.get("relative_strength_score")),
+        "investor_context_source": row.get("investor_context_source") or "unknown",
+        "investor_context_week": row.get("investor_context_week"),
+        "overseas_net_buy": _number(row.get("overseas_net_buy")),
+        "overseas_net_buy_4w_sum": _number(row.get("overseas_net_buy_4w_sum")),
+        "overseas_net_buy_4w_trend": row.get("overseas_net_buy_4w_trend") or "unknown",
+        "overseas_buy_sell_ratio": _number(row.get("overseas_buy_sell_ratio")),
+        "individual_net_buy": _number(row.get("individual_net_buy")),
+        "institution_net_buy": _number(row.get("institution_net_buy")),
+        "investor_context_score": _number(row.get("investor_context_score")),
         "market_regime": row.get("market_regime") or screening.get("market_regime") or "unknown",
         "sector": row.get("sector_name") or screening.get("sector_name") or "未分類",
         "candlestick_signals": _json_list(row.get("candlestick_signals")) or _json_list(screening.get("candlestick_signals")),
         "rejected_reason": row.get("rejected_reason"),
         "reason": row.get("reason"),
+        "earnings_filter_checked": bool(row.get("earnings_filter_checked")),
+        "earnings_filter_blocked": bool(row.get("earnings_filter_blocked")),
+        "earnings_filter_reason": row.get("earnings_filter_reason"),
+        "earnings_announcement_date": row.get("earnings_announcement_date"),
         "base_close": base_close,
         "price_5d": price_5d,
         "price_10d": price_10d,
@@ -275,6 +323,48 @@ def _conditional_selected_count(records: list[dict[str, Any]]) -> int:
 
 def _conditional_rejected_count(records: list[dict[str, Any]]) -> int:
     return sum(1 for record in records if str(record.get("rejected_reason") or "").startswith("conditional rejected"))
+
+
+def _earnings_filter_analysis(selected_records: list[dict[str, Any]], rejected_records: list[dict[str, Any]]) -> dict[str, Any]:
+    rejected = [
+        record for record in rejected_records
+        if record.get("earnings_filter_blocked") or record.get("rejected_reason") == EARNINGS_FILTER_REJECTED_REASON
+    ]
+    selected_avg10d = _average(_valid_numbers(record.get("return_10d") for record in selected_records))
+    rejected_avg10d = _average(_valid_numbers(record.get("return_10d") for record in rejected))
+    return {
+        "rejected_by_earnings_filter_count": len(rejected),
+        "rejected_by_earnings_filter_avg5d": _average(_valid_numbers(record.get("return_5d") for record in rejected)),
+        "rejected_by_earnings_filter_avg10d": rejected_avg10d,
+        "earnings_filter_effectiveness": _filter_effectiveness(rejected_avg10d, selected_avg10d),
+    }
+
+
+def _relative_strength_selection_quality(selected_records: list[dict[str, Any]], rejected_records: list[dict[str, Any]]) -> dict[str, Any]:
+    fields = [
+        "relative_strength_5d",
+        "relative_strength_10d",
+        "relative_strength_20d",
+        "relative_strength_score",
+    ]
+    return {
+        field: {
+            "selected_average": _average(_valid_numbers(record.get(field) for record in selected_records)),
+            "rejected_average": _average(_valid_numbers(record.get(field) for record in rejected_records)),
+        }
+        for field in fields
+    }
+
+
+def _investor_context_selection_quality(selected_records: list[dict[str, Any]], rejected_records: list[dict[str, Any]]) -> dict[str, Any]:
+    fields = ["investor_context_score", "overseas_net_buy_4w_sum"]
+    return {
+        field: {
+            "selected_average": _average(_valid_numbers(record.get(field) for record in selected_records)),
+            "rejected_average": _average(_valid_numbers(record.get(field) for record in rejected_records)),
+        }
+        for field in fields
+    }
 
 
 def _sector_lift_analysis(selected_records: list[dict[str, Any]], rejected_records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -365,10 +455,11 @@ def _sector_filter_candidate(row: dict[str, Any], direction: str) -> dict[str, A
     }
 
 
-def _low_score_deep_analysis(records: list[dict[str, Any]]) -> dict[str, Any]:
+def _low_score_deep_analysis(records: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, Any]:
+    low_score_min, low_score_max = _low_score_range(config)
     low_score_records = [
         record for record in records
-        if _is_low_score_record(record) and _number(record.get("return_10d")) is not None
+        if _is_low_score_record(record, low_score_min, low_score_max) and _number(record.get("return_10d")) is not None
     ]
     winners = [
         record for record in low_score_records
@@ -382,20 +473,28 @@ def _low_score_deep_analysis(records: list[dict[str, Any]]) -> dict[str, Any]:
     losers.sort(key=lambda record: float(record.get("return_10d") or 0.0))
     separations = _low_score_feature_separations(winners, losers)
     return {
-        "score_range": {"min": LOW_SCORE_MIN, "max": LOW_SCORE_MAX},
+        "score_range": {"min": low_score_min, "max": low_score_max},
         "low_score_count": len(low_score_records),
         "winner_count": len(winners),
         "loser_count": len(losers),
         "winners": _low_score_record_summaries(winners),
         "losers": _low_score_record_summaries(losers),
         "feature_separation": separations[:LOW_SCORE_SEPARATION_LIMIT],
-        "candidate_rescue_rules": _low_score_candidate_rescue_rules(separations, winners, losers),
+        "candidate_rescue_rules": _low_score_candidate_rescue_rules(separations, winners, losers, low_score_min, low_score_max),
     }
 
 
-def _is_low_score_record(record: dict[str, Any]) -> bool:
+def _low_score_range(config: dict[str, Any]) -> tuple[float, float]:
+    selection = config.get("selection", {})
+    return (
+        float(selection.get("fallback_min_score", LOW_SCORE_MIN)),
+        float(selection.get("min_score", LOW_SCORE_MAX + 1)) - 1,
+    )
+
+
+def _is_low_score_record(record: dict[str, Any], low_score_min: float, low_score_max: float) -> bool:
     total_score = _number(record.get("total_score"))
-    return total_score is not None and LOW_SCORE_MIN <= total_score <= LOW_SCORE_MAX
+    return total_score is not None and low_score_min <= total_score <= low_score_max
 
 
 def _low_score_record_summaries(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -479,6 +578,8 @@ def _low_score_candidate_rescue_rules(
     rows: list[dict[str, Any]],
     winners: list[dict[str, Any]],
     losers: list[dict[str, Any]],
+    low_score_min: float,
+    low_score_max: float,
 ) -> list[dict[str, Any]]:
     positive_rows = [
         row for row in rows
@@ -492,7 +593,7 @@ def _low_score_candidate_rescue_rules(
     volume_rule = _find_low_score_row(positive_rows, "volume_ratio", "3+")
     breakout_rule = _find_low_score_row(positive_rows, "volume_confirmed_breakout", "yes")
     if volume_rule and breakout_rule:
-        combined = _combined_low_score_rule(winners, losers)
+        combined = _combined_low_score_rule(winners, losers, low_score_min, low_score_max)
         rules.append(combined)
         rule_texts.add(str(combined["rule"]))
 
@@ -500,7 +601,7 @@ def _low_score_candidate_rescue_rules(
         condition = _low_score_condition_text(row)
         if not condition:
             continue
-        rule_text = f"total_score {LOW_SCORE_MIN}-{LOW_SCORE_MAX} でも {condition} なら採用候補"
+        rule_text = f"total_score {_format_score_range_value(low_score_min)}-{_format_score_range_value(low_score_max)} でも {condition} なら採用候補"
         if rule_text in rule_texts:
             continue
         rule_texts.add(rule_text)
@@ -517,13 +618,18 @@ def _find_low_score_row(rows: list[dict[str, Any]], feature: str, value: str) ->
     return None
 
 
-def _combined_low_score_rule(winners: list[dict[str, Any]], losers: list[dict[str, Any]]) -> dict[str, Any]:
+def _combined_low_score_rule(
+    winners: list[dict[str, Any]],
+    losers: list[dict[str, Any]],
+    low_score_min: float,
+    low_score_max: float,
+) -> dict[str, Any]:
     winner_count = _combined_low_score_count(winners)
     loser_count = _combined_low_score_count(losers)
     winner_share = _share(winner_count, len(winners))
     loser_share = _share(loser_count, len(losers))
     return {
-        "rule": f"total_score {LOW_SCORE_MIN}-{LOW_SCORE_MAX} でも volume_ratio >= 3 かつ volume_confirmed_breakout なら採用候補",
+        "rule": f"total_score {_format_score_range_value(low_score_min)}-{_format_score_range_value(low_score_max)} でも volume_ratio >= 3 かつ volume_confirmed_breakout なら採用候補",
         "feature": "combined",
         "value": "volume_ratio >= 3 AND volume_confirmed_breakout",
         "winner_count": winner_count,
@@ -533,6 +639,10 @@ def _combined_low_score_rule(winners: list[dict[str, Any]], losers: list[dict[st
         "separation": _difference(winner_share, loser_share),
         "confidence": "candidate",
     }
+
+
+def _format_score_range_value(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else str(value)
 
 
 def _combined_low_score_count(records: list[dict[str, Any]]) -> int:
@@ -652,6 +762,10 @@ def _deep_feature_values(record: dict[str, Any], key: str) -> list[str]:
         return [_volume_bucket(record.get("volume_ratio"))]
     if key == "total_score":
         return [_score_bucket(record.get("total_score"))]
+    if key == "relative_strength_score":
+        return [_relative_strength_score_bucket(record.get("relative_strength_score"))]
+    if key in {"relative_strength_5d", "relative_strength_10d", "relative_strength_20d"}:
+        return [_relative_strength_bucket(record.get(key))]
     if key == "candlestick_signal":
         return _candlestick_signal_values(record)
     if key == "sector":
@@ -727,6 +841,10 @@ def _rule_text(row: dict[str, Any]) -> str:
         return _bucket_rule("volume_ratio", value)
     if feature == "total_score":
         return _bucket_rule("total_score", value)
+    if feature == "relative_strength_score":
+        return _bucket_rule("relative_strength_score", value)
+    if feature in {"relative_strength_5d", "relative_strength_10d", "relative_strength_20d"}:
+        return _relative_strength_rule(feature, value)
     if feature == "sector":
         return f"sector = {value}"
     if feature == "market_regime":
@@ -747,6 +865,18 @@ def _bucket_rule(feature: str, bucket: str) -> str:
     if bucket == "unknown":
         return ""
     return f"{feature} = {bucket}"
+
+
+def _relative_strength_rule(feature: str, bucket: str) -> str:
+    mapping = {
+        "< -5%": f"{feature} < -5%",
+        "-5% to 0%": f"{feature} >= -5% and {feature} < 0%",
+        "0% to 3%": f"{feature} >= 0% and {feature} < 3%",
+        "3% to 5%": f"{feature} >= 3% and {feature} < 5%",
+        "5% to 10%": f"{feature} >= 5% and {feature} < 10%",
+        "10%+": f"{feature} >= 10%",
+    }
+    return mapping.get(bucket, "")
 
 
 def _sample_note(row: dict[str, Any]) -> str:
@@ -851,6 +981,10 @@ def _bias_features(record: dict[str, Any]) -> list[tuple[str, str]]:
         ("RSI", _rsi_bucket(record.get("rsi"))),
         ("volume_ratio", _volume_bucket(record.get("volume_ratio"))),
         ("total_score", _score_bucket(record.get("total_score"))),
+        ("relative_strength_score", _relative_strength_score_bucket(record.get("relative_strength_score"))),
+        ("relative_strength_5d", _relative_strength_bucket(record.get("relative_strength_5d"))),
+        ("relative_strength_10d", _relative_strength_bucket(record.get("relative_strength_10d"))),
+        ("relative_strength_20d", _relative_strength_bucket(record.get("relative_strength_20d"))),
         ("market_regime", str(record.get("market_regime") or "unknown")),
         ("sector", str(record.get("sector") or "未分類")),
     ]
@@ -1334,17 +1468,21 @@ def _low_score_deep_analysis_lines(analysis: dict[str, Any]) -> list[str]:
     if not analysis:
         return ["- データなし"]
     score_range = analysis.get("score_range", {})
+    score_range_text = (
+        f"{_format_score_range_value(float(score_range.get('min', LOW_SCORE_MIN)))}-"
+        f"{_format_score_range_value(float(score_range.get('max', LOW_SCORE_MAX)))}"
+    )
     return [
-        f"- target_score_range: {score_range.get('min', LOW_SCORE_MIN)}-{score_range.get('max', LOW_SCORE_MAX)}",
+        f"- target_score_range: {score_range_text}",
         f"- low_score_count: {analysis.get('low_score_count', 0)}",
         f"- winner_count: {analysis.get('winner_count', 0)}",
         f"- loser_count: {analysis.get('loser_count', 0)}",
         "",
-        "### Winners in 65-69",
+        f"### Winners in {score_range_text}",
         "",
         *_low_score_record_lines(analysis.get("winners", [])),
         "",
-        "### Losers in 65-69",
+        f"### Losers in {score_range_text}",
         "",
         *_low_score_record_lines(analysis.get("losers", [])),
         "",
@@ -1405,6 +1543,39 @@ def _low_score_rule_lines(items: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+def _earnings_filter_analysis_lines(analysis: dict[str, Any]) -> list[str]:
+    if not analysis:
+        return ["- データなし"]
+    return [
+        f"- rejected_by_earnings_filter_count: {analysis.get('rejected_by_earnings_filter_count', 0)}",
+        f"- rejected_by_earnings_filter_avg5d: {_format_percent(analysis.get('rejected_by_earnings_filter_avg5d'))}",
+        f"- rejected_by_earnings_filter_avg10d: {_format_percent(analysis.get('rejected_by_earnings_filter_avg10d'))}",
+        f"- earnings_filter_effectiveness: {analysis.get('earnings_filter_effectiveness') or 'N/A'}",
+    ]
+
+
+def _relative_strength_selection_quality_lines(analysis: dict[str, Any]) -> list[str]:
+    if not analysis:
+        return ["- データなし"]
+    lines = []
+    for field in ["relative_strength_5d", "relative_strength_10d", "relative_strength_20d", "relative_strength_score"]:
+        item = analysis.get(field, {})
+        lines.append(f"- selected平均 {field}: {_format_number(item.get('selected_average'))}")
+        lines.append(f"- rejected平均 {field}: {_format_number(item.get('rejected_average'))}")
+    return lines
+
+
+def _investor_context_selection_quality_lines(analysis: dict[str, Any]) -> list[str]:
+    if not analysis:
+        return ["- データなし"]
+    lines = []
+    for field in ["investor_context_score", "overseas_net_buy_4w_sum"]:
+        item = analysis.get(field, {})
+        lines.append(f"- selected平均 {field}: {_format_number(item.get('selected_average'))}")
+        lines.append(f"- rejected平均 {field}: {_format_number(item.get('rejected_average'))}")
+    return lines
+
+
 def _signal_text(signals: Any) -> str:
     values = [str(signal) for signal in signals if signal]
     return ", ".join(values) if values else "no_signal"
@@ -1457,8 +1628,16 @@ def _score_bucket(value: Any) -> str:
     number = _number(value)
     if number is None:
         return "unknown"
+    if number < 40:
+        return "<40"
+    if number < 45:
+        return "40-45"
+    if number < 50:
+        return "45-50"
+    if number < 55:
+        return "50-55"
     if number < 60:
-        return "<60"
+        return "55-60"
     if number < 65:
         return "60-65"
     if number < 70:
@@ -1468,6 +1647,38 @@ def _score_bucket(value: Any) -> str:
     if number < 80:
         return "75-80"
     return "80+"
+
+
+def _relative_strength_score_bucket(value: Any) -> str:
+    number = _number(value)
+    if number is None:
+        return "unknown"
+    if number <= 0:
+        return "0"
+    if number <= 3:
+        return "1-3"
+    if number <= 6:
+        return "4-6"
+    if number < 10:
+        return "7-9"
+    return "10"
+
+
+def _relative_strength_bucket(value: Any) -> str:
+    number = _number(value)
+    if number is None:
+        return "unknown"
+    if number < -0.05:
+        return "< -5%"
+    if number < 0:
+        return "-5% to 0%"
+    if number < 0.03:
+        return "0% to 3%"
+    if number < 0.05:
+        return "3% to 5%"
+    if number < 0.10:
+        return "5% to 10%"
+    return "10%+"
 
 
 def _profile_id(config: dict[str, Any]) -> str:

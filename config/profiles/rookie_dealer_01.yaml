@@ -79,11 +79,11 @@ execution:
 
 # 選定ルールのprofile差分。
 selection:
-  min_score: 70
-  fallback_min_score: 65
+  min_score: 45
+  fallback_min_score: 40
   min_confidence: 0.70
   allow_top_pick_when_no_selection: true
-  top_pick_min_score: 65
+  top_pick_min_score: 40
   max_selected: 5
 
 # 安全余力のprofile差分。

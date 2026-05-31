@@ -1,7 +1,7 @@
 """Broker execution boundary.
 
-Only PaperBroker is usable today. Tachibana and KabuStation stubs exist to make
-the future live-trading boundary explicit without implementing live trading.
+PaperBroker can fill simulated orders. Tachibana brokers are read-only until
+live trading is explicitly implemented.
 """
 
 from __future__ import annotations
@@ -17,6 +17,12 @@ class LiveTradingDisabledError(RuntimeError):
 
 
 class BaseBroker(ABC):
+    provider = "unknown"
+
+    @abstractmethod
+    def get_account_balance(self) -> dict[str, Any]:
+        raise NotImplementedError
+
     @abstractmethod
     def place_buy_order(self, order: dict[str, Any]) -> dict[str, Any]:
         raise NotImplementedError
@@ -30,12 +36,28 @@ class BaseBroker(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_orders(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_executions(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
     def get_cash(self) -> float:
         raise NotImplementedError
 
     @abstractmethod
     def get_order_status(self, order_id: str) -> dict[str, Any]:
         raise NotImplementedError
+
+    def place_order(self, order: dict[str, Any]) -> dict[str, Any]:
+        action = str(order.get("action") or order.get("side") or "").upper()
+        if action == "BUY":
+            return self.place_buy_order(order)
+        if action == "SELL":
+            return self.place_sell_order(order)
+        raise ValueError(f"Unsupported order action: {action}")
 
 
 class PaperBroker(BaseBroker):
@@ -52,8 +74,24 @@ class PaperBroker(BaseBroker):
     def place_sell_order(self, order: dict[str, Any]) -> dict[str, Any]:
         return self._fill_order(order, "SELL")
 
+    def get_account_balance(self) -> dict[str, Any]:
+        positions = self.get_positions()
+        evaluation_amount = sum(float(item.get("market_value") or item.get("amount") or 0) for item in positions)
+        return {
+            "broker": self.provider,
+            "cash": self.get_cash(),
+            "evaluation_amount": evaluation_amount,
+            "positions_count": len(positions),
+        }
+
     def get_positions(self) -> list[dict[str, Any]]:
         return list(self.state.get("positions", []))
+
+    def get_orders(self) -> list[dict[str, Any]]:
+        return list(self.orders.values())
+
+    def get_executions(self) -> list[dict[str, Any]]:
+        return [order for order in self.orders.values() if order.get("order_status") == "FILLED"]
 
     def get_cash(self) -> float:
         return float(self.state.get("cash", 0))
@@ -119,6 +157,15 @@ class KabuStationBrokerStub(BaseBroker):
     def get_positions(self) -> list[dict[str, Any]]:
         raise NotImplementedError(self.disabled_message)
 
+    def get_account_balance(self) -> dict[str, Any]:
+        raise NotImplementedError(self.disabled_message)
+
+    def get_orders(self) -> list[dict[str, Any]]:
+        raise NotImplementedError(self.disabled_message)
+
+    def get_executions(self) -> list[dict[str, Any]]:
+        raise NotImplementedError(self.disabled_message)
+
     def get_cash(self) -> float:
         raise NotImplementedError(self.disabled_message)
 
@@ -126,13 +173,14 @@ class KabuStationBrokerStub(BaseBroker):
         raise NotImplementedError(self.disabled_message)
 
 
-class TachibanaBrokerStub(BaseBroker):
+class TachibanaBroker(BaseBroker):
     provider = "tachibana"
-    disabled_message = "立花証券 e支店 API 接続は未実装です。現在はPaperBrokerのみ利用可能です。"
+    readonly_message = "Tachibana read only mode. Order sending is disabled."
 
-    def __init__(self, config: dict[str, Any], provider: str) -> None:
+    def __init__(self, config: dict[str, Any], provider: str, client: Any | None = None) -> None:
         self.config = config
         self.provider = provider
+        self.client = client
         self.tachibana = config.get("tachibana", {})
         self.environment = _clean_config_string(self.tachibana.get("environment", "demo"))
         self.demo_base_url = _clean_config_string(self.tachibana.get("demo_base_url", "https://demo-kabuka.e-shiten.jp/e_api_v4r9/"))
@@ -149,31 +197,74 @@ class TachibanaBrokerStub(BaseBroker):
         self.market = _clean_config_string(self.tachibana.get("market", "tse"))
 
     def get_token(self) -> str:
-        raise NotImplementedError(self.disabled_message)
+        raise NotImplementedError("Tachibana authentication request is not implemented in read only mode.")
 
-    def place_buy_order(self, order: dict[str, Any]) -> dict[str, Any]:
-        raise NotImplementedError(self.disabled_message)
+    def get_account_balance(self) -> dict[str, Any]:
+        raw = self._client_call("get_account_balance", default={})
+        return {
+            "broker": self.provider,
+            "environment": self.environment,
+            "cash": _first_number(raw, ["cash", "Cash", "cash_balance", "available_cash"], 0.0),
+            "evaluation_amount": _first_number(raw, ["evaluation_amount", "EvaluationAmount", "positions_value", "market_value"], 0.0),
+            "raw": raw,
+        }
 
-    def place_sell_order(self, order: dict[str, Any]) -> dict[str, Any]:
-        raise NotImplementedError(self.disabled_message)
+    def get_account_info(self) -> dict[str, Any]:
+        return {
+            "broker": self.provider,
+            "environment": self.environment,
+            "read_only": True,
+            "message": self.readonly_message,
+        }
 
     def get_positions(self) -> list[dict[str, Any]]:
-        raise NotImplementedError(self.disabled_message)
+        raw = self._client_call("get_positions", default=[])
+        return _list_payload(raw, "positions")
+
+    def get_orders(self) -> list[dict[str, Any]]:
+        raw = self._client_call("get_orders", default=[])
+        return _list_payload(raw, "orders")
+
+    def get_executions(self) -> list[dict[str, Any]]:
+        raw = self._client_call("get_executions", default=[])
+        return _list_payload(raw, "executions")
 
     def get_cash(self) -> float:
-        raise NotImplementedError(self.disabled_message)
+        return float(self.get_account_balance().get("cash") or 0.0)
 
     def get_order_status(self, order_id: str) -> dict[str, Any]:
-        raise NotImplementedError(self.disabled_message)
+        orders = self.get_orders()
+        return next((order for order in orders if str(order.get("order_id") or order.get("id")) == str(order_id)), {"order_id": order_id, "order_status": "UNKNOWN"})
+
+    def place_order(self, order: dict[str, Any]) -> dict[str, Any]:
+        raise LiveTradingDisabledError("Tachibana read only mode: place_order is not implemented. No order was sent.")
+
+    def place_buy_order(self, order: dict[str, Any]) -> dict[str, Any]:
+        raise LiveTradingDisabledError("Tachibana read only mode: buy order sending is disabled. No order was sent.")
+
+    def place_sell_order(self, order: dict[str, Any]) -> dict[str, Any]:
+        raise LiveTradingDisabledError("Tachibana read only mode: sell order sending is disabled. No order was sent.")
+
+    def _client_call(self, method_name: str, default: Any) -> Any:
+        if self.client is None:
+            return default
+        method = getattr(self.client, method_name, None)
+        if method is None:
+            return default
+        return method()
 
 
-class TachibanaDemoBrokerStub(TachibanaBrokerStub):
+class TachibanaBrokerStub(TachibanaBroker):
+    provider = "tachibana"
+
+
+class TachibanaDemoBroker(TachibanaBroker):
     provider = "tachibana_demo"
-    disabled_message = "立花証券 e支店 API デモ接続は未実装です。現在はPaperBrokerのみ利用可能です。"
-    stub_message = "Tachibana demo API connection is not implemented yet."
+    stub_message = "Tachibana demo API read only mode is available. Order sending is disabled."
+    order_message = "Tachibana demo order accepted by demo broker boundary."
 
-    def __init__(self, config: dict[str, Any]) -> None:
-        super().__init__(config, self.provider)
+    def __init__(self, config: dict[str, Any], client: Any | None = None) -> None:
+        super().__init__(config, self.provider, client)
         if self.environment != "demo":
             raise LiveTradingDisabledError("tachibana.environment が demo ではないため TachibanaDemoBroker は利用できません。")
 
@@ -205,23 +296,43 @@ class TachibanaDemoBrokerStub(TachibanaBrokerStub):
         return {"broker": self.provider, **build_login_payload(load_tachibana_auth_config(self.config))}
 
     def get_account_info(self) -> dict[str, Any]:
-        return self._stub_response("get_account_info")
+        return {**super().get_account_info(), "status": "read_only"}
 
-    def get_positions(self) -> dict[str, Any]:
-        return self._stub_response("get_positions", {"positions": []})
-
-    def get_cash(self) -> dict[str, Any]:
-        return self._stub_response("get_cash", {"cash": None})
+    def place_order(self, order: dict[str, Any]) -> dict[str, Any]:
+        action = str(order.get("action") or order.get("side") or "").upper()
+        if action not in {"BUY", "SELL"}:
+            raise ValueError(f"Unsupported order action: {action}")
+        raw = self._client_call("place_order", default=None)
+        if isinstance(raw, dict):
+            return {
+                **order,
+                **raw,
+                "action": action,
+                "broker_provider": self.provider,
+                "environment": "demo",
+                "live_trading": False,
+                "order_status": raw.get("order_status", raw.get("status", "DEMO_ACCEPTED")),
+            }
+        return {
+            **order,
+            "action": action,
+            "order_id": order.get("order_id") or f"TACHIBANA-DEMO-{order.get('code', 'UNKNOWN')}-{action}",
+            "order_status": "DEMO_ACCEPTED",
+            "broker_provider": self.provider,
+            "environment": "demo",
+            "live_trading": False,
+            "message": self.order_message,
+        }
 
     def place_buy_order(self, order: dict[str, Any]) -> dict[str, Any]:
-        raise LiveTradingDisabledError("Tachibana demo order sending is not implemented. No order was sent.")
+        return self.place_order({**order, "action": "BUY"})
 
     def place_sell_order(self, order: dict[str, Any]) -> dict[str, Any]:
-        raise LiveTradingDisabledError("Tachibana demo order sending is not implemented. No order was sent.")
+        return self.place_order({**order, "action": "SELL"})
 
     def _stub_response(self, operation: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
         return {
-            "status": "stub",
+            "status": "read_only",
             "broker": self.provider,
             "environment": self.environment,
             "operation": operation,
@@ -230,22 +341,59 @@ class TachibanaDemoBrokerStub(TachibanaBrokerStub):
         }
 
 
-class TachibanaLiveBrokerStub(TachibanaBrokerStub):
-    provider = "tachibana_live"
-    disabled_message = "立花証券 e支店 API ライブ接続は未実装です。現在はPaperBrokerのみ利用可能です。"
+class TachibanaDemoBrokerStub(TachibanaDemoBroker):
+    pass
 
-    def __init__(self, config: dict[str, Any]) -> None:
-        super().__init__(config, self.provider)
-        broker = config.get("broker", {})
-        safety = config.get("safety", {})
-        self.live_conditions = {
-            "broker.live_trading_enabled": bool(broker.get("live_trading_enabled", False)),
-            "safety.allow_live_trading": bool(safety.get("allow_live_trading", False)),
-            "tachibana.environment == live": self.environment == "live",
-        }
-        if not all(self.live_conditions.values()):
-            raise LiveTradingDisabledError("立花証券 live broker は安全条件を満たすまで利用できません。")
-        raise NotImplementedError(self.disabled_message)
+
+class TachibanaLiveBroker(TachibanaBroker):
+    provider = "tachibana_live"
+    stub_message = "Tachibana live API read only mode is available. Order sending is disabled."
+
+    def __init__(self, config: dict[str, Any], client: Any | None = None) -> None:
+        super().__init__(config, self.provider, client)
+        if self.environment != "live":
+            raise LiveTradingDisabledError("tachibana.environment が live ではないため TachibanaLiveBroker は利用できません。")
+
+    def get_account_info(self) -> dict[str, Any]:
+        return {**super().get_account_info(), "status": "read_only"}
+
+
+class TachibanaLiveBrokerStub(TachibanaLiveBroker):
+    pass
+
+
+def account_snapshot(broker: BaseBroker) -> dict[str, Any]:
+    balance = broker.get_account_balance()
+    positions = broker.get_positions()
+    orders = broker.get_orders()
+    executions = broker.get_executions()
+    return {
+        "broker_provider": broker.provider,
+        "account_balance": balance,
+        "cash": balance.get("cash"),
+        "evaluation_amount": balance.get("evaluation_amount"),
+        "positions": positions,
+        "orders": orders,
+        "today_executions": executions,
+        "read_only": broker.provider.startswith("tachibana"),
+        "order_submission_enabled": broker.provider == "paper",
+    }
+
+
+def render_account_snapshot(snapshot: dict[str, Any]) -> str:
+    lines = [
+        "# Account Snapshot",
+        "",
+        f"Broker: {snapshot.get('broker_provider')}",
+        f"Cash: {_format_money(snapshot.get('cash'))}",
+        f"Evaluation Amount: {_format_money(snapshot.get('evaluation_amount'))}",
+        "",
+        "## Positions",
+    ]
+    lines.extend(_snapshot_item_lines(snapshot.get("positions", [])))
+    lines.extend(["", "## Today's Executions"])
+    lines.extend(_snapshot_item_lines(snapshot.get("today_executions", [])))
+    return "\n".join(lines)
 
 
 def build_broker(state: dict[str, Any], config: dict[str, Any]) -> BaseBroker:
@@ -253,9 +401,9 @@ def build_broker(state: dict[str, Any], config: dict[str, Any]) -> BaseBroker:
     if provider == "paper":
         return PaperBroker(state, config)
     if provider == "tachibana_demo":
-        return TachibanaDemoBrokerStub(config)
+        return TachibanaDemoBroker(config)
     if provider == "tachibana_live":
-        return TachibanaLiveBrokerStub(config)
+        return TachibanaLiveBroker(config)
     if provider == "kabu_station":
         return KabuStationBrokerStub(config)
     raise ValueError(f"Unsupported broker provider: {provider}")
@@ -263,3 +411,38 @@ def build_broker(state: dict[str, Any], config: dict[str, Any]) -> BaseBroker:
 
 def _clean_config_string(value: Any) -> str:
     return str(value).strip().strip('"').strip("'")
+
+
+def _first_number(payload: Any, keys: list[str], default: float) -> float:
+    if not isinstance(payload, dict):
+        return default
+    for key in keys:
+        value = payload.get(key)
+        if value is not None:
+            return float(value)
+    return default
+
+
+def _list_payload(payload: Any, key: str) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return list(payload)
+    if isinstance(payload, dict):
+        rows = payload.get(key)
+        if isinstance(rows, list):
+            return rows
+    return []
+
+
+def _snapshot_item_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- None"]
+    return [
+        "- " + ", ".join(f"{key}={value}" for key, value in item.items())
+        for item in items
+    ]
+
+
+def _format_money(value: Any) -> str:
+    if value is None:
+        return "N/A"
+    return f"{float(value):,.0f}"

@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
+from benchmark_provider import average_market_returns
 from candlestick import calculate_candlestick_indicators, detect_candlestick_signals
 from technical_indicators import TechnicalIndicatorDependencyError, calculate_indicators_with_pandas_ta
+
+
+_BENCHMARK_RETURN_CACHE: dict[tuple[str, int, tuple[tuple[Any, ...], ...]], dict[int, float | None]] = {}
 
 
 def calculate_indicators(
@@ -15,6 +19,9 @@ def calculate_indicators(
     stock_sectors: dict[str, str] | None = None,
     indicator_mode: str = "full",
     progress_callback: Callable[[int, int, str], None] | None = None,
+    enable_relative_strength: bool = False,
+    benchmark_returns: dict[int, float | None] | None = None,
+    benchmark_source: str = "prime_average",
 ) -> tuple[list[dict[str, Any]], int]:
     indicator_mode = indicator_mode if indicator_mode in {"full", "fast", "minimal"} else "full"
     stock_sectors = stock_sectors or {}
@@ -27,6 +34,13 @@ def calculate_indicators(
     indicators = []
     excluded_count = 0
     total_codes = len(by_code)
+    if enable_relative_strength:
+        benchmark_returns = benchmark_returns if benchmark_returns is not None else _cached_benchmark_returns(by_code, target_date)
+        if not benchmark_source:
+            benchmark_source = "prime_average"
+    else:
+        benchmark_returns = {}
+        benchmark_source = "unavailable"
     for index, (code, rows) in enumerate(by_code.items(), start=1):
         if progress_callback and (index == 1 or index % 100 == 0 or index == total_codes):
             progress_callback(index, total_codes, code)
@@ -79,6 +93,7 @@ def calculate_indicators(
             "turnover_value": round(float(target["close"]) * float(target["volume"]), 2),
             "five_day_volatility": _round_optional(target.get("five_day_volatility"), 4),
             "five_day_change_rate": _round_optional(target.get("five_day_change_rate"), 4),
+            **(_relative_strength_fields(history, benchmark_returns, benchmark_source) if enable_relative_strength else _empty_relative_strength_fields()),
             "candlestick_score": None,
             "trend_score": None,
             "volume_score": None,
@@ -229,6 +244,89 @@ def _five_day_change_rate(values: list[float | None]) -> float | None:
     if len(values) < 5 or values[-5] in {None, 0} or values[-1] is None:
         return None
     return (values[-1] - values[-5]) / values[-5]
+
+
+def _benchmark_returns(by_code: dict[str, list[dict[str, Any]]], target_date: str) -> dict[int, float | None]:
+    rows = [row for values in by_code.values() for row in values]
+    return average_market_returns(rows, target_date)
+
+
+def _cached_benchmark_returns(by_code: dict[str, list[dict[str, Any]]], target_date: str) -> dict[int, float | None]:
+    key = _benchmark_cache_key(by_code, target_date)
+    if key not in _BENCHMARK_RETURN_CACHE:
+        _BENCHMARK_RETURN_CACHE[key] = _benchmark_returns(by_code, target_date)
+    return _BENCHMARK_RETURN_CACHE[key]
+
+
+def _benchmark_cache_key(
+    by_code: dict[str, list[dict[str, Any]]],
+    target_date: str,
+) -> tuple[str, int, tuple[tuple[Any, ...], ...]]:
+    close_points: list[tuple[Any, ...]] = []
+    for code, rows in by_code.items():
+        sorted_rows = sorted(rows, key=lambda item: item["date"])
+        target_index = _find_target_index(sorted_rows, target_date)
+        closes = []
+        for horizon in [0, 5, 10, 20]:
+            index = target_index - horizon if target_index is not None else None
+            closes.append(_float_or_none(sorted_rows[index].get("close")) if index is not None and index >= 0 else None)
+        close_points.append((str(code), *closes))
+    return (target_date, len(by_code), tuple(sorted(close_points)))
+
+
+def _empty_relative_strength_fields() -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    for horizon in [5, 10, 20]:
+        fields[f"stock_return_{horizon}d"] = None
+        fields[f"benchmark_return_{horizon}d"] = None
+        fields[f"relative_strength_{horizon}d"] = None
+    fields["benchmark_source"] = "unavailable"
+    fields["relative_strength_score"] = 0
+    return fields
+
+
+def _relative_strength_fields(
+    history: list[dict[str, Any]],
+    benchmark_returns: dict[int, float | None],
+    benchmark_source: str,
+) -> dict[str, Any]:
+    normalized = [_normalize_numeric_row(row) for row in history]
+    fields: dict[str, Any] = {}
+    relative_strengths: dict[int, float | None] = {}
+    for horizon in [5, 10, 20]:
+        stock_return = _return_over_horizon(normalized, horizon)
+        benchmark_return = benchmark_returns.get(horizon)
+        relative_strength = None
+        if stock_return is not None and benchmark_return is not None:
+            relative_strength = stock_return - benchmark_return
+        fields[f"stock_return_{horizon}d"] = _round_optional(stock_return, 4)
+        fields[f"benchmark_return_{horizon}d"] = _round_optional(benchmark_return, 4)
+        fields[f"relative_strength_{horizon}d"] = _round_optional(relative_strength, 4)
+        relative_strengths[horizon] = relative_strength
+    fields["benchmark_source"] = benchmark_source
+    fields["relative_strength_score"] = _relative_strength_score(relative_strengths)
+    return fields
+
+
+def _return_over_horizon(rows: list[dict[str, Any]], horizon: int) -> float | None:
+    if len(rows) <= horizon:
+        return None
+    latest = _float_or_none(rows[-1].get("close"))
+    base = _float_or_none(rows[-horizon - 1].get("close"))
+    if latest is None or base in {None, 0}:
+        return None
+    return (latest - base) / base
+
+
+def _relative_strength_score(relative_strengths: dict[int, float | None]) -> int:
+    score = 0
+    if (relative_strengths.get(5) or 0) > 0.03:
+        score += 3
+    if (relative_strengths.get(10) or 0) > 0.05:
+        score += 4
+    if (relative_strengths.get(20) or 0) > 0.08:
+        score += 3
+    return max(0, min(10, score))
 
 
 def _round_optional(value: Any, digits: int) -> Any:

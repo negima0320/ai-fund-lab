@@ -72,14 +72,11 @@ class RuleBasedCommentaryProvider(BaseCommentaryProvider):
     def generate_buy_comment(self, candidate: dict[str, Any]) -> str:
         try:
             technical = _format_value(candidate.get("technical_score"), "点")
-            news = _format_value(candidate.get("news_score"), "点")
-            financial = _format_value(candidate.get("financial_score"), "点")
             confidence = _format_value(candidate.get("confidence"), "")
             technical_note = _technical_note(candidate)
             return (
                 f"{candidate.get('code')} {candidate.get('name')}は、テクニカル{technical}、"
-                f"ニュース{news}、財務{financial}、"
-                f"信頼度{confidence}です。{candidate.get('news_reason', 'ニュース材料は中立です')}。"
+                f"信頼度{confidence}です。"
                 f"{technical_note}ルールに従い買付候補とします。"
             )
         except Exception:

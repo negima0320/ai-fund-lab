@@ -1,0 +1,55 @@
+profiles:
+  rookie_dealer_02_v2_1:
+    role: baseline
+    description: テクニカル中心の基準profile
+    required_plan: free
+    compare_to:
+    features:
+      relative_strength: false
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+
+  rookie_dealer_02_v2_6:
+    role: experiment
+    description: TOPIX Relative Strength検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_1
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+
+  rookie_dealer_02_v2_8:
+    role: experiment
+    description: 投資部門別情報検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_1
+    features:
+      relative_strength: false
+      investor_context: true
+      financial_context: false
+      earnings_filter: false
+
+  rookie_dealer_02_v2_9:
+    role: experiment
+    description: 財務情報capability検証
+    required_plan: free
+    compare_to: rookie_dealer_02_v2_1
+    features:
+      relative_strength: false
+      investor_context: false
+      financial_context: true
+      earnings_filter: false
+
+  rookie_dealer_02_v2_10:
+    role: experiment
+    description: 決算予定日フィルター検証
+    required_plan: free
+    compare_to: rookie_dealer_02_v2_1
+    features:
+      relative_strength: false
+      investor_context: false
+      financial_context: false
+      earnings_filter: true

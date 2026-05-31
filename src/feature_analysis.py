@@ -12,9 +12,45 @@ from db import get_database_path
 from trade_metrics import is_closed_trade_for_metrics
 
 
-SCORE_DETAIL_BUCKET_ORDER = ["65-69", "70-71", "72-73", "74-75", "76-79", "80+"]
+SCORE_DETAIL_BUCKET_ORDER = ["40-44", "45-49", "50-54", "55-59", "60-64", "65-69", "70-71", "72-73", "74-75", "76-79", "80+"]
 COMPONENT_SCORE_BUCKET_ORDER = ["0-5", "5-10", "10-15", "15-20", "20-30", "30-40", "40-50", "50+"]
 COMPONENT_DETAIL_BUCKET_ORDER = ["<0", "0", "0-3", "3-5", "5-8", "8-10", "10-15", "15+"]
+RELATIVE_STRENGTH_BUCKET_ORDER = ["< -5%", "-5% to 0%", "0% to 3%", "3% to 5%", "5% to 10%", "10%+"]
+RELATIVE_STRENGTH_SCORE_BUCKET_ORDER = ["0", "1-3", "4-6", "7-9", "10"]
+SCORE_COMPONENT_KEYS = [
+    "ma_score",
+    "rsi_score",
+    "volume_score",
+    "candlestick_score",
+    "sector_score",
+    "market_context_score",
+    "relative_strength_score",
+    "investor_context_score",
+    "penalty_score",
+    "total_score",
+]
+EFFECTIVE_RANGE_COMPONENTS = [
+    "technical_score",
+    "relative_strength_score",
+    "investor_context_score",
+    "market_context_score",
+    "penalty_score",
+    "rsi_score",
+    "volume_score",
+    "candlestick_score",
+    "sector_score",
+]
+COMPONENT_CONFIGURED_MAX = {
+    "technical_score": 50,
+    "relative_strength_score": 10,
+    "investor_context_score": 5,
+    "market_context_score": 0,
+    "penalty_score": 0,
+    "rsi_score": 10,
+    "volume_score": 10,
+    "candlestick_score": 15,
+    "sector_score": 5,
+}
 
 
 def build_feature_analysis(
@@ -80,6 +116,9 @@ def build_feature_analysis(
     records = [_feature_record(trade, market_by_date.get(trade.get("entry_date"), {})) for trade in closed]
     rsi_filter = _rsi_filter_rejection_summary(scoring_rows, config)
     component_validation = _score_component_validation(records, scoring_rows)
+    score_formula_audit = _score_formula_audit(config, records, scoring_rows, component_validation)
+    score_effective_range_audit = _score_effective_range_audit(config, records, scoring_rows)
+    earnings_exposure = _earnings_calendar_exposure(records, scoring_rows)
 
     return {
         "profile_id": profile_id,
@@ -97,13 +136,11 @@ def build_feature_analysis(
         "market_regime": _group_by(records, lambda item: item.get("market_regime") or "unknown", ["risk_on", "neutral", "risk_off"]),
         "sector": _group_by(records, lambda item: item.get("sector_name") or "未分類"),
         "candlestick_signal": _group_by_signals(records),
-        "score": _group_by(records, lambda item: _score_bucket(item.get("total_score")), ["60-65", "65-70", "70-75", "75-80", "80+"]),
+        "score": _group_by(records, lambda item: _score_bucket(item.get("total_score")), ["40-45", "45-50", "50-55", "55-60", "60-65", "65-70", "70-75", "75-80", "80+"]),
         "score_detail": score_detail_groups(records),
         "score_contribution": {
             "selected_score_averages": _selected_score_averages(records),
             "technical_score": _group_by(records, lambda item: _component_score_bucket(item.get("technical_score")), COMPONENT_SCORE_BUCKET_ORDER),
-            "financial_score": _group_by(records, lambda item: _component_score_bucket(item.get("financial_score")), COMPONENT_SCORE_BUCKET_ORDER),
-            "news_score": _group_by(records, lambda item: _component_score_bucket(item.get("news_score")), COMPONENT_SCORE_BUCKET_ORDER),
         },
         "score_component_analysis": {
             "score_components_validation": component_validation,
@@ -111,7 +148,45 @@ def build_feature_analysis(
             "volume_score": _group_by(records, lambda item: _score_component_bucket(item.get("volume_score")), COMPONENT_DETAIL_BUCKET_ORDER),
             "candlestick_score": _group_by(records, lambda item: _score_component_bucket(item.get("candlestick_score")), COMPONENT_DETAIL_BUCKET_ORDER),
             "market_context_score": _group_by(records, lambda item: _score_component_bucket(item.get("market_context_score")), COMPONENT_DETAIL_BUCKET_ORDER),
+            "relative_strength_score": _group_by(records, lambda item: _score_component_bucket(item.get("relative_strength_score")), COMPONENT_DETAIL_BUCKET_ORDER),
+            "investor_context_score": _group_by(records, lambda item: _score_component_bucket(item.get("investor_context_score")), COMPONENT_DETAIL_BUCKET_ORDER),
             "penalty_score": _group_by(records, lambda item: _score_component_bucket(item.get("penalty_score")), COMPONENT_DETAIL_BUCKET_ORDER),
+        },
+        "score_formula_audit": score_formula_audit,
+        "score_effective_range_audit": score_effective_range_audit,
+        "earnings_calendar_exposure": earnings_exposure,
+        "relative_strength_analysis": {
+            "benchmark_source": _group_by(records, lambda item: item.get("benchmark_source") or "unknown"),
+            "relative_strength_score": _group_by(
+                records,
+                lambda item: _relative_strength_score_bucket(item.get("relative_strength_score")),
+                RELATIVE_STRENGTH_SCORE_BUCKET_ORDER,
+            ),
+            "relative_strength_5d": _group_by(
+                records,
+                lambda item: _relative_strength_bucket(item.get("relative_strength_5d")),
+                RELATIVE_STRENGTH_BUCKET_ORDER,
+            ),
+            "relative_strength_10d": _group_by(
+                records,
+                lambda item: _relative_strength_bucket(item.get("relative_strength_10d")),
+                RELATIVE_STRENGTH_BUCKET_ORDER,
+            ),
+            "relative_strength_20d": _group_by(
+                records,
+                lambda item: _relative_strength_bucket(item.get("relative_strength_20d")),
+                RELATIVE_STRENGTH_BUCKET_ORDER,
+            ),
+        },
+        "investor_context_analysis": {
+            "investor_context_score": _group_by(
+                records,
+                lambda item: _investor_context_score_bucket(item.get("investor_context_score")),
+                ["<0", "0", "1-2", "3-5"],
+            ),
+            "overseas_net_buy_4w_sum": _group_by(records, lambda item: _positive_negative_bucket(item.get("overseas_net_buy_4w_sum")), ["positive", "negative", "zero", "unknown"]),
+            "overseas_net_buy_4w_trend": _group_by(records, lambda item: item.get("overseas_net_buy_4w_trend") or "unknown", ["improving", "worsening", "flat", "unknown"]),
+            "investor_context_source": _group_by(records, lambda item: item.get("investor_context_source") or "unknown"),
         },
         "records_used": records,
     }
@@ -152,6 +227,26 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "",
         *_score_component_analysis_lines(analysis.get("score_component_analysis", {})),
         "",
+        "## Score Formula Audit",
+        "",
+        *_score_formula_audit_lines(analysis.get("score_formula_audit", {})),
+        "",
+        "## Score Effective Range Audit",
+        "",
+        *_score_effective_range_audit_lines(analysis.get("score_effective_range_audit", {})),
+        "",
+        "## Relative Strength Analysis",
+        "",
+        *_relative_strength_analysis_lines(analysis.get("relative_strength_analysis", {})),
+        "",
+        "## Investor Context Analysis",
+        "",
+        *_investor_context_analysis_lines(analysis.get("investor_context_analysis", {})),
+        "",
+        "## Earnings Calendar Exposure",
+        "",
+        *_earnings_calendar_exposure_lines(analysis.get("earnings_calendar_exposure", {})),
+        "",
         "## market_regime別勝率",
         "",
         *_group_lines(analysis.get("market_regime", [])),
@@ -185,26 +280,53 @@ def _feature_record(trade: dict[str, Any], entry_market: dict[str, Any] | None =
         "name": trade.get("name"),
         "entry_date": trade.get("entry_date"),
         "exit_date": trade.get("exit_date"),
+        "exit_reason": trade.get("exit_reason"),
         "result": trade.get("result"),
         "profit": profit,
         "profit_rate": profit_rate,
         "rsi": _number(trade.get("rsi")),
         "volume_ratio": _number(trade.get("volume_ratio")),
+        "stock_return_5d": _number(trade.get("stock_return_5d")),
+        "stock_return_10d": _number(trade.get("stock_return_10d")),
+        "stock_return_20d": _number(trade.get("stock_return_20d")),
+        "benchmark_source": trade.get("benchmark_source") or "unknown",
+        "benchmark_return_5d": _number(trade.get("benchmark_return_5d")),
+        "benchmark_return_10d": _number(trade.get("benchmark_return_10d")),
+        "benchmark_return_20d": _number(trade.get("benchmark_return_20d")),
+        "relative_strength_5d": _number(trade.get("relative_strength_5d")),
+        "relative_strength_10d": _number(trade.get("relative_strength_10d")),
+        "relative_strength_20d": _number(trade.get("relative_strength_20d")),
+        "relative_strength_score": _number(trade.get("relative_strength_score")),
+        "investor_context_source": trade.get("investor_context_source") or "unknown",
+        "investor_context_week": trade.get("investor_context_week"),
+        "overseas_net_buy": _number(trade.get("overseas_net_buy")),
+        "overseas_net_buy_4w_sum": _number(trade.get("overseas_net_buy_4w_sum")),
+        "overseas_net_buy_4w_trend": trade.get("overseas_net_buy_4w_trend") or "unknown",
+        "overseas_buy_sell_ratio": _number(trade.get("overseas_buy_sell_ratio")),
+        "individual_net_buy": _number(trade.get("individual_net_buy")),
+        "institution_net_buy": _number(trade.get("institution_net_buy")),
+        "trust_bank_net_buy": _number(trade.get("trust_bank_net_buy")),
+        "proprietary_net_buy": _number(trade.get("proprietary_net_buy")),
+        "investor_context_score": _number(trade.get("investor_context_score")),
         "market_regime": trade.get("market_regime") or entry_market.get("market_regime"),
         "advance_ratio": advance_ratio,
         "sector_name": trade.get("sector_name"),
         "candlestick_signals": _json_list(trade.get("candlestick_signals")),
         "selected_reason": trade.get("selected_reason") or trade.get("reason"),
+        "earnings_filter_checked": bool(trade.get("earnings_filter_checked")),
+        "earnings_filter_blocked": bool(trade.get("earnings_filter_blocked")),
+        "earnings_filter_reason": trade.get("earnings_filter_reason"),
+        "earnings_announcement_date": trade.get("earnings_announcement_date"),
         "total_score": _number(trade.get("total_score") or trade.get("score")),
         "technical_score": _number(trade.get("technical_score")),
-        "financial_score": _number(trade.get("financial_score")),
-        "news_score": _number(trade.get("news_score")),
         "score_components": score_components,
         "ma_score": _component_value(trade, score_components, "ma_score"),
         "rsi_score": _component_value(trade, score_components, "rsi_score"),
         "volume_score": _component_value(trade, score_components, "volume_score"),
         "candlestick_score": _component_value(trade, score_components, "candlestick_score"),
         "market_context_score": _component_value(trade, score_components, "market_context_score"),
+        "relative_strength_score": _component_value(trade, score_components, "relative_strength_score"),
+        "investor_context_score": _component_value(trade, score_components, "investor_context_score"),
         "sector_score": _component_value(trade, score_components, "sector_score"),
         "penalty_score": _component_value(trade, score_components, "penalty_score"),
         "score_components_total": _number(trade.get("score_components_total")) or _number(score_components.get("component_total")),
@@ -225,6 +347,30 @@ def _rsi_filter_rejection_summary(rows: list[dict[str, Any]], config: dict[str, 
         "average_score": _average(scores),
         "threshold": _number(config.get("selection", {}).get("max_rsi_for_new_position")),
     }
+
+
+def _earnings_calendar_exposure(records: list[dict[str, Any]], scoring_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    selected_exposure = sum(
+        1 for row in scoring_rows
+        if bool(row.get("selected")) and (row.get("earnings_filter_blocked") or row.get("earnings_announcement_date"))
+    )
+    stop_loss_exposure = sum(
+        1 for record in records
+        if _is_earnings_exposed(record) and "損切" in str(record.get("exit_reason") or "")
+    )
+    false_positive_exposure = sum(
+        1 for record in records
+        if _is_earnings_exposed(record) and _number(record.get("profit_rate")) is not None and float(record.get("profit_rate") or 0.0) < 0
+    )
+    return {
+        "selected_earnings_exposure_count": selected_exposure,
+        "stop_loss_earnings_exposure_count": stop_loss_exposure,
+        "false_positive_earnings_exposure_count": false_positive_exposure,
+    }
+
+
+def _is_earnings_exposed(record: dict[str, Any]) -> bool:
+    return bool(record.get("earnings_filter_blocked") or record.get("earnings_announcement_date"))
 
 
 def _group_by(records: list[dict[str, Any]], bucket_fn: Any, bucket_order: list[str] | None = None) -> list[dict[str, Any]]:
@@ -279,13 +425,15 @@ def _missing_feature_counts(records: list[dict[str, Any]]) -> dict[str, int]:
         "candlestick_signals",
         "total_score",
         "technical_score",
-        "financial_score",
-        "news_score",
         "score_components",
         "rsi_score",
         "volume_score",
         "candlestick_score",
         "market_context_score",
+        "relative_strength_score",
+        "relative_strength_5d",
+        "relative_strength_10d",
+        "relative_strength_20d",
         "penalty_score",
     ]
     return {key: sum(1 for record in records if _missing_feature(record.get(key))) for key in keys}
@@ -318,8 +466,7 @@ def _group_lines(items: list[dict[str, Any]]) -> list[str]:
 def _selected_score_averages(records: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "technical_score": _average(_valid_numbers(record.get("technical_score") for record in records)),
-        "financial_score": _average(_valid_numbers(record.get("financial_score") for record in records)),
-        "news_score": _average(_valid_numbers(record.get("news_score") for record in records)),
+        "relative_strength_score": _average(_valid_numbers(record.get("relative_strength_score") for record in records)),
     }
 
 
@@ -331,20 +478,10 @@ def _score_contribution_lines(score_contribution: dict[str, Any]) -> list[str]:
         "### Selected Score Averages",
         "",
         f"- technical_score average: {_format_number(averages.get('technical_score'))}",
-        f"- financial_score average: {_format_number(averages.get('financial_score'))}",
-        f"- news_score average: {_format_number(averages.get('news_score'))}",
         "",
         "### technical_score帯",
         "",
         *_group_lines(score_contribution.get("technical_score", [])),
-        "",
-        "### financial_score帯",
-        "",
-        *_group_lines(score_contribution.get("financial_score", [])),
-        "",
-        "### news_score帯",
-        "",
-        *_group_lines(score_contribution.get("news_score", [])),
     ]
     return lines
 
@@ -372,12 +509,123 @@ def _score_component_analysis_lines(component_analysis: dict[str, Any]) -> list[
         ("volume_score帯別", "volume_score"),
         ("candlestick_score帯別", "candlestick_score"),
         ("market_context_score帯別", "market_context_score"),
+        ("relative_strength_score帯別", "relative_strength_score"),
+        ("investor_context_score帯別", "investor_context_score"),
         ("penalty_score帯別", "penalty_score"),
     ]
     for title, key in sections:
         lines.extend(["", f"### {title}", ""])
         lines.extend(_group_lines(component_analysis.get(key, [])))
     return lines
+
+
+def _score_formula_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- データなし"]
+    lines = [
+        f"- total_score formula: {audit.get('total_score_formula')}",
+        f"- expanded formula: {audit.get('expanded_formula')}",
+        f"- expected_score_range: {audit.get('expected_score_range')}",
+        f"- total_score mismatch count: {audit.get('total_score_mismatch_count', 0)}",
+        f"- scoring total_score mismatch count: {audit.get('scoring_total_score_mismatch_count', 0)}",
+        f"- profiles using relative_strength_score: {', '.join(audit.get('profiles_using_relative_strength_score', [])) or 'none'}",
+        f"- profiles using investor_context_score: {', '.join(audit.get('profiles_using_investor_context_score', [])) or 'none'}",
+        "",
+        "### Component Averages",
+        "",
+    ]
+    for item in audit.get("component_stats", []):
+        lines.append(
+            f"- {item['component']}: count {item['count']}, "
+            f"average {_format_number(item.get('average'))}, "
+            f"min {_format_number(item.get('min'))}, "
+            f"max {_format_number(item.get('max'))}"
+        )
+    lines.extend(["", "### Duplicated Signal Warning", ""])
+    warnings = audit.get("duplicated_signal_warnings", [])
+    if not warnings:
+        lines.append("- なし")
+    else:
+        for warning in warnings:
+            lines.append(f"- {warning.get('level')}: {warning.get('message')}")
+    return lines
+
+
+def _score_effective_range_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- データなし"]
+    lines = [
+        f"- profile_id: {audit.get('profile_id')}",
+        f"- theoretical_max_score: {_format_number(audit.get('theoretical_max_score'))}",
+        f"- effective_max_score: {_format_number(audit.get('effective_max_score'))}",
+        f"- observed_min_score: {_format_number(audit.get('observed_min_score'))}",
+        f"- observed_max_score: {_format_number(audit.get('observed_max_score'))}",
+        f"- observed_avg_score: {_format_number(audit.get('observed_avg_score'))}",
+        f"- selected_min_score: {_format_number(audit.get('selected_min_score'))}",
+        f"- selected_max_score: {_format_number(audit.get('selected_max_score'))}",
+        f"- selected_avg_score: {_format_number(audit.get('selected_avg_score'))}",
+        "",
+        "### Component Effective Range",
+        "",
+    ]
+    for item in audit.get("components", []):
+        lines.append(
+            f"- {item['component']}: configured_max {_format_number(item.get('configured_max'))}, "
+            f"observed_min {_format_number(item.get('observed_min'))}, "
+            f"observed_max {_format_number(item.get('observed_max'))}, "
+            f"observed_avg {_format_number(item.get('observed_avg'))}, "
+            f"non_zero_count {item.get('non_zero_count')}, "
+            f"zero_count {item.get('zero_count')}, "
+            f"status {item.get('status')}"
+        )
+    return lines
+
+
+def _relative_strength_analysis_lines(analysis: dict[str, Any]) -> list[str]:
+    if not analysis:
+        return ["- データなし"]
+    sections = [
+        ("benchmark_source別件数", "benchmark_source"),
+        ("relative_strength_score帯別", "relative_strength_score"),
+        ("relative_strength_5d帯別", "relative_strength_5d"),
+        ("relative_strength_10d帯別", "relative_strength_10d"),
+        ("relative_strength_20d帯別", "relative_strength_20d"),
+    ]
+    lines: list[str] = []
+    for title, key in sections:
+        if lines:
+            lines.append("")
+        lines.extend([f"### {title}", ""])
+        lines.extend(_group_lines(analysis.get(key, [])))
+    return lines
+
+
+def _investor_context_analysis_lines(analysis: dict[str, Any]) -> list[str]:
+    if not analysis:
+        return ["- データなし"]
+    sections = [
+        ("investor_context_score帯別", "investor_context_score"),
+        ("overseas_net_buy_4w_sum正負別", "overseas_net_buy_4w_sum"),
+        ("overseas_net_buy_4w_trend別", "overseas_net_buy_4w_trend"),
+        ("investor_context_source別件数", "investor_context_source"),
+    ]
+    lines: list[str] = []
+    for title, key in sections:
+        if lines:
+            lines.append("")
+        lines.extend([f"### {title}", ""])
+        lines.extend(_group_lines(analysis.get(key, [])))
+    return lines
+
+
+def _earnings_calendar_exposure_lines(analysis: dict[str, Any]) -> list[str]:
+    if not analysis:
+        return ["- データなし"]
+    return [
+        f"- selected銘柄のうち決算前後だった件数: {analysis.get('selected_earnings_exposure_count', 0)}",
+        f"- stop_loss銘柄のうち決算前後だった件数: {analysis.get('stop_loss_earnings_exposure_count', 0)}",
+        f"- false_positive銘柄のうち決算前後だった件数: {analysis.get('false_positive_earnings_exposure_count', 0)}",
+    ]
 
 
 def _rsi_bucket(value: Any) -> str:
@@ -414,8 +662,16 @@ def _score_bucket(value: Any) -> str:
     value = _number(value)
     if value is None:
         return "unknown"
+    if value < 40:
+        return "under_40"
+    if value < 45:
+        return "40-45"
+    if value < 50:
+        return "45-50"
+    if value < 55:
+        return "50-55"
     if value < 60:
-        return "under_60"
+        return "55-60"
     if value < 65:
         return "60-65"
     if value < 70:
@@ -431,8 +687,18 @@ def _score_detail_bucket(value: Any) -> str:
     value = _number(value)
     if value is None:
         return "unknown"
+    if value < 40:
+        return "under_40"
+    if value < 45:
+        return "40-44"
+    if value < 50:
+        return "45-49"
+    if value < 55:
+        return "50-54"
+    if value < 60:
+        return "55-59"
     if value < 65:
-        return "under_65"
+        return "60-64"
     if value < 70:
         return "65-69"
     if value < 72:
@@ -444,6 +710,80 @@ def _score_detail_bucket(value: Any) -> str:
     if value < 80:
         return "76-79"
     return "80+"
+
+
+def _relative_strength_score_bucket(value: Any) -> str:
+    value = _number(value)
+    if value is None:
+        return "unknown"
+    if value <= 0:
+        return "0"
+    if value <= 3:
+        return "1-3"
+    if value <= 6:
+        return "4-6"
+    if value < 10:
+        return "7-9"
+    return "10"
+
+
+def _relative_strength_bucket(value: Any) -> str:
+    value = _number(value)
+    if value is None:
+        return "unknown"
+    if value < -0.05:
+        return "< -5%"
+    if value < 0:
+        return "-5% to 0%"
+    if value < 0.03:
+        return "0% to 3%"
+    if value < 0.05:
+        return "3% to 5%"
+    if value < 0.10:
+        return "5% to 10%"
+    return "10%+"
+
+
+def _investor_context_score_bucket(value: Any) -> str:
+    value = _number(value)
+    if value is None:
+        return "unknown"
+    if value < 0:
+        return "<0"
+    if value == 0:
+        return "0"
+    if value <= 2:
+        return "1-2"
+    return "3-5"
+
+
+def _positive_negative_bucket(value: Any) -> str:
+    value = _number(value)
+    if value is None:
+        return "unknown"
+    if value > 0:
+        return "positive"
+    if value < 0:
+        return "negative"
+    return "zero"
+
+
+def _positive_negative_unknown_bucket(value: Any) -> str:
+    value = _number(value)
+    if value is None:
+        return "unknown"
+    if value > 0:
+        return "positive"
+    if value < 0:
+        return "negative"
+    return "zero"
+
+
+def _bool_bucket(value: Any) -> str:
+    bool_value = _bool_or_none(value)
+    if bool_value is None:
+        return "unknown"
+    return "true" if bool_value else "false"
 
 
 def _component_score_bucket(value: Any) -> str:
@@ -572,6 +912,251 @@ def _score_component_validation(records: list[dict[str, Any]], scoring_rows: lis
     }
 
 
+def _score_formula_audit(
+    config: dict[str, Any],
+    records: list[dict[str, Any]],
+    scoring_rows: list[dict[str, Any]],
+    component_validation: dict[str, Any],
+) -> dict[str, Any]:
+    relative_strength_enabled = _relative_strength_enabled(config)
+    investor_context_enabled = _investor_context_enabled(config)
+    return {
+        "total_score_formula": "total_score = technical_score + relative_strength_score + investor_context_score + market_context_score + penalty_score",
+        "expanded_formula": (
+            "technical_score = clamp(ma_score + rsi_score + volume_score + "
+            "candlestick_score + sector_score, 0, 50); "
+            "total_score = technical_score + relative_strength_score + investor_context_score + market_context_score + penalty_score"
+        ),
+        "expected_score_range": _expected_score_range(relative_strength_enabled, investor_context_enabled),
+        "relative_strength_enabled": relative_strength_enabled,
+        "investor_context_enabled": investor_context_enabled,
+        "profiles_using_relative_strength_score": [_profile_id(config)] if relative_strength_enabled else [],
+        "profiles_using_investor_context_score": [_profile_id(config)] if investor_context_enabled else [],
+        "component_stats": _score_component_stats(records, scoring_rows),
+        "total_score_mismatch_count": component_validation.get("total_score_mismatch_count", 0),
+        "scoring_total_score_mismatch_count": component_validation.get("scoring_total_score_mismatch_count", 0),
+        "duplicated_signal_warnings": _duplicated_signal_warnings(config, relative_strength_enabled, investor_context_enabled),
+    }
+
+
+def _score_effective_range_audit(
+    config: dict[str, Any],
+    records: list[dict[str, Any]],
+    scoring_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    relative_strength_enabled = _relative_strength_enabled(config)
+    investor_context_enabled = _investor_context_enabled(config)
+    rows = _effective_score_records(records, scoring_rows)
+    total_scores = _valid_numbers(row.get("total_score") for row in rows)
+    selected_rows = [row for row in rows if row.get("selected")]
+    selected_scores = _valid_numbers(row.get("total_score") for row in selected_rows)
+    component_summaries = [
+        _effective_component_summary(component, rows, relative_strength_enabled, investor_context_enabled)
+        for component in EFFECTIVE_RANGE_COMPONENTS
+    ]
+    top_level_components = {
+        "technical_score",
+        "relative_strength_score",
+        "investor_context_score",
+        "market_context_score",
+        "penalty_score",
+    }
+    effective_max_score = sum(
+        float(item.get("observed_max") or 0)
+        for item in component_summaries
+        if item.get("component") in top_level_components and item.get("status") != "inactive"
+    )
+    return {
+        "profile_id": _profile_id(config),
+        "theoretical_max_score": _theoretical_max_score(relative_strength_enabled, investor_context_enabled),
+        "effective_max_score": round(effective_max_score, 4),
+        "observed_min_score": _min_or_none(total_scores),
+        "observed_max_score": _max_or_none(total_scores),
+        "observed_avg_score": _average(total_scores),
+        "selected_min_score": _min_or_none(selected_scores),
+        "selected_max_score": _max_or_none(selected_scores),
+        "selected_avg_score": _average(selected_scores),
+        "components": component_summaries,
+    }
+
+
+def _effective_score_records(records: list[dict[str, Any]], scoring_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if scoring_rows:
+        return [_effective_record_from_scoring(row) for row in scoring_rows]
+    return [_effective_record_from_trade(record) for record in records]
+
+
+def _effective_record_from_scoring(row: dict[str, Any]) -> dict[str, Any]:
+    components = _json_dict(row.get("score_components"))
+    record = _component_record(row, components)
+    record["total_score"] = _number(row.get("total_score")) or _number(components.get("total_score"))
+    record["selected"] = bool(row.get("selected"))
+    return record
+
+
+def _effective_record_from_trade(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **{component: _number(record.get(component)) for component in EFFECTIVE_RANGE_COMPONENTS},
+        "total_score": _number(record.get("total_score")),
+        "selected": True,
+    }
+
+
+def _component_record(row: dict[str, Any], components: dict[str, Any]) -> dict[str, Any]:
+    record = {key: _component_value(row, components, key) for key in SCORE_COMPONENT_KEYS}
+    technical_score = _number(row.get("technical_score"))
+    if technical_score is None:
+        technical_score = _technical_score_from_components(record)
+    record["technical_score"] = technical_score
+    return record
+
+
+def _technical_score_from_components(record: dict[str, Any]) -> float | None:
+    values = [
+        _number(record.get("ma_score")),
+        _number(record.get("rsi_score")),
+        _number(record.get("volume_score")),
+        _number(record.get("candlestick_score")),
+        _number(record.get("sector_score")),
+    ]
+    if any(value is None for value in values):
+        return None
+    return round(max(0.0, min(50.0, sum(float(value) for value in values))), 4)
+
+
+def _effective_component_summary(
+    component: str,
+    rows: list[dict[str, Any]],
+    relative_strength_enabled: bool,
+    investor_context_enabled: bool,
+) -> dict[str, Any]:
+    values = _valid_numbers(row.get(component) for row in rows)
+    non_zero_count = sum(1 for value in values if abs(value) > 0)
+    zero_count = sum(1 for value in values if value == 0)
+    return {
+        "component": component,
+        "configured_max": _configured_component_max(component, relative_strength_enabled, investor_context_enabled),
+        "observed_min": _min_or_none(values),
+        "observed_max": _max_or_none(values),
+        "observed_avg": _average(values),
+        "non_zero_count": non_zero_count,
+        "zero_count": zero_count,
+        "status": _component_status(component, values),
+    }
+
+
+def _configured_component_max(component: str, relative_strength_enabled: bool, investor_context_enabled: bool) -> float:
+    if component == "relative_strength_score" and not relative_strength_enabled:
+        return 0.0
+    if component == "investor_context_score" and not investor_context_enabled:
+        return 0.0
+    return float(COMPONENT_CONFIGURED_MAX.get(component, 0))
+
+
+def _component_status(component: str, values: list[float]) -> str:
+    if not values:
+        return "no_data"
+    if all(value == 0 for value in values):
+        if component in {"market_context_score", "penalty_score", "relative_strength_score", "investor_context_score"}:
+            return "inactive"
+        return "zero"
+    return "active"
+
+
+def _theoretical_max_score(relative_strength_enabled: bool, investor_context_enabled: bool) -> float:
+    return 50.0 + (10.0 if relative_strength_enabled else 0.0) + (5.0 if investor_context_enabled else 0.0)
+
+
+def _expected_score_range(relative_strength_enabled: bool, investor_context_enabled: bool) -> str:
+    return f"0-{int(_theoretical_max_score(relative_strength_enabled, investor_context_enabled))}"
+
+
+def _relative_strength_enabled(config: dict[str, Any]) -> bool:
+    return bool(config.get("features", {}).get("relative_strength")) and bool(
+        config.get("scoring", {}).get("use_relative_strength_score")
+    )
+
+
+def _investor_context_enabled(config: dict[str, Any]) -> bool:
+    return bool(config.get("features", {}).get("investor_context")) and bool(
+        config.get("scoring", {}).get("use_investor_context_score")
+    )
+
+
+def _score_component_stats(records: list[dict[str, Any]], scoring_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = list(records)
+    rows.extend(_scoring_component_record(row) for row in scoring_rows)
+    stats = []
+    for key in SCORE_COMPONENT_KEYS:
+        values = _valid_numbers(row.get(key) for row in rows)
+        stats.append(
+            {
+                "component": key,
+                "count": len(values),
+                "average": _average(values),
+                "min": round(min(values), 4) if values else None,
+                "max": round(max(values), 4) if values else None,
+            }
+        )
+    return stats
+
+
+def _scoring_component_record(row: dict[str, Any]) -> dict[str, Any]:
+    components = _json_dict(row.get("score_components"))
+    record = _component_record(row, components)
+    record["total_score"] = _number(row.get("total_score")) or _number(components.get("total_score"))
+    return record
+
+
+def _duplicated_signal_warnings(config: dict[str, Any], relative_strength_enabled: bool, investor_context_enabled: bool) -> list[dict[str, str]]:
+    warnings = []
+    selection = config.get("selection", {})
+    volume_filter = config.get("volume_filter", {})
+    market_filter = config.get("market_filter", {})
+    if selection.get("max_rsi_for_new_position") is not None:
+        warnings.append(
+            {
+                "level": "review",
+                "message": "RSI is used in rsi_score and also in the RSI selection filter; this is not double-added to total_score, but it affects eligibility.",
+            }
+        )
+    if volume_filter.get("enabled"):
+        warnings.append(
+            {
+                "level": "review",
+                "message": "volume_ratio is used in volume_score and also in the volume selection filter; this is not double-added to total_score, but it affects eligibility.",
+            }
+        )
+    if market_filter.get("enabled"):
+        warnings.append(
+            {
+                "level": "ok",
+                "message": "market_regime is used by selection filtering while market_context_score is currently 0, so no score double-add was detected.",
+            }
+        )
+    warnings.append(
+        {
+            "level": "ok",
+            "message": "candlestick signals are decomposed into candlestick_score inside technical_score; no separate candlestick add-on was detected.",
+        }
+    )
+    if relative_strength_enabled:
+        warnings.append(
+            {
+                "level": "ok",
+                "message": "relative_strength_score is not part of technical_score and is added once as a separate component.",
+            }
+        )
+    if investor_context_enabled:
+        warnings.append(
+            {
+                "level": "ok",
+                "message": "investor_context_score is market-wide weekly context and is added once outside technical_score.",
+            }
+        )
+    return warnings
+
+
 def _number(value: Any) -> float | None:
     if value is None or value == "":
         return None
@@ -594,6 +1179,14 @@ def _average(values: list[float]) -> float | None:
     if not values:
         return None
     return round(sum(values) / len(values), 4)
+
+
+def _min_or_none(values: list[float]) -> float | None:
+    return round(min(values), 4) if values else None
+
+
+def _max_or_none(values: list[float]) -> float | None:
+    return round(max(values), 4) if values else None
 
 
 def _format_percent(value: Any) -> str:

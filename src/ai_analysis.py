@@ -212,13 +212,6 @@ def build_decision_record(
             "gap_rate": _number(scoring.get("gap_rate") or screening.get("gap_rate")),
             "candlestick_signals": _json_list(scoring.get("candlestick_signals") or screening.get("candlestick_signals")),
         },
-        "news_features": {
-            "news_score": _number(scoring.get("news_score")),
-            "news_reason": scoring.get("news_reason"),
-            "news_articles_count": _int(scoring.get("news_articles_count")) or 0,
-            "positive_news_count": _int(scoring.get("positive_news_count")) or 0,
-            "negative_news_count": _int(scoring.get("negative_news_count")) or 0,
-        },
         "rule_based_score": {
             "total_score": _number(scoring.get("total_score")),
             "technical_score": _number(scoring.get("technical_score")),
@@ -233,8 +226,6 @@ def build_decision_record(
             "score_components": _json_dict(scoring.get("score_components")),
             "score_components_total": _number(scoring.get("score_components_total")),
             "score_components_match": _bool_or_none(scoring.get("score_components_match")),
-            "news_score": _number(scoring.get("news_score")),
-            "financial_score": _number(scoring.get("financial_score")),
             "confidence": _number(scoring.get("confidence")),
             "rank": _int(scoring.get("rank")),
             "reason": scoring.get("reason"),

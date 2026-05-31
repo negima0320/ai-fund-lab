@@ -56,11 +56,11 @@ execution:
   stop_loss_execution: intraday_stop
 
 selection:
-  min_score: 72
-  fallback_min_score: 72
+  min_score: 47
+  fallback_min_score: 47
   min_confidence: 0.70
   allow_top_pick_when_no_selection: true
-  top_pick_min_score: 72
+  top_pick_min_score: 47
   max_selected: 5
   max_rsi_for_new_position: 65
   reject_overheated_rsi: true
@@ -79,7 +79,7 @@ market_filter:
   enabled: true
   risk_off_buy_policy: conservative
   risk_off_max_buy_orders: 1
-  risk_off_min_score: 75
+  risk_off_min_score: 50
   risk_off_disable_top_pick: true
 
 broker:

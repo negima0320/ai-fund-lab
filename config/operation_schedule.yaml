@@ -1,0 +1,31 @@
+market: tokyo
+timezone: Asia/Tokyo
+
+daily_flow:
+  data_fetch_time: "16:00"
+  screening_time: "16:10"
+  report_time: "16:30"
+  order_review_time: "08:30"
+  evening_paper_run_time: "16:30"
+  demo_order_time: "08:35"
+  order_window_start: "09:00"
+  order_window_end: "09:30"
+
+execution_policy:
+  selection_basis: previous_close
+  order_timing: next_business_day_after_open
+  execution_mode: auto_demo
+  initial_order_type: manual
+  auto_order_enabled: true
+  broker: tachibana_demo
+  forbid_live_auto_order: true
+  require_preflight: true
+  require_cash_check: true
+  require_position_check: true
+
+safety:
+  skip_weekends: true
+  skip_market_holidays: true
+  require_preflight: true
+  require_manual_approval: true
+  forbid_live_auto_order: true

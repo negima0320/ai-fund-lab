@@ -91,10 +91,30 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
                 score REAL,
                 rsi REAL,
                 volume_ratio REAL,
+                stock_return_5d REAL,
+                stock_return_10d REAL,
+                stock_return_20d REAL,
+                benchmark_source TEXT,
+                benchmark_return_5d REAL,
+                benchmark_return_10d REAL,
+                benchmark_return_20d REAL,
+                relative_strength_5d REAL,
+                relative_strength_10d REAL,
+                relative_strength_20d REAL,
+                relative_strength_score REAL,
+                investor_context_source TEXT,
+                investor_context_week TEXT,
+                overseas_net_buy REAL,
+                overseas_net_buy_4w_sum REAL,
+                overseas_net_buy_4w_trend TEXT,
+                overseas_buy_sell_ratio REAL,
+                individual_net_buy REAL,
+                institution_net_buy REAL,
+                trust_bank_net_buy REAL,
+                proprietary_net_buy REAL,
+                investor_context_score REAL,
                 total_score REAL,
                 technical_score REAL,
-                news_score REAL,
-                financial_score REAL,
                 ma_score REAL,
                 rsi_score REAL,
                 volume_score REAL,
@@ -157,14 +177,6 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
                 rank INTEGER,
                 total_score REAL,
                 technical_score REAL,
-                news_score REAL,
-                news_reason TEXT,
-                news_articles_count INTEGER,
-                positive_news_count INTEGER,
-                negative_news_count INTEGER,
-                news_provider TEXT,
-                news_limitation TEXT,
-                financial_score REAL,
                 confidence REAL,
                 selected INTEGER,
                 reason TEXT,
@@ -177,6 +189,28 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
                 bb_middle REAL,
                 bb_lower REAL,
                 atr REAL,
+                stock_return_5d REAL,
+                stock_return_10d REAL,
+                stock_return_20d REAL,
+                benchmark_source TEXT,
+                benchmark_return_5d REAL,
+                benchmark_return_10d REAL,
+                benchmark_return_20d REAL,
+                relative_strength_5d REAL,
+                relative_strength_10d REAL,
+                relative_strength_20d REAL,
+                relative_strength_score REAL,
+                investor_context_source TEXT,
+                investor_context_week TEXT,
+                overseas_net_buy REAL,
+                overseas_net_buy_4w_sum REAL,
+                overseas_net_buy_4w_trend TEXT,
+                overseas_buy_sell_ratio REAL,
+                individual_net_buy REAL,
+                institution_net_buy REAL,
+                trust_bank_net_buy REAL,
+                proprietary_net_buy REAL,
+                investor_context_score REAL,
                 candle_type TEXT,
                 candle_body_rate REAL,
                 upper_shadow_rate REAL,
@@ -198,6 +232,10 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
                 market_filter_applied INTEGER,
                 market_regime TEXT,
                 market_filter_reason TEXT,
+                earnings_filter_checked INTEGER,
+                earnings_filter_blocked INTEGER,
+                earnings_filter_reason TEXT,
+                earnings_announcement_date TEXT,
                 source_provider TEXT,
                 config_version TEXT,
                 created_at TEXT NOT NULL
@@ -222,6 +260,16 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
                 volume_ratio REAL,
                 turnover_value REAL,
                 five_day_volatility REAL,
+                stock_return_5d REAL,
+                stock_return_10d REAL,
+                stock_return_20d REAL,
+                benchmark_return_5d REAL,
+                benchmark_return_10d REAL,
+                benchmark_return_20d REAL,
+                relative_strength_5d REAL,
+                relative_strength_10d REAL,
+                relative_strength_20d REAL,
+                relative_strength_score REAL,
                 macd REAL,
                 macd_signal REAL,
                 macd_hist REAL,
@@ -409,10 +457,11 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
         _add_column_if_missing(connection, "trades", "sector_name", "TEXT")
         _add_column_if_missing(connection, "trades", "rsi", "REAL")
         _add_column_if_missing(connection, "trades", "volume_ratio", "REAL")
+        _add_relative_strength_columns(connection, "trades")
+        _add_investor_context_columns(connection, "trades")
+        _drop_removed_score_columns(connection)
         _add_column_if_missing(connection, "trades", "total_score", "REAL")
         _add_column_if_missing(connection, "trades", "technical_score", "REAL")
-        _add_column_if_missing(connection, "trades", "news_score", "REAL")
-        _add_column_if_missing(connection, "trades", "financial_score", "REAL")
         _add_column_if_missing(connection, "trades", "ma_score", "REAL")
         _add_column_if_missing(connection, "trades", "rsi_score", "REAL")
         _add_column_if_missing(connection, "trades", "volume_score", "REAL")
@@ -426,6 +475,10 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
         _add_column_if_missing(connection, "trades", "market_regime", "TEXT")
         _add_column_if_missing(connection, "trades", "advance_ratio", "REAL")
         _add_column_if_missing(connection, "trades", "candlestick_signals", "TEXT")
+        _add_column_if_missing(connection, "trades", "earnings_filter_checked", "INTEGER")
+        _add_column_if_missing(connection, "trades", "earnings_filter_blocked", "INTEGER")
+        _add_column_if_missing(connection, "trades", "earnings_filter_reason", "TEXT")
+        _add_column_if_missing(connection, "trades", "earnings_announcement_date", "TEXT")
         _add_column_if_missing(connection, "trades", "selected_reason", "TEXT")
         _add_column_if_missing(connection, "trades", "broker_provider", "TEXT")
         _add_column_if_missing(connection, "trades", "order_status", "TEXT")
@@ -447,12 +500,6 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
         _add_column_if_missing(connection, "safety_events", "safety_checked", "INTEGER")
         _add_column_if_missing(connection, "articles", "published_at", "TEXT")
         _add_column_if_missing(connection, "articles", "config_version", "TEXT")
-        _add_column_if_missing(connection, "scoring_results", "news_reason", "TEXT")
-        _add_column_if_missing(connection, "scoring_results", "news_articles_count", "INTEGER")
-        _add_column_if_missing(connection, "scoring_results", "positive_news_count", "INTEGER")
-        _add_column_if_missing(connection, "scoring_results", "negative_news_count", "INTEGER")
-        _add_column_if_missing(connection, "scoring_results", "news_provider", "TEXT")
-        _add_column_if_missing(connection, "scoring_results", "news_limitation", "TEXT")
         _delete_non_trade_order_rows(connection)
         _add_column_if_missing(connection, "scoring_results", "ai_reason", "TEXT")
         _add_column_if_missing(connection, "scoring_results", "ai_risk", "TEXT")
@@ -470,6 +517,8 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
         _add_column_if_missing(connection, "scoring_results", "bb_middle", "REAL")
         _add_column_if_missing(connection, "scoring_results", "bb_lower", "REAL")
         _add_column_if_missing(connection, "scoring_results", "atr", "REAL")
+        _add_relative_strength_columns(connection, "scoring_results")
+        _add_investor_context_columns(connection, "scoring_results")
         _add_column_if_missing(connection, "scoring_results", "candle_type", "TEXT")
         _add_column_if_missing(connection, "scoring_results", "candle_body_rate", "REAL")
         _add_column_if_missing(connection, "scoring_results", "upper_shadow_rate", "REAL")
@@ -488,6 +537,10 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
         _add_column_if_missing(connection, "scoring_results", "score_components", "TEXT")
         _add_column_if_missing(connection, "scoring_results", "score_components_total", "REAL")
         _add_column_if_missing(connection, "scoring_results", "score_components_match", "INTEGER")
+        _add_column_if_missing(connection, "scoring_results", "earnings_filter_checked", "INTEGER")
+        _add_column_if_missing(connection, "scoring_results", "earnings_filter_blocked", "INTEGER")
+        _add_column_if_missing(connection, "scoring_results", "earnings_filter_reason", "TEXT")
+        _add_column_if_missing(connection, "scoring_results", "earnings_announcement_date", "TEXT")
         _add_column_if_missing(connection, "scoring_results", "market_filter_applied", "INTEGER")
         _add_column_if_missing(connection, "scoring_results", "market_regime", "TEXT")
         _add_column_if_missing(connection, "scoring_results", "market_filter_reason", "TEXT")
@@ -515,6 +568,7 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
         _add_column_if_missing(connection, "screening_results", "bb_middle", "REAL")
         _add_column_if_missing(connection, "screening_results", "bb_lower", "REAL")
         _add_column_if_missing(connection, "screening_results", "atr", "REAL")
+        _add_relative_strength_columns(connection, "screening_results")
         _add_column_if_missing(connection, "pending_orders", "config_version", "TEXT")
         _add_column_if_missing(connection, "ai_decisions", "config_version", "TEXT")
         _add_column_if_missing(connection, "market_contexts", "sector_momentum", "TEXT")
@@ -700,10 +754,30 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                     trade.get("score"),
                     trade.get("rsi"),
                     trade.get("volume_ratio"),
+                    trade.get("stock_return_5d"),
+                    trade.get("stock_return_10d"),
+                    trade.get("stock_return_20d"),
+                    trade.get("benchmark_source"),
+                    trade.get("benchmark_return_5d"),
+                    trade.get("benchmark_return_10d"),
+                    trade.get("benchmark_return_20d"),
+                    trade.get("relative_strength_5d"),
+                    trade.get("relative_strength_10d"),
+                    trade.get("relative_strength_20d"),
+                    trade.get("relative_strength_score"),
+                    trade.get("investor_context_source"),
+                    trade.get("investor_context_week"),
+                    trade.get("overseas_net_buy"),
+                    trade.get("overseas_net_buy_4w_sum"),
+                    trade.get("overseas_net_buy_4w_trend"),
+                    trade.get("overseas_buy_sell_ratio"),
+                    trade.get("individual_net_buy"),
+                    trade.get("institution_net_buy"),
+                    trade.get("trust_bank_net_buy"),
+                    trade.get("proprietary_net_buy"),
+                    trade.get("investor_context_score"),
                     trade.get("total_score", trade.get("score")),
                     trade.get("technical_score"),
-                    trade.get("news_score"),
-                    trade.get("financial_score"),
                     trade.get("ma_score") or trade.get("trend_score"),
                     trade.get("rsi_score"),
                     trade.get("volume_score"),
@@ -717,6 +791,10 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                     trade.get("market_regime"),
                     trade.get("advance_ratio"),
                     _json(trade.get("candlestick_signals", [])),
+                    1 if trade.get("earnings_filter_checked") else 0,
+                    1 if trade.get("earnings_filter_blocked") else 0,
+                    trade.get("earnings_filter_reason"),
+                    trade.get("earnings_announcement_date"),
                     trade.get("selected_reason") or trade.get("reason") or trade.get("buy_reason"),
                     trade.get("reason") or trade.get("buy_reason"),
                     trade.get("round_lot_size"),
@@ -756,12 +834,24 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
             INSERT INTO trades (
                 trade_id, profile_id, profile_name, action, code, name, sector_name, entry_date, exit_date, holding_days,
                 entry_price, exit_price, shares, amount, profit, profit_rate,
-                exit_reason, result, score, rsi, volume_ratio, total_score,
-                technical_score, news_score, financial_score, ma_score, rsi_score,
+                exit_reason, result, score, rsi, volume_ratio,
+                stock_return_5d, stock_return_10d, stock_return_20d,
+                benchmark_source, benchmark_return_5d, benchmark_return_10d, benchmark_return_20d,
+                relative_strength_5d, relative_strength_10d, relative_strength_20d,
+                relative_strength_score,
+                investor_context_source, investor_context_week, overseas_net_buy,
+                overseas_net_buy_4w_sum, overseas_net_buy_4w_trend, overseas_buy_sell_ratio,
+                individual_net_buy, institution_net_buy, trust_bank_net_buy,
+                proprietary_net_buy, investor_context_score,
+                total_score,
+                technical_score, ma_score, rsi_score,
                 volume_score, candlestick_score, market_context_score, sector_score,
                 penalty_score, score_components, score_components_total,
                 score_components_match, market_regime,
-                advance_ratio, candlestick_signals, selected_reason, reason, round_lot_size,
+                advance_ratio, candlestick_signals,
+                earnings_filter_checked, earnings_filter_blocked,
+                earnings_filter_reason, earnings_announcement_date,
+                selected_reason, reason, round_lot_size,
                 use_round_lot, skipped_reason, intended_price, executed_price,
                 slippage_amount, slippage_rate, stop_loss_rate,
                 stop_loss_trigger_price, stop_loss_triggered_date,
@@ -771,7 +861,7 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                 estimated_tax, net_profit, net_profit_rate, dealer_comment,
                 broker_provider, order_status, live_trading, safety_checked,
                 config_version, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -782,6 +872,9 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
     config_version = scoring_log.get("config_version") or config_version_from(config)
     profile_id = scoring_log.get("profile_id") or _profile_id(config)
     profile_name = scoring_log.get("profile_name") or _profile_name(config)
+    scores = scoring_log.get("scores", [])
+    if not bool(config.get("analysis", {}).get("save_rejected_candidates", True)):
+        scores = [item for item in scores if item.get("selected")]
     with _connect(config, root) as connection:
         connection.execute("DELETE FROM scoring_results WHERE date = ? AND profile_id = ?", (target_date, profile_id))
         connection.executemany(
@@ -789,20 +882,28 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
             INSERT INTO scoring_results (
                 profile_id, profile_name, date, code, name, sector_name, sector_momentum_score,
                 sector_rank, sector_comment, sector_score_adjustment,
-                rank, total_score, technical_score, news_score,
-                news_reason, news_articles_count, positive_news_count,
-                negative_news_count, news_provider, news_limitation,
-                financial_score, confidence, selected, reason, rejected_reason,
+                rank, total_score, technical_score,
+                confidence, selected, reason, rejected_reason,
                 fallback, macd, macd_signal, macd_hist, bb_upper, bb_middle,
-                bb_lower, atr, candle_type, candle_body_rate, upper_shadow_rate,
+                bb_lower, atr,
+                stock_return_5d, stock_return_10d, stock_return_20d,
+                benchmark_source, benchmark_return_5d, benchmark_return_10d, benchmark_return_20d,
+                relative_strength_5d, relative_strength_10d, relative_strength_20d,
+                relative_strength_score,
+                investor_context_source, investor_context_week, overseas_net_buy,
+                overseas_net_buy_4w_sum, overseas_net_buy_4w_trend, overseas_buy_sell_ratio,
+                individual_net_buy, institution_net_buy, trust_bank_net_buy,
+                proprietary_net_buy, investor_context_score,
+                candle_type, candle_body_rate, upper_shadow_rate,
                 lower_shadow_rate, close_position_in_range, gap_rate,
                 candlestick_signals, candlestick_score, trend_score, volume_score,
                 rsi_score, ma_score, market_context_score, sector_score,
                 penalty_score, score_components, score_components_total,
                 score_components_match, market_filter_applied, market_regime, market_filter_reason,
+                earnings_filter_checked, earnings_filter_blocked, earnings_filter_reason, earnings_announcement_date,
                 source_provider, ai_reason, ai_risk, ai_confidence,
                 ai_score, config_version, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -819,14 +920,6 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
                     item.get("rank"),
                     item.get("total_score"),
                     item.get("technical_score"),
-                    item.get("news_score"),
-                    item.get("news_reason"),
-                    item.get("news_articles_count"),
-                    item.get("positive_news_count"),
-                    item.get("negative_news_count"),
-                    item.get("news_provider"),
-                    item.get("news_limitation"),
-                    item.get("financial_score"),
                     item.get("confidence"),
                     1 if item.get("selected") else 0,
                     item.get("selection_reason") or item.get("selected_reason") or item.get("reason"),
@@ -839,6 +932,28 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
                     item.get("bb_middle"),
                     item.get("bb_lower"),
                     item.get("atr"),
+                    item.get("stock_return_5d"),
+                    item.get("stock_return_10d"),
+                    item.get("stock_return_20d"),
+                    item.get("benchmark_source"),
+                    item.get("benchmark_return_5d"),
+                    item.get("benchmark_return_10d"),
+                    item.get("benchmark_return_20d"),
+                    item.get("relative_strength_5d"),
+                    item.get("relative_strength_10d"),
+                    item.get("relative_strength_20d"),
+                    item.get("relative_strength_score"),
+                    item.get("investor_context_source"),
+                    item.get("investor_context_week"),
+                    item.get("overseas_net_buy"),
+                    item.get("overseas_net_buy_4w_sum"),
+                    item.get("overseas_net_buy_4w_trend"),
+                    item.get("overseas_buy_sell_ratio"),
+                    item.get("individual_net_buy"),
+                    item.get("institution_net_buy"),
+                    item.get("trust_bank_net_buy"),
+                    item.get("proprietary_net_buy"),
+                    item.get("investor_context_score"),
                     item.get("candle_type"),
                     item.get("candle_body_rate"),
                     item.get("upper_shadow_rate"),
@@ -860,6 +975,10 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
                     1 if item.get("market_filter_applied") else 0,
                     item.get("market_regime"),
                     item.get("market_filter_reason"),
+                    1 if item.get("earnings_filter_checked") else 0,
+                    1 if item.get("earnings_filter_blocked") else 0,
+                    item.get("earnings_filter_reason"),
+                    item.get("earnings_announcement_date"),
                     item.get("source_provider") or scoring_log.get("source_provider"),
                     item.get("ai_reason"),
                     item.get("ai_risk"),
@@ -868,7 +987,7 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
                     item.get("config_version") or config_version,
                     _now(),
                 )
-                for item in scoring_log.get("scores", [])
+                for item in scores
             ],
         )
 
@@ -919,13 +1038,18 @@ def save_screening_results(config: dict[str, Any], root: Path, screening_log: di
             INSERT INTO screening_results (
                 profile_id, profile_name, date, code, name, sector_name, sector_momentum_score,
                 sector_rank, sector_comment, close, volume, ma5, ma25, rsi, volume_ratio,
-                turnover_value, five_day_volatility, macd, macd_signal,
+                turnover_value, five_day_volatility,
+                stock_return_5d, stock_return_10d, stock_return_20d,
+                benchmark_source, benchmark_return_5d, benchmark_return_10d, benchmark_return_20d,
+                relative_strength_5d, relative_strength_10d, relative_strength_20d,
+                relative_strength_score,
+                macd, macd_signal,
                 macd_hist, bb_upper, bb_middle, bb_lower, atr, candle_type,
                 candle_body_rate, upper_shadow_rate, lower_shadow_rate,
                 close_position_in_range, gap_rate, candlestick_signals,
                 candlestick_score, trend_score, volume_score, rsi_score,
                 fallback, pass_reason, rejected_reason, config_version, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -946,6 +1070,17 @@ def save_screening_results(config: dict[str, Any], root: Path, screening_log: di
                     item.get("volume_ratio"),
                     item.get("turnover_value"),
                     item.get("five_day_volatility"),
+                    item.get("stock_return_5d"),
+                    item.get("stock_return_10d"),
+                    item.get("stock_return_20d"),
+                    item.get("benchmark_source"),
+                    item.get("benchmark_return_5d"),
+                    item.get("benchmark_return_10d"),
+                    item.get("benchmark_return_20d"),
+                    item.get("relative_strength_5d"),
+                    item.get("relative_strength_10d"),
+                    item.get("relative_strength_20d"),
+                    item.get("relative_strength_score"),
                     item.get("macd"),
                     item.get("macd_signal"),
                     item.get("macd_hist"),
@@ -1102,6 +1237,7 @@ def analyze_operation_data(config: dict[str, Any], root: Path) -> dict[str, Any]
         "yearly_performance": _yearly_performance_analysis(portfolio_rows, trade_rows),
         "monthly_performance": _monthly_performance_analysis(trade_rows),
         "walk_forward_validation": _walk_forward_validation(config, portfolio_rows, trade_rows),
+        "market_regime_performance": _market_regime_performance_analysis(config, trade_rows),
         "current_profile_id": _profile_id(config),
         "current_profile_name": _profile_name(config),
         "current_config_version": config_version_from(config),
@@ -1119,6 +1255,64 @@ def _add_column_if_missing(connection: sqlite3.Connection, table: str, column: s
     columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _drop_removed_score_columns(connection: sqlite3.Connection) -> None:
+    removed_columns = {
+        "trades": [
+            "news" + "_score",
+            "financial" + "_score",
+        ],
+        "scoring_results": [
+            "news" + "_score",
+            "news" + "_reason",
+            "news" + "_articles_count",
+            "positive_" + "news_count",
+            "negative_" + "news_count",
+            "news_provider",
+            "news" + "_limitation",
+            "financial" + "_score",
+        ],
+    }
+    for table, columns in removed_columns.items():
+        existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        for column in columns:
+            if column in existing:
+                connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+                existing.remove(column)
+
+
+def _add_relative_strength_columns(connection: sqlite3.Connection, table: str) -> None:
+    _add_column_if_missing(connection, table, "benchmark_source", "TEXT")
+    for column in [
+        "stock_return_5d",
+        "stock_return_10d",
+        "stock_return_20d",
+        "benchmark_return_5d",
+        "benchmark_return_10d",
+        "benchmark_return_20d",
+        "relative_strength_5d",
+        "relative_strength_10d",
+        "relative_strength_20d",
+        "relative_strength_score",
+    ]:
+        _add_column_if_missing(connection, table, column, "REAL")
+
+
+def _add_investor_context_columns(connection: sqlite3.Connection, table: str) -> None:
+    for column in ["investor_context_source", "investor_context_week", "overseas_net_buy_4w_trend"]:
+        _add_column_if_missing(connection, table, column, "TEXT")
+    for column in [
+        "overseas_net_buy",
+        "overseas_net_buy_4w_sum",
+        "overseas_buy_sell_ratio",
+        "individual_net_buy",
+        "institution_net_buy",
+        "trust_bank_net_buy",
+        "proprietary_net_buy",
+        "investor_context_score",
+    ]:
+        _add_column_if_missing(connection, table, column, "REAL")
 
 
 def _now() -> str:
@@ -2023,6 +2217,127 @@ def _walk_forward_validation(
         "weak_periods": weak,
         "overfit_risk": _walk_forward_overfit_risk(periods),
     }
+
+
+def _market_regime_performance_analysis(config: dict[str, Any], trade_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    closed = profit_factor_metrics(trade_rows)["closed_trades"]
+    regimes = [
+        _market_regime_summary(config, closed, regime)
+        for regime in ["risk_on", "neutral", "risk_off"]
+    ]
+    evaluated = [item for item in regimes if int(item.get("trade_count") or 0) > 0]
+    best = max(evaluated, key=_market_regime_rank_key, default=None)
+    worst = min(evaluated, key=_market_regime_rank_key, default=None)
+    return {
+        "regimes": regimes,
+        "best_regime": best,
+        "worst_regime": worst,
+        "candidate_regime_filters": _candidate_regime_filters(regimes, best, worst),
+    }
+
+
+def _market_regime_summary(
+    config: dict[str, Any],
+    closed: list[dict[str, Any]],
+    regime: str,
+) -> dict[str, Any]:
+    rows = [
+        row for row in closed
+        if str(row.get("market_regime") or "unknown") == regime
+    ]
+    metrics = profit_factor_metrics(rows)
+    profits = [_trade_profit(row) for row in metrics["closed_trades"]]
+    profits = [profit for profit in profits if profit is not None]
+    win_rates = [
+        float(row["profit_rate"]) for row in rows
+        if row.get("profit_rate") is not None and float(row["profit_rate"]) > 0
+    ]
+    loss_rates = [
+        float(row["profit_rate"]) for row in rows
+        if row.get("profit_rate") is not None and float(row["profit_rate"]) <= 0
+    ]
+    expectancy = None
+    if metrics["win_rate"] is not None:
+        expectancy = round((metrics["win_rate"] * (_average(win_rates) or 0.0)) + ((1 - metrics["win_rate"]) * (_average(loss_rates) or 0.0)), 4)
+    sorted_profits = [
+        _trade_profit(row) for row in sorted(rows, key=_trade_timeline_key)
+        if _trade_profit(row) is not None
+    ]
+    return {
+        "market_regime": regime,
+        "profit": round(sum(profits), 2) if profits else 0.0,
+        "win_rate": metrics["win_rate"],
+        "profit_factor": metrics["profit_factor"],
+        "expectancy": expectancy,
+        "max_drawdown": _estimated_drawdown([float(value) for value in sorted_profits], _initial_capital(config)),
+        "trade_count": metrics["closed_trade_count"],
+    }
+
+
+def _market_regime_rank_key(item: dict[str, Any]) -> tuple[float, float, float, float]:
+    return (
+        float(item.get("profit") or 0.0),
+        float(item.get("expectancy") or 0.0),
+        float(item.get("profit_factor") or 0.0),
+        float(item.get("win_rate") or 0.0),
+    )
+
+
+def _candidate_regime_filters(
+    regimes: list[dict[str, Any]],
+    best: dict[str, Any] | None,
+    worst: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    candidates = []
+    if best and _is_positive_regime(best):
+        candidates.append(
+            {
+                "rule": f"market_regime = {best['market_regime']} は採用維持",
+                "reason": (
+                    f"{best['market_regime']} は profit {float(best.get('profit') or 0):,.0f}円、"
+                    f"PF {best.get('profit_factor')}、expectancy {best.get('expectancy')} で最も強い相場です。"
+                ),
+            }
+        )
+    if worst and _is_weak_regime(worst):
+        candidates.append(
+            {
+                "rule": f"market_regime = {worst['market_regime']} は買付抑制候補",
+                "reason": (
+                    f"{worst['market_regime']} は profit {float(worst.get('profit') or 0):,.0f}円、"
+                    f"PF {worst.get('profit_factor')}、expectancy {worst.get('expectancy')} で最も弱い相場です。"
+                ),
+            }
+        )
+    risk_off = next((item for item in regimes if item.get("market_regime") == "risk_off"), None)
+    if risk_off and int(risk_off.get("trade_count") or 0) > 0 and _is_weak_regime(risk_off):
+        candidates.append(
+            {
+                "rule": "risk_off の新規買付制限を維持または強化",
+                "reason": "risk_off で profit / PF / expectancy のいずれかが弱く、守りを優先する候補です。",
+            }
+        )
+    return candidates
+
+
+def _is_positive_regime(item: dict[str, Any]) -> bool:
+    return (
+        int(item.get("trade_count") or 0) > 0
+        and float(item.get("profit") or 0.0) > 0
+        and (item.get("profit_factor") is None or float(item.get("profit_factor") or 0.0) >= 1.0)
+        and (item.get("expectancy") is None or float(item.get("expectancy") or 0.0) > 0)
+    )
+
+
+def _is_weak_regime(item: dict[str, Any]) -> bool:
+    return (
+        int(item.get("trade_count") or 0) > 0
+        and (
+            float(item.get("profit") or 0.0) < 0
+            or (item.get("profit_factor") is not None and float(item.get("profit_factor") or 0.0) < 1.0)
+            or (item.get("expectancy") is not None and float(item.get("expectancy") or 0.0) < 0)
+        )
+    )
 
 
 def _walk_forward_period(
