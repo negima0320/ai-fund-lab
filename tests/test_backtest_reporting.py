@@ -119,6 +119,104 @@ def test_backtest_skips_day_when_indicator_history_is_insufficient(monkeypatch, 
     assert calls["indicators"] == 0
 
 
+def test_backtest_date_range_audit_detects_price_coverage_gap(monkeypatch, config_copy, tmp_path) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+
+    audit = main_module.build_backtest_date_range_audit(
+        config=config_copy,
+        requested_start_date=date(2021, 5, 1),
+        requested_end_date=date(2026, 5, 30),
+        effective_trade_start_date=date(2021, 5, 1),
+        effective_trade_end_date=date(2026, 5, 30),
+        indicator_fetch_start_date=date(2021, 5, 1),
+        price_history_dates=[date(2024, 9, 2), date(2026, 3, 6)],
+        trading_dates=[date(2024, 9, 2), date(2026, 3, 6)],
+        processed_dates=["2024-09-02", "2026-03-06"],
+        skipped_days=[],
+        all_trades=[{"entry_date": "2024-10-01", "exit_date": "2026-03-06"}],
+    )
+
+    assert audit["effective_trade_end_date"] == "2026-05-30"
+    assert audit["last_price_date"] == "2026-03-06"
+    assert audit["last_processed_day"] == "2026-03-06"
+    assert audit["data_coverage"]["prices"]["coverage_ok"] is False
+    assert audit["effective_range_warning"]
+
+
+def test_backtest_summary_markdown_separates_requested_and_effective_period(config_copy) -> None:
+    summary = {
+        "start_date": "2021-05-01",
+        "end_date": "2026-05-30",
+        "date_resolution": {
+            "requested_start_date": "2021-05-01",
+            "requested_end_date": "2026-05-30",
+            "effective_start_date": "2021-05-01",
+            "effective_end_date": "2026-05-30",
+            "start_date_source": "cli",
+            "end_date_source": "cli",
+        },
+        "date_range_audit": {
+            "requested_start_date": "2021-05-01",
+            "requested_end_date": "2026-05-30",
+            "effective_trade_start_date": "2021-05-01",
+            "effective_trade_end_date": "2026-05-30",
+            "indicator_fetch_start_date": "2021-05-01",
+            "first_price_date": "2024-09-02",
+            "last_price_date": "2026-03-06",
+            "first_trading_day": "2024-09-02",
+            "last_trading_day": "2026-03-06",
+            "target_trading_days": 1000,
+            "processed_days": 397,
+            "skipped_days": 0,
+            "last_processed_day": "2026-03-06",
+            "first_trade_date": "2024-10-01",
+            "last_trade_date": "2026-03-06",
+            "data_coverage": {
+                "prices": {
+                    "requested_end_date": "2026-05-30",
+                    "latest_available_price_date": "2026-03-06",
+                    "coverage_ok": False,
+                    "warning": "price data ends before requested_end_date",
+                }
+            },
+            "effective_range_warning": "processed days end before requested_end_date",
+            "hardcoded_date_audit": {"target": "2026-03-06", "match_count": 0, "matches_sample": []},
+        },
+        "initial_capital": 1_000_000,
+        "final_assets": 1_000_000,
+        "cumulative_profit": 0,
+        "cumulative_profit_rate": 0,
+        "gross_cumulative_profit": 0,
+        "estimated_tax_total": 0,
+        "total_commission": 0,
+        "net_cumulative_profit": 0,
+        "net_cumulative_profit_rate": 0,
+        "win_rate": None,
+        "profit_factor": None,
+        "closed_trade_count": 0,
+        "win_count": 0,
+        "loss_count": 0,
+        "excluded_order_event_count": 0,
+        "total_trades": 0,
+        "max_drawdown": 0,
+        "take_profit_count": 0,
+        "stop_loss_count": 0,
+        "max_holding_exit_count": 0,
+        "no_trade_days": 0,
+        "selected_count_total": 0,
+        "dealer_comment": "",
+        "best_trade": None,
+        "worst_trade": None,
+        "daily_asset_curve": [],
+    }
+
+    markdown = main_module.render_backtest_summary_markdown(summary, config_copy)
+
+    assert "- requested_period: 2021-05-01 to 2026-05-30" in markdown
+    assert "- effective_period: 2024-09-02 to 2026-03-06" in markdown
+    assert "- prices.coverage_ok: false" in markdown
+
+
 def test_run_daily_report_writer_generates_daily_article(config_copy, monkeypatch, tmp_path) -> None:
     config_copy["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
     monkeypatch.setattr(main_module, "ROOT", tmp_path)

@@ -43,6 +43,7 @@ from demo_auto_order import DemoAutoOrderBlocked, execute_demo_auto_orders, late
 from earnings_calendar import earnings_counts
 from db import (
     analyze_operation_data,
+    database_schema_check,
     get_database_path,
     initialize_database,
     save_article,
@@ -174,6 +175,9 @@ def main() -> None:
         return
     if args.mode == "tachibana-healthcheck":
         run_tachibana_healthcheck(args.tachibana_env)
+        return
+    if args.mode == "db-check":
+        run_db_check(config)
         return
     if args.mode == "account-snapshot":
         run_account_snapshot(config)
@@ -346,6 +350,7 @@ def parse_args() -> Any:
             "profile-info",
             "healthcheck",
             "tachibana-healthcheck",
+            "db-check",
             "account-snapshot",
             "demo-auto-order",
             "list-stocks",
@@ -536,6 +541,7 @@ def parse_args() -> Any:
         help="Treat validate-config warnings as failures.",
     )
     args = parser.parse_args()
+    _mark_cli_date_sources(args)
     _apply_period_preset(args)
     _apply_configured_date_defaults(args)
     _apply_jquants_supported_date_limits(args)
@@ -600,6 +606,14 @@ def parse_args() -> Any:
     return args
 
 
+def _mark_cli_date_sources(args: Any) -> None:
+    argv = sys.argv[1:]
+    args.start_date_source = "cli" if "--start-date" in argv else None
+    args.end_date_source = "cli" if "--end-date" in argv else None
+    args.requested_start_date = args.start_date
+    args.requested_end_date = args.end_date
+
+
 def _apply_period_preset(args: Any) -> None:
     if not getattr(args, "period", None):
         return
@@ -607,8 +621,12 @@ def _apply_period_preset(args: Any) -> None:
     months = {"6m": 6, "1y": 12, "3y": 36, "5y": 60}[args.period]
     if not getattr(args, "start_date", None):
         args.start_date = _shift_months(end, -months).isoformat()
+        args.start_date_source = "cli"
+        args.requested_start_date = args.start_date
     if not getattr(args, "end_date", None):
         args.end_date = end.isoformat()
+        args.end_date_source = "cli"
+        args.requested_end_date = args.end_date
 
 
 def _today_jst() -> date:
@@ -629,8 +647,12 @@ def _apply_configured_date_defaults(args: Any) -> None:
     provider_config = _load_provider_runtime_config()
     if not args.start_date:
         args.start_date = _config_get(provider_config, ("backtest", "start_date"))
+        args.start_date_source = "config" if args.start_date else "default"
+        args.requested_start_date = args.start_date
     if not args.end_date:
         args.end_date = _config_get(provider_config, ("backtest", "end_date"))
+        args.end_date_source = "config" if args.end_date else "default"
+        args.requested_end_date = args.end_date
 
 
 def _apply_jquants_supported_date_limits(args: Any) -> None:
@@ -697,6 +719,14 @@ def resolve_runtime_settings(args: Any, provider_config: dict[str, Any] | None =
         "jquants_plan_resolution": plan_resolution,
         "broker_mode": str(broker_mode),
         "auto_order_enabled": bool(auto_order_enabled),
+        "date_resolution": {
+            "requested_start_date": getattr(args, "requested_start_date", getattr(args, "start_date", None)),
+            "requested_end_date": getattr(args, "requested_end_date", getattr(args, "end_date", None)),
+            "start_date_source": getattr(args, "start_date_source", None) or "default",
+            "end_date_source": getattr(args, "end_date_source", None) or "default",
+            "effective_start_date": getattr(args, "start_date", None),
+            "effective_end_date": getattr(args, "end_date", None),
+        },
         "sources": {
             "profile": profile_source,
             "provider": provider_source,
@@ -1937,6 +1967,27 @@ def run_tachibana_healthcheck(environment: str) -> None:
     print(f"markdown: {markdown_path.relative_to(ROOT)}")
 
 
+def run_db_check(config: dict[str, Any]) -> None:
+    result = database_schema_check(config, ROOT)
+    print("DB Check")
+    print(f"database_path: {Path(result['database_path']).relative_to(ROOT) if Path(result['database_path']).is_relative_to(ROOT) else result['database_path']}")
+    for table in result.get("tables", []):
+        expected = table.get("expected_insert_columns", [])
+        status = table.get("status", "OK")
+        print(f"- {table['table']}: {status} columns={table['column_count']}")
+        if expected:
+            print(f"  expected_insert_columns: {len(expected)}")
+            missing = table.get("insert_missing_in_schema", [])
+            if missing:
+                print(f"  missing: {', '.join(missing)}")
+    errors = result.get("errors", [])
+    print("DB Check Summary")
+    print(f"- tables: {len(result.get('tables', []))}")
+    print(f"- errors: {len(errors)}")
+    if errors:
+        raise SystemExit(1)
+
+
 def build_tachibana_healthcheck(config: dict[str, Any], environment: str = "demo") -> dict[str, Any]:
     checks = []
     tachibana = config.get("tachibana")
@@ -2159,6 +2210,7 @@ def run_analyze(config: dict[str, Any], start_date: str | None = None, end_date:
 
 
 def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_text: str) -> tuple[Path, Path]:
+    _print_date_resolution("Compare Profiles Date Resolution", _runtime_date_resolution(start_date_text, end_date_text))
     profiles = [load_profile(profile_id) for profile_id in profile_ids]
     db_path = get_database_path(profiles[0], ROOT)
     if not db_path.exists():
@@ -2171,6 +2223,7 @@ def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_
     payload = {
         "start_date": start_date_text,
         "end_date": end_date_text,
+        "date_resolution": _runtime_date_resolution(start_date_text, end_date_text),
         "profiles": rows,
         "ranking": ranking,
         "profile_diff_analyses": profile_diff_analyses,
@@ -2295,6 +2348,28 @@ def run_compare_experiments(base_profile_id: str | None, start_date_text: str | 
     print(f"json: {json_path.relative_to(ROOT)}")
 
 
+def _runtime_date_resolution(start_date_text: str | None, end_date_text: str | None) -> dict[str, Any]:
+    runtime = _runtime_settings_or_defaults().get("date_resolution", {})
+    runtime = runtime if isinstance(runtime, dict) else {}
+    return {
+        "requested_start_date": runtime.get("requested_start_date") or start_date_text,
+        "requested_end_date": runtime.get("requested_end_date") or end_date_text,
+        "effective_start_date": start_date_text,
+        "effective_end_date": end_date_text,
+        "start_date_source": runtime.get("start_date_source") or "default",
+        "end_date_source": runtime.get("end_date_source") or "default",
+    }
+
+
+def _print_date_resolution(title: str, resolution: dict[str, Any]) -> None:
+    print(title)
+    print(f"requested_start_date: {resolution.get('requested_start_date')}")
+    print(f"requested_end_date: {resolution.get('requested_end_date')}")
+    print(f"effective_start_date: {resolution.get('effective_start_date')}")
+    print(f"effective_end_date: {resolution.get('effective_end_date')}")
+    print(f"source: start={resolution.get('start_date_source')} end={resolution.get('end_date_source')}")
+
+
 def run_experiments(
     base_profile_id: str | None,
     start_date_text: str,
@@ -2309,6 +2384,8 @@ def run_experiments(
     experiment_ids = select_experiment_profiles(base, registry, requested_profiles)
     plan_resolution = _runtime_settings_or_defaults().get("jquants_plan_resolution")
     current_plan = (plan_resolution.plan if isinstance(plan_resolution, PlanResolution) else _runtime_settings_or_defaults().get("jquants_plan", "free"))
+    date_resolution = _runtime_date_resolution(start_date_text, end_date_text)
+    _print_date_resolution("Run Experiments Date Resolution", date_resolution)
     print("J-Quants Plan Resolution:")
     if isinstance(plan_resolution, PlanResolution):
         print(f"- plan: {plan_resolution.plan}")
@@ -2350,6 +2427,7 @@ def run_experiments(
                 print(f"run-experiments analyze start: {profile_id}")
                 run_analyze(load_config(CONFIG_PATH), start_date_text, end_date_text)
         try:
+            _print_date_resolution("Compare Profiles Date Resolution", date_resolution)
             compare_paths = run_compare_profiles(profile_ids, start_date_text, end_date_text)
         except SystemExit as exc:
             print(f"run-experiments compare warning: {exc}")
@@ -2534,6 +2612,7 @@ def build_experiment_batch_summary(
         "base_profile": base_profile_id,
         "start_date": start_date_text,
         "end_date": end_date_text,
+        "date_resolution": _runtime_date_resolution(start_date_text, end_date_text),
         "profiles": [base_profile_id, *experiment_ids],
         "base": {
             "profile_id": base_profile_id,
@@ -2679,6 +2758,19 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
         f"- period: {summary.get('start_date')} to {summary.get('end_date')}",
         f"- generated_at: {summary.get('generated_at')}",
     ]
+    resolution = summary.get("date_resolution", {}) if isinstance(summary.get("date_resolution"), dict) else {}
+    lines.extend(
+        [
+            "",
+            "## Backtest Date Resolution",
+            "",
+            f"- requested_start_date: {resolution.get('requested_start_date', summary.get('start_date'))}",
+            f"- requested_end_date: {resolution.get('requested_end_date', summary.get('end_date'))}",
+            f"- effective_start_date: {resolution.get('effective_start_date', summary.get('start_date'))}",
+            f"- effective_end_date: {resolution.get('effective_end_date', summary.get('end_date'))}",
+            f"- source: start={resolution.get('start_date_source', 'default')} end={resolution.get('end_date_source', 'default')}",
+        ]
+    )
     if summary.get("capability_warnings"):
         lines.extend(["", "## Capability Warnings", ""])
         for warning in summary.get("capability_warnings", []):
@@ -3346,8 +3438,17 @@ def _to_float(value: Any) -> float | None:
 
 
 def render_compare_profiles_markdown(payload: dict[str, Any]) -> str:
+    resolution = payload.get("date_resolution", {}) if isinstance(payload.get("date_resolution"), dict) else {}
     lines = [
         f"# Profile比較 {payload['start_date']} to {payload['end_date']}",
+        "",
+        "## Backtest Date Resolution",
+        "",
+        f"- requested_start_date: {resolution.get('requested_start_date', payload['start_date'])}",
+        f"- requested_end_date: {resolution.get('requested_end_date', payload['end_date'])}",
+        f"- effective_start_date: {resolution.get('effective_start_date', payload['start_date'])}",
+        f"- effective_end_date: {resolution.get('effective_end_date', payload['end_date'])}",
+        f"- source: start={resolution.get('start_date_source', 'default')} end={resolution.get('end_date_source', 'default')}",
         "",
         "| profile | stop_loss_execution | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | avg_holding_days | closed | wins | losses | excluded | avg_win | avg_loss | total_trades | loss_over_stop_count | conditional_selected | conditional_rejected |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
@@ -6277,10 +6378,14 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
     global BACKTEST_MODE_ACTIVE, BACKTEST_PROFILE_TIMINGS
     if provider_name != "jquants":
         raise SystemExit("backtest mode currently supports --provider jquants only.")
-    requested_start_date = date.fromisoformat(start_date_text)
+    runtime_resolution = _runtime_date_resolution(start_date_text, end_date_text)
+    requested_start_text = str(runtime_resolution.get("requested_start_date") or start_date_text)
+    requested_end_text = str(runtime_resolution.get("requested_end_date") or end_date_text)
+    requested_start_date = date.fromisoformat(requested_start_text)
     end_date = date.fromisoformat(end_date_text)
     config = load_config(CONFIG_PATH)
-    effective_start_date = max(requested_start_date, jquants_earliest_supported_date(config, "prices") or requested_start_date)
+    parsed_start_date = date.fromisoformat(start_date_text)
+    effective_start_date = max(parsed_start_date, jquants_earliest_supported_date(config, "prices") or parsed_start_date)
     if effective_start_date != requested_start_date:
         print(
             "warning: requested start-date is before J-Quants supported range; "
@@ -6303,10 +6408,17 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
     daily_summaries = []
     all_trades = []
     processed_dates = []
+    skipped_days: list[dict[str, str]] = []
+    trading_dates: list[date] = []
+    price_history_dates: list[date] = []
 
     try:
         print("backtest date range:")
         print(f"- requested_start_date: {requested_start_date.isoformat()}")
+        print(f"- requested_end_date: {requested_end_text}")
+        print(f"- effective_start_date: {start_date.isoformat()}")
+        print(f"- effective_end_date: {end_date.isoformat()}")
+        print(f"- source: start={runtime_resolution.get('start_date_source')} end={runtime_resolution.get('end_date_source')}")
         print(f"- effective_trade_start_date: {start_date.isoformat()}")
         print(f"- indicator_fetch_start_date: {indicator_fetch_start_date.isoformat()}")
         print(f"- indicator_fetch_lookback_days: {_backtest_indicator_fetch_lookback_days(config)}")
@@ -6315,7 +6427,8 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
         trading_dates = _run_daily_step(2, 3, "detect-trading-days", lambda: available_cached_price_dates(start_date, end_date))
         if not trading_dates:
             raise SystemExit("No cached trading days found for the backtest period. The period may be weekend, holiday, or unavailable.")
-        price_history_days = _indicator_history_day_count(indicator_fetch_start_date, end_date)
+        price_history_dates = available_cached_price_dates(indicator_fetch_start_date, end_date)
+        price_history_days = len(price_history_dates)
 
         print(f"backtest trading_days: {len(trading_dates)}")
         print(f"backtest price_history_days: {price_history_days}")
@@ -6338,6 +6451,7 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
                     f"indicator history insufficient; input_days={indicator_input_days} "
                     f"min_required={indicator_min_days}. skipping day."
                 )
+                skipped_days.append({"date": target_date_text, "reason": "insufficient_indicator_history"})
                 continue
             _run_backtest_day_step(index, len(trading_dates), target_date_text, "calculate-indicators", lambda: ensure_indicators(provider_name, target_date_text), lambda: _backtest_indicator_metrics(target_date_text))
             if not _indicator_payload_has_rows(config, target_date_text):
@@ -6345,6 +6459,7 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
                     f"[day {index}/{len(trading_dates)}] {target_date_text} warning: "
                     "indicator payload is empty after calculation; skipping day."
                 )
+                skipped_days.append({"date": target_date_text, "reason": "empty_indicator_payload"})
                 continue
             _run_backtest_day_step(index, len(trading_dates), target_date_text, "market-context", lambda: ensure_market_context(provider_name, target_date_text), lambda: _backtest_market_context_metrics(target_date_text))
             _run_backtest_day_step(index, len(trading_dates), target_date_text, "screen", lambda: run_screen(provider_name, target_date_text), lambda: _backtest_screen_metrics(config, target_date_text))
@@ -6426,7 +6541,38 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
             3,
             3,
             "backtest-summary",
-            lambda: write_backtest_summary(range_key, start_date_text, end_date_text, config, state, daily_summaries, all_trades, backtest_dir),
+            lambda: (
+                write_backtest_summary(
+                    range_key,
+                    start_date_text,
+                    end_date_text,
+                    config,
+                    state,
+                    daily_summaries,
+                    all_trades,
+                    backtest_dir,
+                    {
+                        **runtime_resolution,
+                        "requested_start_date": requested_start_date.isoformat(),
+                        "requested_end_date": requested_end_text,
+                        "effective_start_date": start_date.isoformat(),
+                        "effective_end_date": end_date.isoformat(),
+                    },
+                    build_backtest_date_range_audit(
+                        config=config,
+                        requested_start_date=requested_start_date,
+                        requested_end_date=end_date,
+                        effective_trade_start_date=start_date,
+                        effective_trade_end_date=end_date,
+                        indicator_fetch_start_date=indicator_fetch_start_date,
+                        price_history_dates=price_history_dates,
+                        trading_dates=trading_dates,
+                        processed_dates=processed_dates,
+                        skipped_days=skipped_days,
+                        all_trades=all_trades,
+                    ),
+                )
+            ),
         )
     except SystemExit as exc:
         print(f"backtest failed during step: {getattr(exc, 'step_name', 'unknown')}")
@@ -6448,6 +6594,17 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
     print(f"provider: {provider_name}")
     print(f"start_date: {start_date_text}")
     print(f"end_date: {end_date_text}")
+    audit = summary.get("date_range_audit", {})
+    if audit:
+        print("Backtest Date Range Audit")
+        print(f"- first_price_date: {audit.get('first_price_date')}")
+        print(f"- last_price_date: {audit.get('last_price_date')}")
+        print(f"- first_trading_day: {audit.get('first_trading_day')}")
+        print(f"- last_trading_day: {audit.get('last_trading_day')}")
+        print(f"- target_trading_days: {audit.get('target_trading_days')}")
+        print(f"- processed_days: {audit.get('processed_days')}")
+        print(f"- last_processed_day: {audit.get('last_processed_day')}")
+        print(f"- coverage_ok: {((audit.get('data_coverage') or {}).get('prices') or {}).get('coverage_ok')}")
     print(f"processed_days: {len(processed_dates)}")
     print(f"final_assets: {summary['final_assets']}")
     print(f"cumulative_profit: {summary['cumulative_profit']}")
@@ -7692,6 +7849,95 @@ def available_cached_price_dates(start_date: date, end_date: date) -> list[date]
     return dates
 
 
+def build_backtest_date_range_audit(
+    *,
+    config: dict[str, Any],
+    requested_start_date: date,
+    requested_end_date: date,
+    effective_trade_start_date: date,
+    effective_trade_end_date: date,
+    indicator_fetch_start_date: date,
+    price_history_dates: list[date],
+    trading_dates: list[date],
+    processed_dates: list[str],
+    skipped_days: list[dict[str, str]],
+    all_trades: list[dict[str, Any]],
+) -> dict[str, Any]:
+    expected_trading_days = business_dates_between(effective_trade_start_date, effective_trade_end_date)
+    latest_available_price_date = price_history_dates[-1].isoformat() if price_history_dates else None
+    trade_dates = sorted(
+        {
+            str(value)
+            for trade in all_trades
+            for value in [trade.get("entry_date") or trade.get("date"), trade.get("exit_date")]
+            if value
+        }
+    )
+    coverage_ok = bool(latest_available_price_date and latest_available_price_date >= requested_end_date.isoformat())
+    audit = {
+        "requested_start_date": requested_start_date.isoformat(),
+        "requested_end_date": requested_end_date.isoformat(),
+        "effective_trade_start_date": effective_trade_start_date.isoformat(),
+        "effective_trade_end_date": effective_trade_end_date.isoformat(),
+        "indicator_fetch_start_date": indicator_fetch_start_date.isoformat(),
+        "first_price_date": price_history_dates[0].isoformat() if price_history_dates else None,
+        "last_price_date": latest_available_price_date,
+        "first_trading_day": trading_dates[0].isoformat() if trading_dates else None,
+        "last_trading_day": trading_dates[-1].isoformat() if trading_dates else None,
+        "target_trading_days": len(expected_trading_days),
+        "detected_trading_days": len(trading_dates),
+        "processed_days": len(processed_dates),
+        "skipped_days": len(skipped_days),
+        "skipped_day_details": skipped_days,
+        "last_processed_day": processed_dates[-1] if processed_dates else None,
+        "first_trade_date": trade_dates[0] if trade_dates else None,
+        "last_trade_date": trade_dates[-1] if trade_dates else None,
+        "data_coverage": {
+            "prices": {
+                "requested_end_date": requested_end_date.isoformat(),
+                "latest_available_price_date": latest_available_price_date,
+                "coverage_ok": coverage_ok,
+                "warning": ""
+                if coverage_ok
+                else (
+                    "price data ends before requested_end_date; backtest can only process cached/fetched price dates"
+                    if latest_available_price_date
+                    else "no price data available"
+                ),
+            }
+        },
+        "hardcoded_date_audit": hardcoded_date_audit(),
+    }
+    if audit["last_processed_day"] and audit["last_processed_day"] < requested_end_date.isoformat():
+        audit["effective_range_warning"] = (
+            "processed days end before requested_end_date; check latest_available_price_date and fetch-period-prices logs"
+        )
+    else:
+        audit["effective_range_warning"] = ""
+    return audit
+
+
+def hardcoded_date_audit(target: str = "2026-03-06") -> dict[str, Any]:
+    roots = [ROOT / "config", ROOT / "src", ROOT / "docs", ROOT / "reports", ROOT / "README.md"]
+    matches: list[str] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        paths = [root] if root.is_file() else [path for path in root.rglob("*") if path.is_file()]
+        for path in paths:
+            try:
+                if target in path.read_text(encoding="utf-8", errors="ignore"):
+                    matches.append(str(path.relative_to(ROOT)))
+            except OSError:
+                continue
+    return {
+        "target": target,
+        "match_count": len(matches),
+        "matches_sample": matches[:30],
+        "warning": f"{target} remains in config/src/docs/reports/README" if matches else "",
+    }
+
+
 def business_dates_between(start_date: date, end_date: date) -> list[date]:
     dates = []
     current = start_date
@@ -7779,6 +8025,8 @@ def write_backtest_summary(
     daily_summaries: list[dict[str, Any]],
     all_trades: list[dict[str, Any]],
     backtest_dir: Path,
+    date_resolution: dict[str, Any] | None = None,
+    date_range_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     initial_capital = float(config["portfolio"]["initial_cash"])
     final_assets = float(state.get("total_assets", initial_capital))
@@ -7817,6 +8065,16 @@ def write_backtest_summary(
     summary = {
         "start_date": start_date_text,
         "end_date": end_date_text,
+        "date_resolution": date_resolution
+        or {
+            "requested_start_date": start_date_text,
+            "requested_end_date": end_date_text,
+            "effective_start_date": start_date_text,
+            "effective_end_date": end_date_text,
+            "start_date_source": "default",
+            "end_date_source": "default",
+        },
+        "date_range_audit": date_range_audit or {},
         "profile_id": profile_id_from(config),
         "profile_name": profile_name_from(config),
         "provider": "jquants",
@@ -7898,6 +8156,21 @@ def render_backtest_summary_markdown(summary: dict[str, Any], config: dict[str, 
         "",
         f"- 開始日: {summary['start_date']}",
         f"- 終了日: {summary['end_date']}",
+        "",
+        "## Backtest Date Resolution",
+        "",
+        f"- requested_start_date: {summary.get('date_resolution', {}).get('requested_start_date', summary['start_date'])}",
+        f"- requested_end_date: {summary.get('date_resolution', {}).get('requested_end_date', summary['end_date'])}",
+        f"- effective_start_date: {summary.get('date_resolution', {}).get('effective_start_date', summary['start_date'])}",
+        f"- effective_end_date: {summary.get('date_resolution', {}).get('effective_end_date', summary['end_date'])}",
+        f"- source: start={summary.get('date_resolution', {}).get('start_date_source', 'default')} end={summary.get('date_resolution', {}).get('end_date_source', 'default')}",
+        "",
+        "## Backtest Date Range Audit",
+        "",
+        *_backtest_date_range_audit_lines(summary.get("date_range_audit", {})),
+        "",
+        "## 成績",
+        "",
         f"- 初期資金: {summary['initial_capital']:,.0f}円",
         f"- 最終資産: {summary['final_assets']:,.0f}円",
         f"- 累計損益: {summary['cumulative_profit']:,.0f}円",
@@ -7944,6 +8217,52 @@ def render_backtest_summary_markdown(summary: dict[str, Any], config: dict[str, 
     return "\n".join(lines)
 
 
+def _backtest_date_range_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- audit: unavailable"]
+    prices = (audit.get("data_coverage") or {}).get("prices", {})
+    hardcoded = audit.get("hardcoded_date_audit", {})
+    lines = [
+        f"- requested_start_date: {audit.get('requested_start_date')}",
+        f"- requested_end_date: {audit.get('requested_end_date')}",
+        f"- effective_trade_start_date: {audit.get('effective_trade_start_date')}",
+        f"- effective_trade_end_date: {audit.get('effective_trade_end_date')}",
+        f"- indicator_fetch_start_date: {audit.get('indicator_fetch_start_date')}",
+        f"- first_price_date: {audit.get('first_price_date')}",
+        f"- last_price_date: {audit.get('last_price_date')}",
+        f"- first_trading_day: {audit.get('first_trading_day')}",
+        f"- last_trading_day: {audit.get('last_trading_day')}",
+        f"- target_trading_days: {audit.get('target_trading_days')}",
+        f"- processed_days: {audit.get('processed_days')}",
+        f"- skipped_days: {audit.get('skipped_days')}",
+        f"- last_processed_day: {audit.get('last_processed_day')}",
+        f"- first_trade_date: {audit.get('first_trade_date')}",
+        f"- last_trade_date: {audit.get('last_trade_date')}",
+        "",
+        "### Data Coverage Audit",
+        "",
+        f"- prices.requested_end_date: {prices.get('requested_end_date')}",
+        f"- prices.latest_available_price_date: {prices.get('latest_available_price_date')}",
+        f"- prices.coverage_ok: {str(bool(prices.get('coverage_ok'))).lower()}",
+        f"- prices.warning: {prices.get('warning') or '-'}",
+        "",
+        "### Requested vs Effective Period",
+        "",
+        f"- requested_period: {audit.get('requested_start_date')} to {audit.get('requested_end_date')}",
+        f"- effective_period: {audit.get('first_trading_day')} to {audit.get('last_processed_day')}",
+        f"- effective_range_warning: {audit.get('effective_range_warning') or '-'}",
+        "",
+        "### Hardcoded Date Audit",
+        "",
+        f"- target: {hardcoded.get('target', '2026-03-06')}",
+        f"- match_count: {hardcoded.get('match_count', 0)}",
+        f"- warning: {hardcoded.get('warning') or '-'}",
+    ]
+    for match in hardcoded.get("matches_sample", [])[:10]:
+        lines.append(f"- match: {match}")
+    return lines
+
+
 def render_rule_based_90d_summary_markdown(summary: dict[str, Any]) -> str:
     lines = [
         f"# Rule-based 90d Backtest Summary {summary['start_date']} to {summary['end_date']}",
@@ -7956,6 +8275,10 @@ def render_rule_based_90d_summary_markdown(summary: dict[str, Any]) -> str:
         "- ChatGPT/OpenAI: disabled",
         f"- broker: {summary.get('broker', 'paper')}",
         f"- config_version: {summary.get('config_version')}",
+        "",
+        "## Backtest Date Range Audit",
+        "",
+        *_backtest_date_range_audit_lines(summary.get("date_range_audit", {})),
         "",
         "## 結果サマリ",
         "",

@@ -107,3 +107,30 @@ def test_parse_args_uses_configured_backtest_dates_when_cli_omits_them(monkeypat
     assert args.profile is None
     assert args.start_date == "2026-01-05"
     assert args.end_date == "2026-03-06"
+    assert args.start_date_source == "config"
+    assert args.end_date_source == "config"
+
+
+def test_parse_args_cli_dates_override_configured_backtest_dates(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main_module.sys,
+        "argv",
+        [
+            "main.py",
+            "--mode",
+            "run-experiments",
+            "--start-date",
+            "2021-05-01",
+            "--end-date",
+            "2026-05-30",
+        ],
+    )
+
+    args = main_module.parse_args()
+
+    assert args.start_date == "2021-05-01"
+    assert args.end_date == "2026-05-30"
+    assert args.requested_start_date == "2021-05-01"
+    assert args.requested_end_date == "2026-05-30"
+    assert args.start_date_source == "cli"
+    assert args.end_date_source == "cli"

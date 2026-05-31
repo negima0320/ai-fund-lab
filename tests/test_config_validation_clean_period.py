@@ -349,9 +349,11 @@ def test_period_preset_is_applied_by_parse_args(monkeypatch) -> None:
 
     args = main_module.parse_args()
 
-    assert not hasattr(args, "requested_start_date")
+    assert args.requested_start_date == "2021-05-31"
     assert args.start_date == "2021-05-31"
     assert args.end_date == "2026-05-31"
+    assert args.start_date_source == "cli"
+    assert args.end_date_source == "cli"
 
 
 def test_experiment_judgement_candidate_needs_review_and_rejected() -> None:

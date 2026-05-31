@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from db import initialize_database, save_trades
+from db import database_schema_check, initialize_database, save_pending_orders, save_scoring_results, save_trades
 from main import count_csv_data_rows, write_trades_csv_from_db
 from profile_loader import load_profile
 
@@ -80,3 +80,95 @@ def test_profile_outputs_are_separated(tmp_path) -> None:
     assert path_01 != path_02
     assert "rookie_dealer_01" in str(path_01)
     assert "rookie_dealer_02" in str(path_02)
+
+
+def test_save_pending_orders_column_count_matches_schema(config_copy: dict, tmp_path) -> None:
+    config_copy["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    initialize_database(config_copy, tmp_path)
+
+    save_pending_orders(
+        config_copy,
+        tmp_path,
+        [
+            {
+                "order_id": "order-001",
+                "action": "BUY",
+                "code": "1001",
+                "name": "Pending Buy",
+                "created_date": "2026-03-02",
+                "scheduled_execution_date": "2026-03-03",
+                "intended_price": 1000,
+                "status": "PENDING",
+                "score": 45,
+                "reason": "manual approval",
+            }
+        ],
+    )
+
+    with sqlite3.connect(config_copy["database"]["path"]) as connection:
+        count = connection.execute("SELECT COUNT(*) FROM pending_orders").fetchone()[0]
+
+    assert count == 1
+
+
+def test_db_check_reports_pending_order_insert_columns(config_copy: dict, tmp_path) -> None:
+    config_copy["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+
+    result = database_schema_check(config_copy, tmp_path)
+    pending = next(item for item in result["tables"] if item["table"] == "pending_orders")
+
+    assert pending["status"] == "OK"
+    assert pending["expected_insert_column_count"] == 12
+    assert pending["insert_missing_in_schema"] == []
+
+
+def test_db_save_with_scores_no_selection_and_pending_order(config_copy: dict, tmp_path) -> None:
+    config_copy["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    initialize_database(config_copy, tmp_path)
+
+    save_scoring_results(
+        config_copy,
+        tmp_path,
+        {
+            "date": "2026-03-02",
+            "source_provider": "jquants",
+            "scores": [
+                {
+                    "code": "1001",
+                    "name": "Rejected Candidate",
+                    "rank": 1,
+                    "total_score": 40,
+                    "selected": False,
+                    "rejected_reason": "score below threshold",
+                    "relative_strength_score": 0,
+                    "investor_context_score": 0,
+                    "earnings_filter_checked": False,
+                }
+            ],
+        },
+    )
+    save_trades(config_copy, tmp_path, "2026-03-02", [])
+    save_pending_orders(
+        config_copy,
+        tmp_path,
+        [
+            {
+                "order_id": "existing-pending",
+                "action": "BUY",
+                "code": "1002",
+                "name": "Existing Pending",
+                "created_date": "2026-03-01",
+                "scheduled_execution_date": "2026-03-02",
+                "status": "PENDING",
+            }
+        ],
+    )
+
+    with sqlite3.connect(config_copy["database"]["path"]) as connection:
+        scoring_count = connection.execute("SELECT COUNT(*) FROM scoring_results").fetchone()[0]
+        trade_count = connection.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+        pending_count = connection.execute("SELECT COUNT(*) FROM pending_orders").fetchone()[0]
+
+    assert scoring_count == 1
+    assert trade_count == 0
+    assert pending_count == 1

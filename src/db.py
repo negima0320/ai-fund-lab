@@ -20,6 +20,25 @@ WALK_FORWARD_PERIODS = [
     ("2025-11-01", "2026-03-06"),
 ]
 
+PENDING_ORDER_INSERT_COLUMNS = [
+    "order_id",
+    "action",
+    "code",
+    "name",
+    "created_date",
+    "scheduled_execution_date",
+    "intended_price",
+    "status",
+    "score",
+    "reason",
+    "config_version",
+    "created_at",
+]
+
+EXPECTED_INSERT_COLUMNS: dict[str, list[str]] = {
+    "pending_orders": PENDING_ORDER_INSERT_COLUMNS,
+}
+
 
 def get_database_path(config: dict[str, Any], root: Path) -> Path:
     configured_path = config.get("database", {}).get("path", "storage/ai_fund_lab.sqlite3")
@@ -669,31 +688,28 @@ def save_pending_orders(config: dict[str, Any], root: Path, pending_orders: list
     config_version = config_version_from(config)
     with _connect(config, root) as connection:
         connection.execute("DELETE FROM pending_orders")
-        connection.executemany(
-            """
-            INSERT INTO pending_orders (
-                order_id, action, code, name, created_date,
-                scheduled_execution_date, intended_price, status, score,
-                reason, config_version, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    order.get("order_id"),
-                    order.get("action"),
-                    order.get("code"),
-                    order.get("name"),
-                    order.get("created_date"),
-                    order.get("scheduled_execution_date"),
-                    order.get("intended_price"),
-                    order.get("status"),
-                    order.get("score"),
-                    order.get("reason"),
-                    order.get("config_version") or config_version,
-                    _now(),
-                )
-                for order in pending_orders
-            ],
+        rows = [
+            (
+                order.get("order_id"),
+                order.get("action"),
+                order.get("code"),
+                order.get("name"),
+                order.get("created_date"),
+                order.get("scheduled_execution_date"),
+                order.get("intended_price"),
+                order.get("status"),
+                order.get("score"),
+                order.get("reason"),
+                order.get("config_version") or config_version,
+                _now(),
+            )
+            for order in pending_orders
+        ]
+        _executemany_insert(
+            connection,
+            "pending_orders",
+            PENDING_ORDER_INSERT_COLUMNS,
+            rows,
         )
 
 
@@ -1342,6 +1358,77 @@ def analyze_operation_data(config: dict[str, Any], root: Path) -> dict[str, Any]
 def _connect(config: dict[str, Any], root: Path) -> sqlite3.Connection:
     db_path = initialize_database(config, root)
     return sqlite3.connect(db_path)
+
+
+def _executemany_insert(
+    connection: sqlite3.Connection,
+    table_name: str,
+    columns: list[str],
+    rows: list[tuple[Any, ...]],
+) -> None:
+    _validate_insert_rows(table_name, columns, rows)
+    if not rows:
+        return
+    placeholders = ", ".join(["?"] * len(columns))
+    column_sql = ", ".join(columns)
+    sql = f"INSERT INTO {table_name} ({column_sql}) VALUES ({placeholders})"
+    try:
+        connection.executemany(sql, rows)
+    except sqlite3.Error:
+        _print_insert_shape_debug(table_name, columns, rows)
+        raise
+
+
+def _validate_insert_rows(table_name: str, columns: list[str], rows: list[tuple[Any, ...]]) -> None:
+    for row in rows:
+        if len(row) != len(columns):
+            _print_insert_shape_debug(table_name, columns, rows)
+            raise ValueError(
+                f"DB insert shape mismatch table={table_name} "
+                f"column_count={len(columns)} value_count={len(row)}"
+            )
+
+
+def _print_insert_shape_debug(table_name: str, columns: list[str], rows: list[tuple[Any, ...]]) -> None:
+    first_row = rows[0] if rows else ()
+    print("DB insert shape debug:")
+    print(f"- table_name: {table_name}")
+    print(f"- column_count: {len(columns)}")
+    print(f"- value_count: {len(first_row)}")
+    print(f"- columns: {columns}")
+    print(f"- first values count: {len(first_row)}")
+
+
+def database_schema_check(config: dict[str, Any], root: Path) -> dict[str, Any]:
+    db_path = initialize_database(config, root)
+    checks = []
+    with sqlite3.connect(db_path) as connection:
+        tables = [
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            )
+        ]
+        for table in tables:
+            schema_columns = [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]
+            expected_columns = EXPECTED_INSERT_COLUMNS.get(table, [])
+            insert_missing = [column for column in expected_columns if column not in schema_columns]
+            checks.append(
+                {
+                    "table": table,
+                    "columns": schema_columns,
+                    "column_count": len(schema_columns),
+                    "expected_insert_columns": expected_columns,
+                    "expected_insert_column_count": len(expected_columns),
+                    "insert_missing_in_schema": insert_missing,
+                    "status": "ERROR" if insert_missing else "OK",
+                }
+            )
+    return {
+        "database_path": str(db_path),
+        "tables": checks,
+        "errors": [check for check in checks if check["status"] == "ERROR"],
+    }
 
 
 def _add_column_if_missing(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
