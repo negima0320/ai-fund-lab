@@ -182,11 +182,17 @@ python src/main.py --mode list-profiles
 python src/main.py --mode profile-info --profile rookie_dealer_02_v2_6
 python src/main.py --mode compare-experiments --base rookie_dealer_02_v2_1
 python src/main.py --mode run-experiments --base-profile rookie_dealer_02_v2_1 --start-date YYYY-MM-DD --end-date YYYY-MM-DD --jquants-plan light --fast-analysis
+python src/main.py --mode validate-config
+python src/main.py --mode validate-config --profile rookie_dealer_02_v2_6
 ```
 
 `list-profiles` は `profile_id`、`role`、`required_plan`、`enabled_features`、`description` を表示します。`profile-info` はscore formula、required capabilities、enabled filters、推奨compare commandを表示します。`compare-experiments` はregistry上で `compare_to` がbaseを指すexperiment profileをまとめ、`reports/profile_comparisons/experiment_summary.md` に比較対象一覧と推奨コマンドを書き出します。`--start-date` と `--end-date` を付けると、DBに結果がある範囲で成績サマリーも追記します。
 
 `run-experiments` はregistry上のexperiment profileを同一期間・同一条件で一括検証します。base profileを含めて順番にbacktestし、各profileのanalyzeを実行し、compare-profiles相当の比較と `reports/experiments/YYYY-MM-DD_to_YYYY-MM-DD/experiment_summary.md` / `.json` を生成します。`--profiles rookie_dealer_02_v2_6 rookie_dealer_02_v2_10` を付けると対象実験を絞れます。`--skip-backtest` を付けると既存DB結果を使って比較レポートだけを作ります。実行するのはbacktest/analyze/compareのみで、実売買やbroker発注は行いません。
+
+実験判定は `candidate`、`needs_review`、`rejected` で表示します。baseより累計利益が増え、PFが大きく悪化せず、最大DDが悪化しすぎず、取引数がbaseの50%以上なら `candidate` です。取引数がbaseの50%未満なら `needs_review`、採用/除外差分が0件なら `no_practical_effect` として扱います。
+
+`validate-config` は本格テスト前の設定確認です。profile YAMLの存在、registryとの対応、現在のJ-Quants planで必要capabilityが満たせるか、fallback可能か、score formulaと閾値の矛盾、旧固定加点の `news_score` / `financial_score` / `base_score` の残存、live auto order禁止、手動承認・live自動発注禁止の安全設定を確認します。
 
 実験profileを追加する場合は、`config/profiles/<profile_id>.yaml` を追加し、あわせて `config/profile_registry.yaml` に `role`、`description`、`required_plan`、`compare_to`、`features` を登録します。基準profileは `role: baseline`、検証profileは `role: experiment` とします。
 
@@ -1398,11 +1404,14 @@ J-Quants実データで指定期間のバックテストを行う場合は以下
 
 ```bash
 python src/main.py --mode backtest --provider jquants --profile rookie_dealer_01 --start-date 2026-03-02 --end-date 2026-03-06
+python src/main.py --mode backtest --profile rookie_dealer_02_v2_1 --period 5y --fast-analysis
 ```
 
 `backtest` は通常運用の `logs/portfolio/state.json` を使わず、バックテスト専用のポートフォリオ状態で指定期間を順番に検証します。実売買は行わず、kabuステーションAPIにも接続しません。
 
 バックテストでは、指定期間に必要な価格データを取得し、既存キャッシュがあれば再利用します。各営業日ごとに、指標計算、スクリーニング、スコアリング、仮想売買、必要最小限のJSON保存を実行します。通常backtestでは日別Markdown、note記事、詳細reflectionは生成しません。必要な場合だけ `reporting.generate_daily_markdown_in_backtest` や `reporting.generate_articles_in_backtest` を明示的に有効化します。
+
+`--period` は `6m`、`1y`、`3y`、`5y` を指定できます。`--end-date` を省略した場合はAsia/Tokyoの今日を終了日にし、開始日を自動計算します。通常運用では `config/provider.yaml` の日付設定を使い、長期検証だけ `--period 5y` のように一時上書きします。
 
 reporting設定:
 
@@ -1437,6 +1446,17 @@ python src/main.py --mode backtest --provider jquants --profile rookie_dealer_02
 ```
 
 `--fast-analysis` は通常の売買結果を変えず、分析用の重い詳細ログを減らします。内部的には `analysis.save_rejected_candidates=false`、`analysis.save_selection_quality_detail=false`、`analysis.save_replay_detail=false`、`analysis.save_recovery_detail=false`、`analysis.save_score_audit_detail=false`、`analysis.save_backtest_daily_reports=false`、`reporting.generate_articles_in_backtest=false`、`reporting.generate_daily_markdown_in_backtest=false` として扱います。通常backtestでも記事生成はOFFなので、長期検証で `reports/articles` が増え続けることはありません。
+
+### Clean Commands
+
+reports/cacheを整理するCLIはデフォルトでdry-runです。削除対象を一覧表示し、実削除は `--yes` を付けた時だけ行います。
+
+```bash
+python src/main.py --mode clean-reports --profile rookie_dealer_02_v2_1
+python src/main.py --mode clean-experiments
+python src/main.py --mode clean-cache --provider jquants
+python src/main.py --mode clean-cache --provider jquants --yes
+```
 
 OpenAI / ChatGPT APIを使わず、新人ディーラー1号のルールベースのみで90日バックテストする場合は、profileを以下の状態にします。
 
