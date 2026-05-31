@@ -13,7 +13,7 @@ from urllib.request import urlopen
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit
 from urllib.request import Request
 
 from earnings_calendar import normalize_earnings_calendar_records
@@ -59,6 +59,26 @@ class RateLimiter:
             self._next_allowed_at = max(now, self._next_allowed_at) + self.interval_seconds
             self.acquire_count += 1
             return wait_seconds
+
+
+class JQuantsApiError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        status_code: int | None = None,
+        category: str = "api_error",
+        endpoint: str = "",
+        request_url: str = "",
+        request_params: dict[str, str] | None = None,
+        response_body: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.category = category
+        self.endpoint = endpoint
+        self.request_url = request_url
+        self.request_params = request_params or {}
+        self.response_body = response_body
 
 
 class BaseDataProvider(ABC):
@@ -253,13 +273,10 @@ class JQuantsDataProvider(BaseDataProvider):
                 "reason": "empty_cache" if cache_path.exists() else "api_error",
             }
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        _write_cached_json(
-            cache_path,
-            {
-                "fetched_at": datetime.now().isoformat(timespec="seconds"),
-                "records": records,
-            },
-        )
+        if _records_usable(records):
+            _write_cache_records(cache_path, records)
+        else:
+            _record_empty_range(cache_root, "topix_prices", start_date, end_date, "empty_response")
         available = _records_usable(records)
         return {
             "records": records,
@@ -268,7 +285,7 @@ class JQuantsDataProvider(BaseDataProvider):
             "fallback_used": False,
             "warning": "" if available else "api_success_but_empty",
             "available": available,
-            "saved": True,
+            "saved": available,
             "usable": available,
             "api_status": "200",
             "reason": "" if available else "empty_response",
@@ -341,13 +358,10 @@ class JQuantsDataProvider(BaseDataProvider):
                 "reason": "empty_cache" if cache_path.exists() else "api_error",
             }
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        _write_cached_json(
-            cache_path,
-            {
-                "fetched_at": datetime.now().isoformat(timespec="seconds"),
-                "records": records,
-            },
-        )
+        if _records_usable(records):
+            _write_cache_records(cache_path, records)
+        else:
+            _record_empty_range(cache_root, "investor_types", start_date, end_date, "empty_response")
         available = _records_usable(records)
         return {
             "records": records,
@@ -356,7 +370,7 @@ class JQuantsDataProvider(BaseDataProvider):
             "fallback_used": False,
             "warning": "" if available else "api_success_but_empty",
             "available": available,
-            "saved": True,
+            "saved": available,
             "usable": available,
             "api_status": "200",
             "reason": "" if available else "empty_response",
@@ -402,13 +416,10 @@ class JQuantsDataProvider(BaseDataProvider):
                 "reason": "empty_cache" if cache_path.exists() else "api_error",
             }
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        _write_cached_json(
-            cache_path,
-            {
-                "fetched_at": datetime.now().isoformat(timespec="seconds"),
-                "records": records,
-            },
-        )
+        if _records_usable(records):
+            _write_cache_records(cache_path, records)
+        else:
+            _record_empty_range(cache_root, "earnings_calendar", cache_date, cache_date, "empty_response")
         available = _records_usable(records)
         return {
             "records": records,
@@ -419,7 +430,7 @@ class JQuantsDataProvider(BaseDataProvider):
             "warning": "" if available else "api_success_but_empty",
             "filter_available": available,
             "available": available,
-            "saved": True,
+            "saved": available,
             "usable": available,
             "api_status": "200",
             "reason": "" if available else "empty_response",
@@ -482,13 +493,10 @@ class JQuantsDataProvider(BaseDataProvider):
                 "reason": "empty_cache" if cache_path.exists() else "api_error",
             }
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        _write_cached_json(
-            cache_path,
-            {
-                "fetched_at": datetime.now().isoformat(timespec="seconds"),
-                "records": records,
-            },
-        )
+        if _records_usable(records):
+            _write_cache_records(cache_path, records)
+        else:
+            _record_empty_range(cache_root, "financial_statements", start_date, end_date, "empty_response")
         available = _records_usable(records)
         return {
             "records": records,
@@ -497,7 +505,7 @@ class JQuantsDataProvider(BaseDataProvider):
             "fallback_used": False,
             "warning": "" if available else "api_success_but_empty",
             "available": available,
-            "saved": True,
+            "saved": available,
             "usable": available,
             "api_status": "200",
             "reason": "" if available else "empty_response",
@@ -526,15 +534,37 @@ class JQuantsDataProvider(BaseDataProvider):
             with urlopen(request, timeout=self.timeout_seconds) as response:
                 body = response.read().decode("utf-8")
         except HTTPError as exc:
-            if exc.code in {401, 403}:
-                raise RuntimeError("J-Quants authentication failed. Check JQUANTS_API_KEY.") from exc
+            body_summary = _http_error_body_summary(exc)
+            category = _http_error_category(exc.code)
             if exc.code == 429:
-                raise RuntimeError("J-Quants API rate limit exceeded. Wait a while and retry.") from exc
-            raise RuntimeError(f"J-Quants API request failed with HTTP {exc.code}.") from exc
+                message = "J-Quants API rate limit exceeded. Wait a while and retry."
+            else:
+                message = f"J-Quants API request failed with HTTP {exc.code}."
+            raise JQuantsApiError(
+                message,
+                status_code=exc.code,
+                category=category,
+                endpoint=_endpoint_from_path(path),
+                request_url=getattr(request, "full_url", str(request)),
+                request_params=_params_from_path(path),
+                response_body=body_summary,
+            ) from exc
         except URLError as exc:
-            raise RuntimeError(f"J-Quants network error: {exc.reason}") from exc
+            raise JQuantsApiError(
+                f"J-Quants network error: {exc.reason}",
+                category="network_error",
+                endpoint=_endpoint_from_path(path),
+                request_url=getattr(request, "full_url", str(request)),
+                request_params=_params_from_path(path),
+            ) from exc
         except TimeoutError as exc:
-            raise RuntimeError("J-Quants network error: request timed out.") from exc
+            raise JQuantsApiError(
+                "J-Quants network error: request timed out.",
+                category="timeout",
+                endpoint=_endpoint_from_path(path),
+                request_url=getattr(request, "full_url", str(request)),
+                request_params=_params_from_path(path),
+            ) from exc
         finally:
             elapsed = time.perf_counter() - started_at
             _increment_fetch_stat(self, "api_calls")
@@ -648,6 +678,36 @@ def _write_cached_json(path: Path, payload: dict[str, Any]) -> None:
         file.write("\n")
 
 
+def _write_cache_records(path: Path, records: list[dict[str, Any]]) -> None:
+    _write_cached_json(
+        path,
+        {
+            "fetched_at": datetime.now().isoformat(timespec="seconds"),
+            "records": records,
+        },
+    )
+
+
+def _record_empty_range(cache_root: Path, endpoint: str, start_date: date, end_date: date, reason: str) -> None:
+    path = cache_root / "jquants" / "empty_ranges.json"
+    try:
+        payload = _read_cached_json(path) if path.exists() else {}
+    except Exception:
+        payload = {}
+    ranges = list(payload.get(endpoint, [])) if isinstance(payload, dict) else []
+    entry = {
+        "start": start_date.isoformat(),
+        "end": end_date.isoformat(),
+        "reason": reason,
+        "recorded_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    if not any(item.get("start") == entry["start"] and item.get("end") == entry["end"] for item in ranges if isinstance(item, dict)):
+        ranges.append(entry)
+    payload[endpoint] = ranges
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_cached_json(path, payload)
+
+
 def _records_usable(records: Any) -> bool:
     return isinstance(records, list) and len(records) > 0
 
@@ -682,3 +742,31 @@ def _increment_fetch_stat(provider: Any, key: str, amount: float = 1.0) -> None:
     stats = getattr(provider, "fetch_stats", None)
     if isinstance(stats, dict):
         stats[key] = stats.get(key, 0) + amount
+
+
+def _http_error_category(status_code: int) -> str:
+    if status_code in {401, 403}:
+        return "auth_or_plan_error"
+    if status_code == 400:
+        return "bad_request"
+    if status_code == 404:
+        return "endpoint_not_found"
+    if status_code == 429:
+        return "rate_limit"
+    return "api_error"
+
+
+def _http_error_body_summary(exc: HTTPError) -> str:
+    try:
+        body = exc.read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+    return body.replace("\n", " ")[:500]
+
+
+def _endpoint_from_path(path: str) -> str:
+    return urlsplit(path).path
+
+
+def _params_from_path(path: str) -> dict[str, str]:
+    return dict(parse_qsl(urlsplit(path).query))

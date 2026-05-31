@@ -150,6 +150,65 @@ def test_investor_context_expands_range_when_first_response_is_empty(monkeypatch
     assert "retry_range=2025-05-16_to_2026-05-15" in api_log
 
 
+def test_investor_context_stops_after_three_empty_responses(monkeypatch, tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_8")
+    config.setdefault("jquants", {})["plan"] = "light"
+    calls: list[tuple[date, date]] = []
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def fetch_investor_types_cached(self, _cache_root, start_date, end_date, force_refresh=False):
+            calls.append((start_date, end_date))
+            return {
+                "records": [],
+                "cache_path": str(tmp_path / f"{start_date.isoformat()}_to_{end_date.isoformat()}.json"),
+                "from_cache": False,
+                "fallback_used": False,
+                "warning": "api_success_but_empty",
+                "available": False,
+                "saved": False,
+                "usable": False,
+                "api_status": "200",
+                "reason": "empty_response",
+            }
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    main_module._reset_jquants_api_session()
+    payload = main_module._load_investor_context_for_date(date(2026, 5, 31), config)
+    second = main_module._load_investor_context_for_date(date(2026, 5, 30), config)
+
+    assert len(calls) == 3
+    assert payload["metadata"]["available"] is False
+    assert second["metadata"]["disabled_reason"] == "empty_response"
+    assert len(calls) == 3
+
+
+def test_investor_context_uses_preloaded_records_without_daily_api(monkeypatch, tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_8")
+    config.setdefault("jquants", {})["plan"] = "light"
+    main_module._reset_jquants_api_session()
+    main_module._jquants_api_session().setdefault("payloads", {})["investor_types"] = {
+        "records": _investor_records(),
+        "metadata": {"available": True, "cache_path": "preloaded"},
+    }
+
+    class FailProvider:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("daily scoring should use preloaded investor_types records")
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FailProvider)
+
+    payload = main_module._load_investor_context_for_date(date(2026, 3, 6), config)
+
+    assert payload["metadata"]["from_preloaded"] is True
+    assert payload["metadata"]["investor_context_source"] == "investor_types"
+
+
 def test_investor_context_score_range_and_unavailable() -> None:
     context = build_investor_context(_investor_records(), "2026-03-06")
     unavailable = build_investor_context([], "2026-03-06")

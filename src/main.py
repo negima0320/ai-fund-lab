@@ -38,7 +38,7 @@ from commentary import (
     generate_sell_comment,
 )
 from config_version import attach_config_version, config_version_from, load_config as load_versioned_config
-from data_provider import DummyDataProvider, JQuantsDataProvider
+from data_provider import DummyDataProvider, JQuantsApiError, JQuantsDataProvider
 from demo_auto_order import DemoAutoOrderBlocked, execute_demo_auto_orders, latest_order_preview_path, load_operation_schedule
 from earnings_calendar import earnings_counts
 from db import (
@@ -101,6 +101,13 @@ JQUANTS_PLAN_OVERRIDE: str | None = None
 FORCE_REFRESH_ACTIVE = False
 BACKTEST_PROFILE_TIMINGS: dict[str, float] = {}
 RUNTIME_SETTINGS: dict[str, Any] = {}
+LIGHT_API_CALL_LIMITS = {
+    "topix_prices": 3,
+    "investor_types": 3,
+    "earnings_calendar": 3,
+    "financial_statements": 3,
+}
+JQUANTS_API_SESSION: dict[str, Any] = {}
 
 
 def main() -> None:
@@ -1475,7 +1482,8 @@ def build_clean_plan(
     for root in roots:
         if not root.exists():
             continue
-        for path in root.rglob("*"):
+        paths = [root] if root.is_file() else list(root.rglob("*"))
+        for path in paths:
             if path.is_symlink():
                 skipped_symlink += 1
                 continue
@@ -1536,6 +1544,8 @@ def _clean_roots(mode: str, profile_id: str | None = None, provider_name: str | 
         if provider != "jquants":
             return []
         if cache_kind and cache_kind != "all":
+            if cache_kind == "investor_types":
+                return [base / cache_kind, base / "empty_ranges.json"]
             return [base / cache_kind]
         return [base]
     raise SystemExit(f"Unsupported clean mode: {mode}")
@@ -2036,12 +2046,18 @@ def run_experiments(
         _ensure_experiment_analysis_outputs(profile_ids)
     previous_profile = ACTIVE_PROFILE_ID
     compare_paths: tuple[Path, Path] | None = None
+    experiment_api_summary = {
+        "api_calls_by_endpoint": {},
+        "api_errors_by_endpoint": {},
+        "disabled_features_reason": {},
+    }
     try:
         if not skip_backtest:
             for profile_id in profile_ids:
                 ACTIVE_PROFILE_ID = profile_id
                 print(f"run-experiments backtest start: {profile_id}")
                 run_backtest("jquants", start_date_text, end_date_text)
+                _merge_jquants_api_session_summary(experiment_api_summary)
                 if not skip_analyze:
                     print(f"run-experiments analyze start: {profile_id}")
                     run_analyze(load_config(CONFIG_PATH), start_date_text, end_date_text)
@@ -2063,6 +2079,7 @@ def run_experiments(
             skipped_profiles=skipped_profiles,
             capability_warnings=capability["warnings"],
         )
+        summary.update(experiment_api_summary)
         write_experiment_batch_outputs(summary, start_date_text, end_date_text, base, compare_paths)
     finally:
         ACTIVE_PROFILE_ID = previous_profile
@@ -2378,6 +2395,16 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
         lines.extend(["", "## Capability Warnings", ""])
         for warning in summary.get("capability_warnings", []):
             lines.append(f"- {warning.get('profile_id')}: {warning.get('warning')}")
+    lines.extend(
+        [
+            "",
+            "## API Usage",
+            "",
+            f"- api_calls_by_endpoint: {_compact_json(summary.get('api_calls_by_endpoint', {}))}",
+            f"- api_errors_by_endpoint: {_compact_json(summary.get('api_errors_by_endpoint', {}))}",
+            f"- disabled_features_reason: {_compact_json(summary.get('disabled_features_reason', {}))}",
+        ]
+    )
     lines.extend(
         [
             "",
@@ -4065,6 +4092,83 @@ def _database_path_from_config(config: dict[str, Any]) -> Path:
     if not path.is_absolute():
         path = ROOT / path
     return path
+
+
+def _reset_jquants_api_session() -> None:
+    JQUANTS_API_SESSION.clear()
+    JQUANTS_API_SESSION.update(
+        {
+            "api_calls_by_endpoint": {},
+            "api_errors_by_endpoint": {},
+            "disabled_features_reason": {},
+            "payloads": {},
+        }
+    )
+
+
+def _jquants_api_session() -> dict[str, Any]:
+    if not JQUANTS_API_SESSION:
+        _reset_jquants_api_session()
+    return JQUANTS_API_SESSION
+
+
+def _api_call_allowed(endpoint: str) -> tuple[bool, str]:
+    session = _jquants_api_session()
+    disabled = session.setdefault("disabled_features_reason", {})
+    if endpoint in disabled:
+        return False, str(disabled[endpoint])
+    calls = session.setdefault("api_calls_by_endpoint", {})
+    limit = LIGHT_API_CALL_LIMITS.get(endpoint, 3)
+    if int(calls.get(endpoint, 0) or 0) >= limit:
+        reason = "api_call_limit_reached"
+        disabled[endpoint] = reason
+        return False, reason
+    calls[endpoint] = int(calls.get(endpoint, 0) or 0) + 1
+    return True, ""
+
+
+def _record_api_error(endpoint: str, reason: str) -> None:
+    session = _jquants_api_session()
+    errors = session.setdefault("api_errors_by_endpoint", {})
+    errors[endpoint] = int(errors.get(endpoint, 0) or 0) + 1
+    if reason:
+        session.setdefault("disabled_features_reason", {})[endpoint] = reason
+
+
+def _api_unavailable_payload(endpoint: str, reason: str) -> dict[str, Any]:
+    return {
+        "records": [],
+        "cache_path": "",
+        "from_cache": False,
+        "fallback_used": False,
+        "warning": reason,
+        "available": False,
+        "usable": False,
+        "saved": False,
+        "reason": reason,
+        "endpoint": endpoint,
+    }
+
+
+def _preload_light_api_context(config: dict[str, Any], start_date: date, end_date: date) -> None:
+    if bool(config.get("features", {}).get("investor_context")) and bool(config.get("scoring", {}).get("use_investor_context_score")):
+        payload = _load_investor_context_for_date(end_date, config)
+        _jquants_api_session().setdefault("payloads", {})["investor_types"] = {
+            "records": payload.get("records", []),
+            "metadata": payload.get("metadata", {}),
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+        }
+
+
+def _merge_jquants_api_session_summary(target: dict[str, Any]) -> None:
+    session = _jquants_api_session()
+    for key in ["api_calls_by_endpoint", "api_errors_by_endpoint"]:
+        merged = target.setdefault(key, {})
+        for endpoint, count in session.get(key, {}).items():
+            merged[endpoint] = int(merged.get(endpoint, 0) or 0) + int(count or 0)
+    disabled = target.setdefault("disabled_features_reason", {})
+    disabled.update(session.get("disabled_features_reason", {}))
 
 
 def _check_jquants_plan_capabilities(results: list[dict[str, Any]], config: dict[str, Any]) -> None:
@@ -5787,6 +5891,7 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
     range_key = f"{start_date_text}_to_{end_date_text}"
     BACKTEST_MODE_ACTIVE = True
     BACKTEST_PROFILE_TIMINGS = {}
+    _reset_jquants_api_session()
     total_started_at = time.perf_counter()
     profile_id = profile_id_from(config)
     backtest_dir = ROOT / "logs" / "backtests" / profile_id / range_key
@@ -5810,6 +5915,7 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
         print(f"backtest indicator_mode: {_backtest_indicator_mode(config)}")
         print(f"backtest relative_strength: {'enabled' if _relative_strength_enabled_for_indicators(config) else 'disabled'}")
         print(f"backtest fast_analysis: {'enabled' if _fast_analysis_enabled(config) else 'disabled'}")
+        _preload_light_api_context(config, start_date, end_date)
         for index, trading_date in enumerate(trading_dates, start=1):
             target_date_text = trading_date.isoformat()
             global BACKTEST_DAY_LOG_PREFIX
@@ -8887,6 +8993,9 @@ def _load_earnings_calendar_for_date(target_date: date, config: dict[str, Any], 
                 "filter_available": payload.get("filter_available", False),
             },
         }
+    allowed, stop_reason = _api_call_allowed("earnings_calendar")
+    if not allowed:
+        return {"records": [], "metadata": {"filter_available": False, "warning": stop_reason, "disabled_reason": stop_reason}}
     try:
         provider = JQuantsDataProvider(
             ROOT / ".env",
@@ -8912,15 +9021,17 @@ def _load_earnings_calendar_for_date(target_date: date, config: dict[str, Any], 
             reason=str(payload.get("reason") or ""),
         )
     except Exception as exc:
+        _record_api_error("earnings_calendar", _api_error_status(exc))
         _log_jquants_api_event(
             endpoint="earnings_calendar",
             plan=_jquants_plan(config),
             cache_hit=False,
-            status="error",
+            status=_api_error_status(exc),
             records=0,
             saved=False,
             cache_path=str(cache_path),
             error=str(exc),
+            **_api_error_log_fields(exc),
         )
         payload = {
             "records": [],
@@ -8983,6 +9094,29 @@ def _load_investor_context_for_date(target_date: date, config: dict[str, Any], f
             "context": dict(INVESTOR_CONTEXT_EMPTY),
             "metadata": {"available": False, "reason": "investor_context disabled"},
         }
+    preloaded = _jquants_api_session().setdefault("payloads", {}).get("investor_types")
+    if isinstance(preloaded, dict) and preloaded.get("records"):
+        records = preloaded.get("records", [])
+        context = build_investor_context(records, target_date)
+        return {
+            "records": records,
+            "context": context,
+            "metadata": {
+                **preloaded.get("metadata", {}),
+                "available": True,
+                "from_preloaded": True,
+                "latest_investor_data_week": context.get("investor_context_week"),
+                "investor_context_source": context.get("investor_context_source"),
+                "investor_context_score": context.get("investor_context_score"),
+            },
+        }
+    disabled_reason = _jquants_api_session().setdefault("disabled_features_reason", {}).get("investor_types")
+    if disabled_reason:
+        return {
+            "records": [],
+            "context": dict(INVESTOR_CONTEXT_EMPTY),
+            "metadata": {"available": False, "warning": disabled_reason, "disabled_reason": disabled_reason},
+        }
     if not jquants_has_capability(_jquants_plan(config), "investor_types"):
         print("investor_context warning: investor_types disabled for current J-Quants plan.")
         return {
@@ -9001,7 +9135,12 @@ def _load_investor_context_for_date(target_date: date, config: dict[str, Any], f
         )
         payload = {"records": [], "available": False, "warning": "investor_types unavailable"}
         ranges = _investor_types_fetch_ranges(target_date)
+        consecutive_empty = 0
         for index, (start_date, end_date) in enumerate(ranges):
+            allowed, stop_reason = _api_call_allowed("investor_types")
+            if not allowed:
+                payload = _api_unavailable_payload("investor_types", stop_reason)
+                break
             payload = provider.fetch_investor_types_cached(
                 ROOT / "data" / "cache",
                 start_date=start_date,
@@ -9010,10 +9149,13 @@ def _load_investor_context_for_date(target_date: date, config: dict[str, Any], f
             )
             retry_range = ""
             if not payload.get("records") and index + 1 < len(ranges):
+                consecutive_empty += 1
                 retry_start, retry_end = ranges[index + 1]
                 retry_range = f"{retry_start.isoformat()}_to_{retry_end.isoformat()}"
                 payload["reason"] = payload.get("reason") or "empty_response"
                 payload["warning"] = payload.get("warning") or "api_success_but_empty"
+            elif not payload.get("records"):
+                consecutive_empty += 1
             _log_jquants_api_event(
                 endpoint="investor_types",
                 plan=_jquants_plan(config),
@@ -9027,16 +9169,23 @@ def _load_investor_context_for_date(target_date: date, config: dict[str, Any], f
             )
             if payload.get("records"):
                 break
+            if consecutive_empty >= 3:
+                payload["warning"] = payload.get("warning") or "api_success_but_empty"
+                payload["reason"] = payload.get("reason") or "empty_response"
+                _record_api_error("investor_types", "empty_response")
+                break
     except Exception as exc:
+        _record_api_error("investor_types", _api_error_status(exc))
         _log_jquants_api_event(
             endpoint="investor_types",
             plan=_jquants_plan(config),
             cache_hit=False,
-            status="error",
+            status=_api_error_status(exc),
             records=0,
             saved=False,
             cache_path="",
             error=str(exc),
+            **_api_error_log_fields(exc),
         )
         payload = {
             "records": [],
@@ -9071,6 +9220,7 @@ def _investor_types_fetch_ranges(target_date: date) -> list[tuple[date, date]]:
     return [
         (end_date - timedelta(weeks=26), end_date),
         (end_date - timedelta(weeks=52), end_date),
+        (end_date - timedelta(weeks=104), end_date),
     ]
 
 
@@ -9087,6 +9237,9 @@ def _load_financial_statements_for_period(
     config: dict[str, Any],
     force_refresh: bool | None = None,
 ) -> dict[str, Any]:
+    allowed, stop_reason = _api_call_allowed("financial_statements")
+    if not allowed:
+        return _api_unavailable_payload("financial_statements", stop_reason)
     try:
         provider = JQuantsDataProvider(
             ROOT / ".env",
@@ -9114,15 +9267,17 @@ def _load_financial_statements_for_period(
         )
         return payload
     except Exception as exc:
+        _record_api_error("financial_statements", _api_error_status(exc))
         _log_jquants_api_event(
             endpoint="financial_statements",
             plan=_jquants_plan(config),
             cache_hit=False,
-            status="error",
+            status=_api_error_status(exc),
             records=0,
             saved=False,
             cache_path="",
             error=str(exc),
+            **_api_error_log_fields(exc),
         )
         return {
             "records": [],
@@ -9167,6 +9322,9 @@ def _expected_relative_strength_benchmark_source(config: dict[str, Any]) -> str:
 
 
 def _load_topix_prices_for_period(start_date: date, end_date: date, config: dict[str, Any]) -> dict[str, Any]:
+    allowed, stop_reason = _api_call_allowed("topix_prices")
+    if not allowed:
+        return _api_unavailable_payload("topix_prices", stop_reason)
     try:
         provider = JQuantsDataProvider(
             ROOT / ".env",
@@ -9194,15 +9352,21 @@ def _load_topix_prices_for_period(start_date: date, end_date: date, config: dict
         )
         return payload
     except Exception as exc:
+        reason = _api_error_status(exc)
+        if reason == "auth_or_plan_error":
+            _record_api_error("topix_prices", "auth_or_plan_error")
+        else:
+            _record_api_error("topix_prices", reason)
         _log_jquants_api_event(
             endpoint="topix_prices",
             plan=_jquants_plan(config),
             cache_hit=False,
-            status="error",
+            status=_api_error_status(exc),
             records=0,
             saved=False,
             cache_path="",
             error=str(exc),
+            **_api_error_log_fields(exc),
         )
         return {
             "records": [],
@@ -9225,6 +9389,23 @@ def _provider_payload_status(payload: dict[str, Any]) -> str:
     return warning or "unavailable"
 
 
+def _api_error_status(exc: Exception) -> str:
+    if isinstance(exc, JQuantsApiError):
+        return exc.category
+    return "error"
+
+
+def _api_error_log_fields(exc: Exception) -> dict[str, str]:
+    if not isinstance(exc, JQuantsApiError):
+        return {}
+    return {
+        "http_status": str(exc.status_code or ""),
+        "request_url": exc.request_url,
+        "request_params": json.dumps(exc.request_params, ensure_ascii=False, sort_keys=True),
+        "response_body": exc.response_body,
+    }
+
+
 def _log_jquants_api_event(
     endpoint: str,
     plan: str,
@@ -9236,6 +9417,10 @@ def _log_jquants_api_event(
     error: str = "",
     reason: str = "",
     retry_range: str = "",
+    http_status: str = "",
+    request_url: str = "",
+    request_params: str = "",
+    response_body: str = "",
 ) -> None:
     path = ROOT / "logs" / "jquants_api.log"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -9249,10 +9434,22 @@ def _log_jquants_api_event(
         line = f"{line} reason={reason}"
     if retry_range:
         line = f"{line} retry_range={retry_range}"
+    if http_status:
+        line = f"{line} http_status={http_status}"
+    if request_url:
+        line = f"{line} request_url={request_url}"
+    if request_params:
+        line = f"{line} request_params={_log_safe_value(request_params)}"
+    if response_body:
+        line = f"{line} response_body={_log_safe_value(response_body)}"
     if error:
-        line = f"{line} error={error}"
+        line = f"{line} error={_log_safe_value(error)}"
     with path.open("a", encoding="utf-8") as file:
         file.write(f"{line}\n")
+
+
+def _log_safe_value(value: Any) -> str:
+    return str(value).replace("\n", " ").replace(" ", "_")[:500]
 
 
 def profile_id_from(config: dict[str, Any] | None = None) -> str:

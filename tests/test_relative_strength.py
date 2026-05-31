@@ -235,6 +235,7 @@ def test_relative_strength_score_is_used_only_by_v2_6() -> None:
 
 
 def test_v2_6_indicator_route_fetches_topix_and_records_relative_strength(monkeypatch, tmp_path) -> None:
+    main_module._reset_jquants_api_session()
     config = load_profile("rookie_dealer_02_v2_6")
     config.setdefault("jquants", {})["plan"] = "light"
     config["jquants"]["requests_per_minute"] = 60
@@ -287,6 +288,7 @@ def test_v2_6_indicator_route_fetches_topix_and_records_relative_strength(monkey
 
 
 def test_stale_relative_strength_indicator_cache_is_recalculated(monkeypatch, tmp_path) -> None:
+    main_module._reset_jquants_api_session()
     config = load_profile("rookie_dealer_02_v2_6")
     config.setdefault("jquants", {})["plan"] = "light"
     config.setdefault("backtest", {})["indicator_mode"] = "minimal"
@@ -330,6 +332,7 @@ def test_stale_relative_strength_indicator_cache_is_recalculated(monkeypatch, tm
 
 
 def test_v2_6_indicator_cache_hit_still_checks_topix_cache(monkeypatch, tmp_path) -> None:
+    main_module._reset_jquants_api_session()
     config = load_profile("rookie_dealer_02_v2_6")
     config.setdefault("jquants", {})["plan"] = "light"
     config.setdefault("backtest", {})["indicator_mode"] = "minimal"
