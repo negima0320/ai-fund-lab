@@ -276,7 +276,8 @@ def test_period_preset_is_applied_by_parse_args(monkeypatch) -> None:
 
     args = main_module.parse_args()
 
-    assert args.start_date == "2021-05-31"
+    assert args.requested_start_date == "2021-05-31"
+    assert args.start_date == "2024-01-01"
     assert args.end_date == "2026-05-31"
 
 

@@ -1432,6 +1432,10 @@ python src/main.py --mode backtest --profile rookie_dealer_02_v2_1 --period 5y -
 
 `--period` は `6m`、`1y`、`3y`、`5y` を指定できます。`--end-date` を省略した場合はAsia/Tokyoの今日を終了日にし、開始日を自動計算します。通常運用では `config/provider.yaml` の日付設定を使い、長期検証だけ `--period 5y` のように一時上書きします。
 
+J-Quantsは契約プランやAPI種別により取得可能な開始日が異なる場合があります。`config/jquants.yaml` の `jquants.earliest_supported_date` でplan別の取得可能開始日を設定できます。`backtest`、`fetch-prices`、`run-experiments` では requested start-date が取得可能開始日より前なら effective start-date へ自動補正し、warningを表示します。たとえばLightで `--period 5y` を指定しても、`prices earliest: 2021-05-01` の場合はそれより前の日付を叩きません。
+
+J-QuantsがHTTP 400 `bad_request_or_out_of_range` を連続して返した場合は、連続3営業日で早期停止し、日別ファイルを大量に作らず `data/cache/jquants/unsupported_ranges.json` に範囲として保存します。`preflight` と `validate-config` では `prices`、`topix_prices`、`investor_types`、`earnings_calendar`、`financial_statements` の supported date range を表示します。
+
 reporting設定:
 
 ```yaml

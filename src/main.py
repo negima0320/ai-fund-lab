@@ -493,6 +493,7 @@ def parse_args() -> Any:
     args = parser.parse_args()
     _apply_period_preset(args)
     _apply_configured_date_defaults(args)
+    _apply_jquants_supported_date_limits(args)
     if args.days < 1:
         parser.error("--days must be 1 or greater.")
     if args.mode in {"fetch-prices", "calculate-indicators", "screen", "score", "trade", "preview-orders", "publish-article", "run-daily"} and not args.date:
@@ -585,6 +586,37 @@ def _apply_configured_date_defaults(args: Any) -> None:
         args.start_date = _config_get(provider_config, ("backtest", "start_date"))
     if not args.end_date:
         args.end_date = _config_get(provider_config, ("backtest", "end_date"))
+
+
+def _apply_jquants_supported_date_limits(args: Any) -> None:
+    if getattr(args, "provider", None) not in {None, "jquants"}:
+        return
+    if getattr(args, "mode", "") not in {"backtest", "fetch-prices", "run-experiments"}:
+        return
+    settings = resolve_runtime_settings(args)
+    config = {"jquants": _load_jquants_config_file()}
+    config.setdefault("jquants", {})["plan"] = settings["jquants_plan"]
+    earliest = jquants_earliest_supported_date(config, "prices")
+    if earliest is None:
+        return
+    if getattr(args, "start_date", None):
+        requested = date.fromisoformat(args.start_date)
+        if requested < earliest:
+            args.requested_start_date = args.start_date
+            args.start_date = earliest.isoformat()
+            print(
+                "warning: requested start-date is before J-Quants supported range; "
+                f"adjusted to {args.start_date}"
+            )
+    if getattr(args, "date", None) and args.mode == "fetch-prices":
+        requested_date = date.fromisoformat(args.date)
+        if requested_date < earliest:
+            args.requested_date = args.date
+            args.date = earliest.isoformat()
+            print(
+                "warning: requested date is before J-Quants supported range; "
+                f"adjusted to {args.date}"
+            )
 
 
 def resolve_runtime_settings(args: Any, provider_config: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -951,7 +983,10 @@ def _load_jquants_validation_config(provider_config: dict[str, Any], settings: d
     source = "default"
     if jquants_path.exists():
         try:
-            payload = load_versioned_config(jquants_path)
+            if yaml is not None:
+                payload = yaml.safe_load(jquants_path.read_text(encoding="utf-8")) or {}
+            else:
+                payload = _load_simple_yaml(jquants_path.read_text(encoding="utf-8"))
             config_plan = _config_get(payload if isinstance(payload, dict) else {}, ("jquants", "plan"))
             source = "config/jquants.yaml"
         except Exception:
@@ -987,6 +1022,9 @@ def _validate_jquants_config(checks: list[dict[str, str]], jquants_validation: d
     )
     for capability, status in jquants_validation.get("capabilities", {}).items():
         checks.append({"status": "OK", "name": f"jquants.capability.{capability}", "message": status})
+    ranges = jquants_supported_date_ranges({"jquants": _load_jquants_config_file() | {"plan": jquants_validation["plan"]}})
+    for endpoint, earliest in ranges.items():
+        checks.append({"status": "OK", "name": f"jquants.supported_date.{endpoint}", "message": f"{endpoint} earliest: {earliest}"})
 
 
 def _validate_registry_consistency(checks: list[dict[str, str]], registry: dict[str, Any], profile_id: str | None) -> None:
@@ -3581,6 +3619,9 @@ def _check_jquants_plan_capabilities(results: list[dict[str, Any]], config: dict
     _preflight_add(results, "OK", f"Rate Limit: {_jquants_requests_per_minute(config)} requests/min")
     _preflight_add(results, "OK", f"Parallel Fetch: {'enabled' if _jquants_parallel_fetch(config) else 'disabled'}")
     _preflight_add(results, "OK", "Available capabilities:", status)
+    _preflight_add(results, "OK", "J-Quants supported date range:", jquants_supported_date_ranges(config))
+    for endpoint, earliest in jquants_supported_date_ranges(config).items():
+        _preflight_add(results, "OK", f"{endpoint} earliest: {earliest}")
     for capability in ["prices", "earnings_calendar", "topix_prices", "investor_breakdown", "investor_types"]:
         capability_status = status.get(capability, "disabled")
         _preflight_add(
@@ -5200,8 +5241,16 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
         raise SystemExit("backtest mode currently supports --provider jquants only.")
     start_date = date.fromisoformat(start_date_text)
     end_date = date.fromisoformat(end_date_text)
-    range_key = f"{start_date_text}_to_{end_date_text}"
     config = load_config(CONFIG_PATH)
+    effective_start_date = max(start_date, jquants_earliest_supported_date(config, "prices") or start_date)
+    if effective_start_date != start_date:
+        print(
+            "warning: requested start-date is before J-Quants supported range; "
+            f"requested={start_date.isoformat()} effective={effective_start_date.isoformat()}"
+        )
+        start_date = effective_start_date
+        start_date_text = start_date.isoformat()
+    range_key = f"{start_date_text}_to_{end_date_text}"
     BACKTEST_MODE_ACTIVE = True
     BACKTEST_PROFILE_TIMINGS = {}
     total_started_at = time.perf_counter()
@@ -6370,6 +6419,13 @@ def ensure_price_history_for_backtest(provider_name: str, start_date: date, end_
         raise SystemExit("Prime stock list is empty. Re-run list-stocks and check the result.")
 
     config = load_config(CONFIG_PATH)
+    effective_start_date = max(start_date, jquants_earliest_supported_date(config, "prices") or start_date)
+    if effective_start_date != start_date:
+        print(
+            "warning: requested start-date is before J-Quants supported range; "
+            f"requested={start_date.isoformat()} effective={effective_start_date.isoformat()}"
+        )
+        start_date = effective_start_date
     lookback_start = previous_business_dates(start_date, 30)[0]
     fetch_dates = business_dates_between(lookback_start, end_date)
     cached_dates = [fetch_date for fetch_date in fetch_dates if load_cached_prime_prices(fetch_date) is not None]
@@ -7514,7 +7570,7 @@ def fetch_price_history(
     total_dates = len(target_fetch_dates)
     if getattr(provider, "requests_per_minute", None) is None:
         setattr(provider, "requests_per_minute", rate_limit_per_minute)
-    if getattr(provider, "parallel_fetch", False):
+    if getattr(provider, "parallel_fetch", False) and not continue_on_error:
         if verbose:
             print(
                 "fetch-period-prices parallel fetch enabled "
@@ -7538,18 +7594,39 @@ def fetch_price_history(
         return [row for part in parts for row in part]
 
     rows = []
+    consecutive_unsupported = 0
+    unsupported_range_start: date | None = None
     for index, fetch_date in enumerate(target_fetch_dates, start=1):
-        rows.extend(
-            _fetch_price_history_for_date(
-                provider,
-                fetch_date,
-                prime_codes,
-                index,
-                total_dates,
-                continue_on_error,
-                verbose,
-            )
+        part = _fetch_price_history_for_date(
+            provider,
+            fetch_date,
+            prime_codes,
+            index,
+            total_dates,
+            continue_on_error,
+            verbose,
         )
+        rows.extend(part)
+        if unsupported_cache_entry(fetch_date) is not None and not part:
+            consecutive_unsupported += 1
+            unsupported_range_start = unsupported_range_start or fetch_date
+        else:
+            consecutive_unsupported = 0
+            unsupported_range_start = None
+        if continue_on_error and consecutive_unsupported >= 3 and unsupported_range_start is not None:
+            save_unsupported_range(
+                unsupported_range_start,
+                fetch_date,
+                reason="bad_request_or_out_of_range",
+                source="early-stop-consecutive-400",
+            )
+            if verbose:
+                print(
+                    "fetch-period-prices early stop: consecutive bad_request_or_out_of_range "
+                    f"from {unsupported_range_start.isoformat()} to {fetch_date.isoformat()}; "
+                    "remaining dates skipped"
+                )
+            break
     return rows
 
 
@@ -7614,7 +7691,7 @@ def _fetch_price_history_for_date(
         if is_bad_request_or_out_of_range_error(exc):
             save_unsupported_day(
                 fetch_date,
-                reason="http_400_bad_request_or_out_of_range",
+                reason="bad_request_or_out_of_range",
                 source="fetch-period-prices",
             )
             if verbose:
@@ -7718,7 +7795,7 @@ def no_data_days_cache_path() -> Path:
 
 
 def unsupported_days_cache_path() -> Path:
-    return ROOT / "data" / "raw" / "unsupported_days_jquants.json"
+    return ROOT / "data" / "cache" / "jquants" / "unsupported_ranges.json"
 
 
 def load_no_data_days_cache() -> dict[str, Any]:
@@ -7732,9 +7809,18 @@ def load_no_data_days_cache() -> dict[str, Any]:
 def load_unsupported_days_cache() -> dict[str, Any]:
     path = unsupported_days_cache_path()
     if not path.exists():
-        return {}
+        return {"prices": []}
     payload = read_json(path)
-    return payload if isinstance(payload, dict) else {}
+    if isinstance(payload, dict) and "prices" in payload:
+        return payload
+    if isinstance(payload, dict):
+        ranges = [
+            {"start": key, "end": key, "reason": value.get("reason", "unknown")}
+            for key, value in payload.items()
+            if isinstance(value, dict)
+        ]
+        return {"prices": ranges}
+    return {"prices": []}
 
 
 def no_data_cache_entry(fetch_date: date, cache: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -7745,8 +7831,19 @@ def no_data_cache_entry(fetch_date: date, cache: dict[str, Any] | None = None) -
 
 def unsupported_cache_entry(fetch_date: date, cache: dict[str, Any] | None = None) -> dict[str, Any] | None:
     cache = cache if cache is not None else load_unsupported_days_cache()
-    entry = cache.get(fetch_date.isoformat())
-    return entry if isinstance(entry, dict) else None
+    target = fetch_date.isoformat()
+    for item in cache.get("prices", []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("start", "")) <= target <= str(item.get("end", "")):
+            return {
+                "provider": "jquants",
+                "reason": item.get("reason", "unknown"),
+                "source": item.get("source", "unsupported_ranges"),
+                "range_start": item.get("start"),
+                "range_end": item.get("end"),
+            }
+    return None
 
 
 def load_no_data_day(fetch_date: date) -> dict[str, Any] | None:
@@ -7769,14 +7866,42 @@ def save_no_data_day(fetch_date: date, reason: str, source: str) -> None:
 
 
 def save_unsupported_day(fetch_date: date, reason: str, source: str) -> None:
+    save_unsupported_range(fetch_date, fetch_date, reason, source)
+
+
+def save_unsupported_range(start_date: date, end_date: date, reason: str, source: str, endpoint: str = "prices") -> None:
     cache = load_unsupported_days_cache()
-    cache[fetch_date.isoformat()] = {
-        "provider": "jquants",
+    ranges = list(cache.get(endpoint, []))
+    new_range = {
+        "start": start_date.isoformat(),
+        "end": end_date.isoformat(),
         "reason": reason,
         "checked_at": datetime.now().isoformat(timespec="seconds"),
         "source": source,
     }
+    ranges.append(new_range)
+    cache[endpoint] = _merge_unsupported_ranges(ranges)
     write_json(unsupported_days_cache_path(), cache)
+
+
+def _merge_unsupported_ranges(ranges: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized = sorted(
+        [item for item in ranges if item.get("start") and item.get("end")],
+        key=lambda item: (str(item["start"]), str(item["end"])),
+    )
+    merged: list[dict[str, Any]] = []
+    for item in normalized:
+        if not merged or item.get("reason") != merged[-1].get("reason"):
+            merged.append(dict(item))
+            continue
+        previous_end = date.fromisoformat(str(merged[-1]["end"]))
+        current_start = date.fromisoformat(str(item["start"]))
+        if current_start <= previous_end + timedelta(days=1):
+            if str(item["end"]) > str(merged[-1]["end"]):
+                merged[-1]["end"] = item["end"]
+            continue
+        merged.append(dict(item))
+    return merged
 
 
 def load_cached_price_history(fetch_dates: list[date]) -> list[dict[str, Any]]:
@@ -8064,6 +8189,36 @@ def _load_jquants_config_file() -> dict[str, Any]:
 
 def _jquants_plan(config: dict[str, Any]) -> str:
     return normalize_jquants_plan(config.get("jquants", {}).get("plan", "free"))
+
+
+def jquants_earliest_supported_date(config: dict[str, Any], endpoint: str = "prices") -> date | None:
+    jquants = config.get("jquants", {}) if isinstance(config.get("jquants"), dict) else {}
+    plan = _jquants_plan(config)
+    payload = jquants.get("earliest_supported_date", {})
+    value = None
+    if isinstance(payload, dict):
+        endpoint_payload = payload.get(endpoint)
+        if isinstance(endpoint_payload, dict):
+            value = endpoint_payload.get(plan)
+        if value is None:
+            value = payload.get(plan)
+    elif isinstance(payload, str):
+        value = payload
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def jquants_supported_date_ranges(config: dict[str, Any]) -> dict[str, str]:
+    return {
+        endpoint: (jquants_earliest_supported_date(config, endpoint) or jquants_earliest_supported_date(config, "prices") or "").isoformat()
+        if (jquants_earliest_supported_date(config, endpoint) or jquants_earliest_supported_date(config, "prices"))
+        else "unknown"
+        for endpoint in ["prices", "topix_prices", "investor_types", "earnings_calendar", "financial_statements"]
+    }
 
 
 def _jquants_plan_settings(jquants: dict[str, Any], plan: str) -> dict[str, Any]:

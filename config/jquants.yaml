@@ -1,5 +1,8 @@
 jquants:
   plan: free
+  earliest_supported_date:
+    free: 2024-01-01
+    light: 2021-05-01
   plans:
     free:
       requests_per_minute: 5

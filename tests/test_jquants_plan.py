@@ -92,6 +92,21 @@ def test_preflight_displays_plan_and_capabilities(config_copy: dict) -> None:
     assert "fallback applied: none" in messages
     assert "can_run_backtest: true" in messages
     assert "can_run_live/paper: true" in messages
+    assert any(message.startswith("prices earliest:") for message in messages)
+
+
+def test_jquants_earliest_supported_date_from_config() -> None:
+    config = {
+        "jquants": {
+            "plan": "light",
+            "earliest_supported_date": {
+                "free": "2024-01-01",
+                "light": "2021-05-01",
+            },
+        }
+    }
+
+    assert main_module.jquants_earliest_supported_date(config, "prices") == date(2021, 5, 1)
 
 
 def test_free_light_profile_compatibility_matrix() -> None:
