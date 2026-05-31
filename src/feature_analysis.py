@@ -8,6 +8,11 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+try:  # pragma: no cover - PyYAML is part of the supported runtime.
+    import yaml
+except ModuleNotFoundError:  # pragma: no cover
+    yaml = None
+
 from db import get_database_path
 from trade_metrics import is_closed_trade_for_metrics
 
@@ -119,7 +124,7 @@ def build_feature_analysis(
     score_formula_audit = _score_formula_audit(config, records, scoring_rows, component_validation)
     score_effective_range_audit = _score_effective_range_audit(config, records, scoring_rows)
     earnings_exposure = _earnings_calendar_exposure(records, scoring_rows)
-    feature_activation_audit = build_feature_activation_audit(config, records, scoring_rows)
+    feature_activation_audit = build_feature_activation_audit(config, records, scoring_rows, _registry_features(root, profile_id))
 
     return {
         "profile_id": profile_id,
@@ -383,36 +388,54 @@ def build_feature_activation_audit(
     config: dict[str, Any],
     records: list[dict[str, Any]],
     scoring_rows: list[dict[str, Any]],
+    registry_features: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     features = config.get("features", {}) if isinstance(config.get("features"), dict) else {}
     scoring = config.get("scoring", {}) if isinstance(config.get("scoring"), dict) else {}
     earnings_filter = config.get("earnings_filter", {}) if isinstance(config.get("earnings_filter"), dict) else {}
+    registry_features = registry_features or {}
     items = {
         "relative_strength": _activation_item(
-            enabled=bool(features.get("relative_strength")) and bool(scoring.get("use_relative_strength_score")),
+            data_enabled=bool(features.get("relative_strength")),
+            scoring_enabled=bool(scoring.get("use_relative_strength_score")),
+            registry_enabled=_registry_feature_enabled(registry_features, "relative_strength"),
             trigger_count=_non_zero_count(records, scoring_rows, "relative_strength_score"),
             trigger_label="non_zero_score_count",
         ),
         "investor_context": _activation_item(
-            enabled=bool(features.get("investor_context")) and bool(scoring.get("use_investor_context_score")),
+            data_enabled=bool(features.get("investor_context")),
+            scoring_enabled=bool(scoring.get("use_investor_context_score")),
+            registry_enabled=_registry_feature_enabled(registry_features, "investor_context"),
             trigger_count=_non_zero_count(records, scoring_rows, "investor_context_score"),
             trigger_label="non_zero_score_count",
         ),
         "financial_context": _activation_item(
-            enabled=bool(features.get("financial_context")) and bool(scoring.get("use_financial_score")),
+            data_enabled=bool(features.get("financial_context")),
+            scoring_enabled=bool(scoring.get("use_financial_score")),
+            registry_enabled=_registry_feature_enabled(registry_features, "financial_context"),
             trigger_count=_non_zero_count(records, scoring_rows, "financial_score"),
             trigger_label="non_zero_score_count",
         ),
         "earnings_filter": _activation_item(
-            enabled=bool(earnings_filter.get("enabled")),
+            data_enabled=bool(earnings_filter.get("enabled")),
+            scoring_enabled=None,
+            registry_enabled=_registry_feature_enabled(registry_features, "earnings_filter"),
             trigger_count=_earnings_filter_rejected_count(scoring_rows),
             trigger_label="rejected_count",
         ),
     }
     return {
         "features": items,
-        "feature_active": {
-            name: item["enabled"] and item["actual_trigger_count"] > 0
+        "feature_data_enabled": {
+            name: item["data_enabled"]
+            for name, item in items.items()
+        },
+        "feature_scoring_enabled": {
+            name: item["scoring_enabled"]
+            for name, item in items.items()
+        },
+        "feature_runtime_active": {
+            name: item["runtime_active"]
             for name, item in items.items()
         },
         "feature_trigger_count": {
@@ -421,17 +444,42 @@ def build_feature_activation_audit(
         },
         "inactive_in_practice": [
             name for name, item in items.items()
-            if item["enabled"] and item["actual_trigger_count"] == 0
+            if item["status"] == "inactive_in_practice"
+        ],
+        "data_only": [
+            name for name, item in items.items()
+            if item["status"] == "data_only"
+        ],
+        "config_mismatch": [
+            name for name, item in items.items()
+            if item["status"] == "config_mismatch"
         ],
     }
 
 
-def _activation_item(enabled: bool, trigger_count: int, trigger_label: str) -> dict[str, Any]:
-    status = "disabled"
-    if enabled:
-        status = "active" if trigger_count > 0 else "inactive_in_practice"
+def _activation_item(
+    data_enabled: bool,
+    scoring_enabled: bool | None,
+    registry_enabled: bool | None,
+    trigger_count: int,
+    trigger_label: str,
+) -> dict[str, Any]:
+    runtime_active = trigger_count > 0
+    if registry_enabled is True and not data_enabled:
+        status = "config_mismatch"
+    elif not data_enabled:
+        status = "disabled"
+    elif scoring_enabled is False:
+        status = "data_only"
+    elif runtime_active:
+        status = "active"
+    else:
+        status = "inactive_in_practice"
     return {
-        "enabled": enabled,
+        "data_enabled": data_enabled,
+        "scoring_enabled": "N/A" if scoring_enabled is None else scoring_enabled,
+        "registry_enabled": registry_enabled,
+        "runtime_active": runtime_active,
         "actual_trigger_count": trigger_count,
         trigger_label: trigger_count,
         "status": status,
@@ -463,6 +511,27 @@ def _earnings_filter_rejected_count(scoring_rows: list[dict[str, Any]]) -> int:
         or "決算予定日前後" in str(row.get("rejected_reason") or "")
         or "決算予定日前後" in str(row.get("earnings_filter_reason") or "")
     )
+
+
+def _registry_feature_enabled(registry_features: dict[str, Any], feature_name: str) -> bool | None:
+    if feature_name not in registry_features:
+        return None
+    return bool(registry_features.get(feature_name))
+
+
+def _registry_features(root: Path, profile_id: str) -> dict[str, Any]:
+    if yaml is None:
+        return {}
+    path = root / "config" / "profile_registry.yaml"
+    if not path.exists():
+        return {}
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    item = (payload.get("profiles") or {}).get(profile_id, {})
+    features = item.get("features", {}) if isinstance(item, dict) else {}
+    return features if isinstance(features, dict) else {}
 
 
 def _group_by(records: list[dict[str, Any]], bucket_fn: Any, bucket_order: list[str] | None = None) -> list[dict[str, Any]]:
@@ -684,7 +753,9 @@ def _feature_activation_audit_lines(audit: dict[str, Any]) -> list[str]:
             [
                 f"### {name}",
                 "",
-                f"- enabled: {str(bool(item.get('enabled'))).lower()}",
+                f"- data_enabled: {_format_activation_bool(item.get('data_enabled'))}",
+                f"- scoring_enabled: {_format_activation_bool(item.get('scoring_enabled'))}",
+                f"- runtime_active: {_format_activation_bool(item.get('runtime_active'))}",
                 f"- actual_trigger_count: {item.get('actual_trigger_count', 0)}",
             ]
         )
@@ -699,7 +770,25 @@ def _feature_activation_audit_lines(audit: dict[str, Any]) -> list[str]:
         lines.extend(f"- {name}" for name in inactive)
     else:
         lines.append("- なし")
+    data_only = audit.get("data_only", [])
+    lines.extend(["", "### data_only", ""])
+    if data_only:
+        lines.extend(f"- {name}" for name in data_only)
+    else:
+        lines.append("- なし")
+    mismatch = audit.get("config_mismatch", [])
+    lines.extend(["", "### config_mismatch", ""])
+    if mismatch:
+        lines.extend(f"- {name}" for name in mismatch)
+    else:
+        lines.append("- なし")
     return lines
+
+
+def _format_activation_bool(value: Any) -> str:
+    if value == "N/A" or value is None:
+        return "N/A"
+    return str(bool(value)).lower()
 
 
 def _relative_strength_analysis_lines(analysis: dict[str, Any]) -> list[str]:

@@ -64,13 +64,86 @@ def test_validate_config_warns_for_light_profile_on_free_plan() -> None:
             "jquants_plan": "free",
             "broker_mode": "paper",
             "auto_order_enabled": False,
-            "sources": {"jquants_plan": "config"},
+            "sources": {"jquants_plan": "cli"},
         },
     )
 
     messages = [item["message"] for item in result["checks"] if item["status"] == "WARN"]
     assert any("requires light but current plan is free" in message for message in messages)
     assert any("missing capabilities have fallback" in message for message in messages)
+
+
+def test_validate_config_warns_only_for_real_registry_profile_feature_mismatch() -> None:
+    registry = {
+        "profiles": {
+            "example": {
+                "role": "experiment",
+                "required_plan": "free",
+                "compare_to": "baseline",
+                "features": {"financial_context": True},
+            },
+            "baseline": {
+                "role": "baseline",
+                "required_plan": "free",
+                "features": {"financial_context": False},
+            },
+        }
+    }
+    profile_config = {
+        "profile_id": "example",
+        "profile_name": "Example",
+        "features": {"financial_context": False},
+        "selection": {"min_score": 45},
+        "scoring": {"total_score_formula": "technical_score + market_context_score + penalty_score"},
+    }
+
+    result = main_module.build_config_validation(
+        "example",
+        runtime_settings={
+            "profile_id": "example",
+            "provider": "jquants",
+            "jquants_plan": "free",
+            "broker_mode": "paper",
+            "auto_order_enabled": False,
+            "sources": {},
+        },
+        registry=registry,
+        operation_schedule={"safety": {"require_manual_approval": True, "forbid_live_auto_order": True}},
+        profile_config=profile_config,
+    )
+
+    assert any(item["status"] == "WARN" and item["name"].endswith(".financial_context_registry_mismatch") for item in result["checks"])
+
+
+def test_validate_config_accepts_data_only_feature() -> None:
+    profile_config = {
+        "profile_id": "example",
+        "profile_name": "Example",
+        "features": {"financial_context": True},
+        "selection": {"min_score": 45},
+        "scoring": {
+            "total_score_formula": "technical_score + market_context_score + penalty_score",
+            "use_financial_score": False,
+        },
+    }
+
+    result = main_module.build_config_validation(
+        "example",
+        runtime_settings={
+            "profile_id": "example",
+            "provider": "jquants",
+            "jquants_plan": "free",
+            "broker_mode": "paper",
+            "auto_order_enabled": False,
+            "sources": {},
+        },
+        registry={"profiles": {}},
+        operation_schedule={"safety": {"require_manual_approval": True, "forbid_live_auto_order": True}},
+        profile_config=profile_config,
+    )
+
+    assert any(item["status"] == "OK" and item["name"].endswith(".financial_context_data_only") for item in result["checks"])
+    assert not any("use_financial_score=true" in item["message"] for item in result["checks"])
 
 
 def test_validate_config_strict_turns_warning_into_exit_code() -> None:
@@ -82,7 +155,7 @@ def test_validate_config_strict_turns_warning_into_exit_code() -> None:
             "jquants_plan": "free",
             "broker_mode": "paper",
             "auto_order_enabled": False,
-            "sources": {"jquants_plan": "config"},
+            "sources": {"jquants_plan": "cli"},
         },
         strict=True,
     )

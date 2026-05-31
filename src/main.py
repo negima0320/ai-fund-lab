@@ -916,7 +916,7 @@ def build_config_validation(
         if config is None:
             config = _load_profile_for_validation(checks, target_profile_id)
         _validate_plan_capabilities(checks, target_profile_id, plan, registry_payload)
-        _validate_profile_config(checks, target_profile_id, config, plan)
+        _validate_profile_config(checks, target_profile_id, config, plan, registry_payload)
     schedule = operation_schedule if operation_schedule is not None else _load_operation_schedule_for_validation()
     _validate_safety_config(checks, provider_payload, schedule, settings, strict)
 
@@ -1109,7 +1109,13 @@ def _validate_plan_capabilities(checks: list[dict[str, str]], profile_id: str, p
         checks.append({"status": "WARN", "name": f"profile.{profile_id}.jquants_capabilities", "message": f"missing capabilities have fallback: {fallback_text}"})
 
 
-def _validate_profile_config(checks: list[dict[str, str]], profile_id: str, config: dict[str, Any], plan: str) -> None:
+def _validate_profile_config(
+    checks: list[dict[str, str]],
+    profile_id: str,
+    config: dict[str, Any],
+    plan: str,
+    registry: dict[str, Any] | None = None,
+) -> None:
     prefix = f"profile.{profile_id}"
     _validation_check(checks, bool(config.get("profile_id")), f"{prefix}.profile_id", "profile_id is set", "profile_id is missing")
     _validation_check(checks, bool(config.get("profile_name")), f"{prefix}.profile_name", "profile_name is set", "profile_name is missing")
@@ -1118,7 +1124,7 @@ def _validate_profile_config(checks: list[dict[str, str]], profile_id: str, conf
     has_threshold = any(key in selection for key in ["min_score", "fallback_min_score", "top_pick_min_score"])
     _validation_check(checks, has_threshold, f"{prefix}.selection_threshold", "selection threshold is set", "selection threshold is missing")
     _validate_score_config(checks, config, prefix)
-    _validate_profile_feature_consistency(checks, profile_id, config, plan)
+    _validate_profile_feature_consistency(checks, profile_id, config, plan, registry)
 
 
 def _validate_score_config(checks: list[dict[str, str]], config: dict[str, Any], prefix: str = "profile") -> None:
@@ -1155,10 +1161,23 @@ def _validate_score_config(checks: list[dict[str, str]], config: dict[str, Any],
     )
 
 
-def _validate_profile_feature_consistency(checks: list[dict[str, str]], profile_id: str, config: dict[str, Any], plan: str) -> None:
+def _validate_profile_feature_consistency(
+    checks: list[dict[str, str]],
+    profile_id: str,
+    config: dict[str, Any],
+    plan: str,
+    registry: dict[str, Any] | None = None,
+) -> None:
     prefix = f"profile.{profile_id}"
     features = config.get("features", {}) if isinstance(config.get("features"), dict) else {}
     scoring = config.get("scoring", {}) if isinstance(config.get("scoring"), dict) else {}
+    registry_item = registry_profiles(registry).get(profile_id, {}) if registry else {}
+    registry_features = registry_item.get("features", {}) if isinstance(registry_item.get("features"), dict) else {}
+    _validate_registry_profile_feature_match(checks, prefix, "relative_strength", bool(registry_features.get("relative_strength")), bool(features.get("relative_strength")))
+    _validate_registry_profile_feature_match(checks, prefix, "investor_context", bool(registry_features.get("investor_context")), bool(features.get("investor_context")))
+    _validate_registry_profile_feature_match(checks, prefix, "financial_context", bool(registry_features.get("financial_context")), bool(features.get("financial_context")))
+    earnings_filter = config.get("earnings_filter", {}) if isinstance(config.get("earnings_filter"), dict) else {}
+    _validate_registry_profile_feature_match(checks, prefix, "earnings_filter", bool(registry_features.get("earnings_filter")), bool(earnings_filter.get("enabled")))
     _validation_check(
         checks,
         not scoring.get("use_relative_strength_score") or bool(features.get("relative_strength")),
@@ -1180,7 +1199,19 @@ def _validate_profile_feature_consistency(checks: list[dict[str, str]], profile_
         "financial score feature is consistent",
         "use_financial_score=true but features.financial_context is not enabled",
     )
-    earnings_filter = config.get("earnings_filter", {}) if isinstance(config.get("earnings_filter"), dict) else {}
+    for feature_name, data_enabled, scoring_enabled in [
+        ("relative_strength", bool(features.get("relative_strength")), bool(scoring.get("use_relative_strength_score"))),
+        ("investor_context", bool(features.get("investor_context")), bool(scoring.get("use_investor_context_score"))),
+        ("financial_context", bool(features.get("financial_context")), bool(scoring.get("use_financial_score"))),
+    ]:
+        if data_enabled and not scoring_enabled:
+            checks.append(
+                {
+                    "status": "OK",
+                    "name": f"{prefix}.{feature_name}_data_only",
+                    "message": f"{feature_name} data_enabled=true and scoring_enabled=false; data_only mode",
+                }
+            )
     if earnings_filter.get("enabled"):
         if jquants_has_capability(plan, "earnings_calendar"):
             checks.append({"status": "OK", "name": f"{prefix}.earnings_filter_capability", "message": "earnings_calendar capability is available"})
@@ -1193,6 +1224,31 @@ def _validate_profile_feature_consistency(checks: list[dict[str, str]], profile_
         light_features.append("investor_context/investor_types")
     if light_features:
         checks.append({"status": "WARN", "name": f"{prefix}.light_features_on_free", "message": f"light-only features need fallback or disable: {', '.join(light_features)}"})
+
+
+def _validate_registry_profile_feature_match(
+    checks: list[dict[str, str]],
+    prefix: str,
+    feature_name: str,
+    registry_enabled: bool,
+    profile_data_enabled: bool,
+) -> None:
+    if registry_enabled and not profile_data_enabled:
+        checks.append(
+            {
+                "status": "WARN",
+                "name": f"{prefix}.{feature_name}_registry_mismatch",
+                "message": f"registry features.{feature_name}=true but profile data_enabled=false",
+            }
+        )
+    else:
+        checks.append(
+            {
+                "status": "OK",
+                "name": f"{prefix}.{feature_name}_registry_match",
+                "message": f"registry/profile {feature_name} settings are consistent",
+            }
+        )
 
 
 def _stale_score_config_paths(config: dict[str, Any]) -> list[str]:
@@ -2037,8 +2093,13 @@ def build_experiment_batch_summary(
                 "removed_count": diff.get("removed_count", 0),
                 "selection_diff_count": selection_diff_count,
                 "outcome_diff_count": outcome_diff_count,
-                "feature_active": activation.get("feature_active", {}),
+                "feature_data_enabled": activation.get("feature_data_enabled", {}),
+                "feature_scoring_enabled": activation.get("feature_scoring_enabled", {}),
                 "feature_trigger_count": activation.get("feature_trigger_count", {}),
+                "feature_status": {
+                    name: item.get("status")
+                    for name, item in (activation.get("features", {}) or {}).items()
+                },
                 "inactive_in_practice": activation.get("inactive_in_practice", []),
                 "practical_effect": practical_effect,
                 "effect_reason": diff.get("effect_reason") or _profile_effect_reason(selection_diff_count, outcome_diff_count),
@@ -2225,8 +2286,8 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             "",
             "## Results",
             "",
-            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | selection_diff_count | outcome_diff_count | feature_active | feature_trigger_count | practical_effect | effect_reason | verdict | verdict_reason |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | selection_diff_count | outcome_diff_count | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | practical_effect | effect_reason | verdict | verdict_reason |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for row in summary.get("experiments", []):
@@ -2243,7 +2304,8 @@ def _experiment_summary_table_row(row: dict[str, Any]) -> str:
         f"{_format_optional_percent(row.get('expectancy'))} | {_format_optional_percent(row.get('max_drawdown'))} | "
         f"{row.get('total_trades')} | {row.get('newly_selected_count')} | {row.get('removed_count')} | "
         f"{row.get('selection_diff_count')} | {row.get('outcome_diff_count')} | "
-        f"{_compact_json(row.get('feature_active', {}))} | {_compact_json(row.get('feature_trigger_count', {}))} | "
+        f"{_compact_json(row.get('feature_data_enabled', {}))} | {_compact_json(row.get('feature_scoring_enabled', {}))} | "
+        f"{_compact_json(row.get('feature_trigger_count', {}))} | "
         f"{row.get('practical_effect')} | {row.get('effect_reason', '-')} | "
         f"{row.get('verdict', row.get('judgement', '-'))} | {row.get('verdict_reason', '-')} |"
     )
@@ -2277,8 +2339,10 @@ def render_experiment_profile_markdown(row: dict[str, Any]) -> str:
             f"- removed_count: {row.get('removed_count', 0)}",
             f"- selection_diff_count: {row.get('selection_diff_count', 0)}",
             f"- outcome_diff_count: {row.get('outcome_diff_count', 0)}",
-            f"- feature_active: {_compact_json(row.get('feature_active', {}))}",
+            f"- feature_data_enabled: {_compact_json(row.get('feature_data_enabled', {}))}",
+            f"- feature_scoring_enabled: {_compact_json(row.get('feature_scoring_enabled', {}))}",
             f"- feature_trigger_count: {_compact_json(row.get('feature_trigger_count', {}))}",
+            f"- feature_status: {_compact_json(row.get('feature_status', {}))}",
             f"- inactive_in_practice: {', '.join(row.get('inactive_in_practice') or []) or '-'}",
             f"- practical_effect: {row.get('practical_effect', 'no')}",
             f"- effect_reason: {row.get('effect_reason', '-')}",

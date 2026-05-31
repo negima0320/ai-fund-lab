@@ -171,7 +171,8 @@ def test_experiment_summary_row_includes_feature_activation() -> None:
         "removed_count": 0,
         "selection_diff_count": 0,
         "outcome_diff_count": 0,
-        "feature_active": {"financial_context": False},
+        "feature_data_enabled": {"financial_context": True},
+        "feature_scoring_enabled": {"financial_context": False},
         "feature_trigger_count": {"financial_context": 0},
         "practical_effect": "no_practical_effect",
         "effect_reason": "selection_diff_count=0 and outcome_diff_count=0",
@@ -181,6 +182,7 @@ def test_experiment_summary_row_includes_feature_activation() -> None:
 
     rendered = main_module._experiment_summary_table_row(row)
 
+    assert '{"financial_context":true}' in rendered
     assert '{"financial_context":false}' in rendered
     assert '{"financial_context":0}' in rendered
 

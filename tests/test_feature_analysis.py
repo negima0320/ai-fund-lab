@@ -3,6 +3,7 @@ from __future__ import annotations
 from db import initialize_database, save_market_context, save_scoring_results, save_trades
 from feature_analysis import build_feature_analysis, render_feature_analysis_markdown
 from paper_trade import execute_real_data_paper_trade, initial_live_paper_state
+from profile_loader import load_profile
 
 
 def test_feature_analysis_groups_closed_trade_results(config_copy: dict, tmp_path) -> None:
@@ -249,13 +250,77 @@ def test_feature_activation_audit_marks_enabled_feature_inactive_in_practice(con
     analysis = build_feature_analysis(config_copy, tmp_path)
     audit = analysis["feature_activation_audit"]
 
-    assert audit["features"]["financial_context"]["enabled"] is True
+    assert audit["features"]["financial_context"]["data_enabled"] is True
+    assert audit["features"]["financial_context"]["scoring_enabled"] is True
     assert audit["features"]["financial_context"]["non_zero_score_count"] == 0
     assert audit["features"]["financial_context"]["status"] == "inactive_in_practice"
     assert "financial_context" in audit["inactive_in_practice"]
     markdown = render_feature_analysis_markdown(analysis)
     assert "## Feature Activation Audit" in markdown
     assert "inactive_in_practice" in markdown
+
+
+def test_feature_activation_audit_marks_v2_9_financial_context_data_only(tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_9")
+    config["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    initialize_database(config, tmp_path)
+
+    audit = build_feature_analysis(config, tmp_path)["feature_activation_audit"]
+    financial = audit["features"]["financial_context"]
+
+    assert financial["data_enabled"] is True
+    assert financial["scoring_enabled"] is False
+    assert financial["status"] == "data_only"
+    assert "financial_context" in audit["data_only"]
+
+
+def test_feature_activation_audit_marks_v2_7_earnings_filter_inactive_in_practice(tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_7")
+    config["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    initialize_database(config, tmp_path)
+
+    audit = build_feature_analysis(config, tmp_path)["feature_activation_audit"]
+    earnings = audit["features"]["earnings_filter"]
+
+    assert earnings["data_enabled"] is True
+    assert earnings["scoring_enabled"] == "N/A"
+    assert earnings["rejected_count"] == 0
+    assert earnings["status"] == "inactive_in_practice"
+
+
+def test_feature_activation_audit_shows_v2_6_relative_strength_layers(tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_6")
+    config["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    initialize_database(config, tmp_path)
+
+    audit = build_feature_analysis(config, tmp_path)["feature_activation_audit"]
+    relative_strength = audit["features"]["relative_strength"]
+
+    assert relative_strength["data_enabled"] is True
+    assert relative_strength["scoring_enabled"] is True
+    assert relative_strength["runtime_active"] is False
+    assert relative_strength["status"] == "inactive_in_practice"
+
+
+def test_feature_activation_audit_marks_registry_profile_mismatch(tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_9")
+    config["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    config["features"]["financial_context"] = False
+    registry_dir = tmp_path / "config"
+    registry_dir.mkdir()
+    (registry_dir / "profile_registry.yaml").write_text(
+        "profiles:\n"
+        "  rookie_dealer_02_v2_9:\n"
+        "    features:\n"
+        "      financial_context: true\n",
+        encoding="utf-8",
+    )
+    initialize_database(config, tmp_path)
+
+    audit = build_feature_analysis(config, tmp_path)["feature_activation_audit"]
+
+    assert audit["features"]["financial_context"]["status"] == "config_mismatch"
+    assert "financial_context" in audit["config_mismatch"]
 
 
 def test_score_effective_range_audit_marks_inactive_components(config_copy: dict, tmp_path) -> None:
