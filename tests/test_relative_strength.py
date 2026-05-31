@@ -9,6 +9,7 @@ from benchmark_provider import build_relative_strength_benchmark
 from data_provider import JQuantsDataProvider
 from indicators import calculate_indicators
 from profile_loader import load_profile
+from real_screening import screen_candidates
 from scoring import score_real_candidates
 
 
@@ -285,6 +286,61 @@ def test_v2_6_indicator_route_fetches_topix_and_records_relative_strength(monkey
     assert "plan=light" in api_log
     assert "cache_hit=false" in api_log
     assert "status=200" in api_log
+
+
+def test_screening_preserves_relative_strength_pipeline_fields() -> None:
+    result = screen_candidates(
+        [
+            {
+                "code": "1001",
+                "name": "Strong",
+                "sector_name": "機械",
+                "date": "2026-01-26",
+                "open": 100,
+                "high": 121,
+                "low": 99,
+                "close": 120,
+                "volume": 10_000_000,
+                "ma5": 110,
+                "ma25": 100,
+                "previous_close": 110,
+                "previous_ma5": 105,
+                "previous_ma25": 99,
+                "rsi": 55,
+                "volume_ratio": 3.0,
+                "turnover_value": 1_200_000_000,
+                "five_day_volatility": 0.05,
+                "stock_return_5d": 0.2,
+                "stock_return_10d": 0.2,
+                "stock_return_20d": 0.2,
+                "benchmark_source": "topix",
+                "benchmark_return_5d": 0.02,
+                "benchmark_return_10d": 0.03,
+                "benchmark_return_20d": 0.04,
+                "relative_strength_5d": 0.18,
+                "relative_strength_10d": 0.17,
+                "relative_strength_20d": 0.16,
+                "relative_strength_score": 10,
+                "topix_records_loaded": 35,
+                "topix_api_calls": 1,
+                "topix_cache_path": "/tmp/topix.json",
+                "relative_strength_feature_enabled": True,
+                "relative_strength_scoring_enabled": True,
+                "relative_strength_benchmark_provider_called": True,
+                "relative_strength_cache_exists": True,
+                "relative_strength_calculated": True,
+            }
+        ],
+        target_count=1,
+    )
+
+    candidate = result["candidates"][0]
+
+    assert candidate["benchmark_source"] == "topix"
+    assert candidate["relative_strength_5d"] == 0.18
+    assert candidate["relative_strength_score"] == 10
+    assert candidate["topix_records_loaded"] == 35
+    assert candidate["relative_strength_benchmark_provider_called"] is True
 
 
 def test_stale_relative_strength_indicator_cache_is_recalculated(monkeypatch, tmp_path) -> None:

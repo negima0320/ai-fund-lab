@@ -4815,9 +4815,19 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
     except RuntimeError as exc:
         raise SystemExit(str(exc)) from exc
     if enable_relative_strength:
+        topix_cache_path = benchmark_payload.get("topix_cache_path", "")
+        topix_cache_exists = bool(topix_cache_path and Path(str(topix_cache_path)).exists())
+        benchmark_provider_called = True
+        rs_calculated = benchmark_payload.get("benchmark_source") not in {None, "", "unavailable"}
         for item in indicators:
             item["topix_records_loaded"] = benchmark_payload.get("topix_records_loaded", 0)
             item["topix_api_calls"] = benchmark_payload.get("topix_api_calls", 0)
+            item["topix_cache_path"] = topix_cache_path
+            item["relative_strength_feature_enabled"] = True
+            item["relative_strength_scoring_enabled"] = True
+            item["relative_strength_benchmark_provider_called"] = benchmark_provider_called
+            item["relative_strength_cache_exists"] = topix_cache_exists
+            item["relative_strength_calculated"] = rs_calculated and item.get("relative_strength_5d") is not None
     excluded_count = len(prime_codes) - len(indicators)
     if not indicators:
         raise SystemExit(f"No indicators calculated for {target_date_text}. Price history may be insufficient or target date may have no data.")

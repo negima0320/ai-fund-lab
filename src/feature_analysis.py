@@ -126,6 +126,7 @@ def build_feature_analysis(
     earnings_exposure = _earnings_calendar_exposure(records, scoring_rows)
     feature_activation_audit = build_feature_activation_audit(config, records, scoring_rows, _registry_features(root, profile_id))
     relative_strength_debug = _relative_strength_debug(scoring_rows)
+    relative_strength_pipeline = _relative_strength_pipeline(config, scoring_rows)
 
     return {
         "profile_id": profile_id,
@@ -162,6 +163,7 @@ def build_feature_analysis(
         "score_formula_audit": score_formula_audit,
         "score_effective_range_audit": score_effective_range_audit,
         "feature_activation_audit": feature_activation_audit,
+        "relative_strength_pipeline": relative_strength_pipeline,
         "relative_strength_debug": relative_strength_debug,
         "earnings_calendar_exposure": earnings_exposure,
         "relative_strength_analysis": {
@@ -253,6 +255,8 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         *_relative_strength_analysis_lines(analysis.get("relative_strength_analysis", {})),
         "",
         "## Relative Strength Debug",
+        "",
+        *_relative_strength_pipeline_lines(analysis.get("relative_strength_pipeline", {})),
         "",
         *_relative_strength_debug_lines(analysis.get("relative_strength_debug", {})),
         "",
@@ -860,6 +864,61 @@ def _relative_strength_debug(scoring_rows: list[dict[str, Any]]) -> dict[str, An
         "top_20_relative_strength_score": [_relative_strength_debug_record(row) for row in top_rows],
         "warnings": warnings,
     }
+
+
+def _relative_strength_pipeline(config: dict[str, Any], scoring_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    rows = list(scoring_rows)
+    feature_enabled = bool(config.get("features", {}).get("relative_strength"))
+    scoring_enabled = bool(config.get("scoring", {}).get("use_relative_strength_score"))
+    cache_paths = [str(row.get("topix_cache_path") or "") for row in rows if row.get("topix_cache_path")]
+    records_loaded = int(max([_feature_value(row, "topix_records_loaded") or 0 for row in rows], default=0))
+    benchmark_provider_called = _any_truthy(rows, "relative_strength_benchmark_provider_called") or records_loaded > 0 or any(
+        str(row.get("benchmark_source") or "") in {"topix", "prime_average", "candidate_median"} for row in rows
+    )
+    cache_exists = _any_truthy(rows, "relative_strength_cache_exists")
+    if not cache_exists:
+        cache_exists = any(Path(path).exists() for path in cache_paths)
+    benchmark_sources = [str(row.get("benchmark_source") or "unknown") for row in rows]
+    benchmark_source = next((source for source in benchmark_sources if source and source != "unknown"), "unknown")
+    rs_calculated = _any_truthy(rows, "relative_strength_calculated") or any(_has_relative_strength_data(row) for row in rows)
+    return {
+        "feature_enabled": feature_enabled,
+        "scoring_enabled": scoring_enabled,
+        "benchmark_provider_called": bool(benchmark_provider_called),
+        "cache_path": cache_paths[0] if cache_paths else "",
+        "cache_exists": bool(cache_exists),
+        "records_loaded": records_loaded,
+        "benchmark_source": benchmark_source,
+        "rs_calculated": bool(rs_calculated),
+    }
+
+
+def _any_truthy(rows: list[dict[str, Any]], key: str) -> bool:
+    return any(_boolish(row.get(key)) for row in rows)
+
+
+def _boolish(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
+def _relative_strength_pipeline_lines(pipeline: dict[str, Any]) -> list[str]:
+    if not pipeline:
+        return ["### Relative Strength Pipeline", "", "- データなし"]
+    return [
+        "### Relative Strength Pipeline",
+        "",
+        f"- feature enabled: {_format_activation_bool(pipeline.get('feature_enabled'))}",
+        f"- scoring enabled: {_format_activation_bool(pipeline.get('scoring_enabled'))}",
+        f"- benchmark provider called: {_format_activation_bool(pipeline.get('benchmark_provider_called'))}",
+        f"- cache path: {pipeline.get('cache_path') or 'N/A'}",
+        f"- cache exists: {_format_activation_bool(pipeline.get('cache_exists'))}",
+        f"- records loaded: {pipeline.get('records_loaded', 0)}",
+        f"- benchmark source: {pipeline.get('benchmark_source') or 'unknown'}",
+        f"- rs calculated: {_format_activation_bool(pipeline.get('rs_calculated'))}",
+        "",
+    ]
 
 
 def _has_relative_strength_data(row: dict[str, Any]) -> bool:

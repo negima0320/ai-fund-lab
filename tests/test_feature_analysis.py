@@ -246,6 +246,14 @@ def test_relative_strength_debug_outputs_distribution_and_benchmark_warning(conf
                     "relative_strength_10d": 0.06,
                     "relative_strength_20d": 0.09,
                     "relative_strength_score": 10,
+                    "topix_records_loaded": 35,
+                    "topix_api_calls": 1,
+                    "topix_cache_path": str(tmp_path / "data/cache/jquants/topix_prices/test.json"),
+                    "relative_strength_feature_enabled": True,
+                    "relative_strength_scoring_enabled": True,
+                    "relative_strength_benchmark_provider_called": True,
+                    "relative_strength_cache_exists": True,
+                    "relative_strength_calculated": True,
                     "score_components": {"relative_strength_score": 10},
                 },
                 {
@@ -272,8 +280,11 @@ def test_relative_strength_debug_outputs_distribution_and_benchmark_warning(conf
 
     analysis = build_feature_analysis(config_copy, tmp_path)
     debug = analysis["relative_strength_debug"]
+    pipeline = analysis["relative_strength_pipeline"]
 
     assert debug["candidate_count"] == 3
+    assert debug["topix_records_loaded"] == 35
+    assert debug["topix_api_calls"] == 1
     assert debug["rs_data_available_count"] == 2
     assert debug["rs_data_missing_count"] == 1
     assert debug["relative_strength_score_distribution"]["1-3"] == 1
@@ -281,8 +292,16 @@ def test_relative_strength_debug_outputs_distribution_and_benchmark_warning(conf
     assert debug["benchmark_source_distribution"]["topix"] == 1
     assert debug["benchmark_source_distribution"]["prime_average"] == 1
     assert debug["top_20_relative_strength_score"][0]["code"] == "1001"
+    assert pipeline["feature_enabled"] is True
+    assert pipeline["scoring_enabled"] is True
+    assert pipeline["benchmark_provider_called"] is True
+    assert pipeline["records_loaded"] == 35
+    assert pipeline["benchmark_source"] == "topix"
+    assert pipeline["rs_calculated"] is True
     markdown = render_feature_analysis_markdown(analysis)
     assert "## Relative Strength Debug" in markdown
+    assert "### Relative Strength Pipeline" in markdown
+    assert "- records loaded: 35" in markdown
     assert "### benchmark_source" in markdown
     assert "Top 20 relative_strength_score" in markdown
 

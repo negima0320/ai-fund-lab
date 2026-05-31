@@ -202,6 +202,14 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
                 relative_strength_10d REAL,
                 relative_strength_20d REAL,
                 relative_strength_score REAL,
+                topix_records_loaded REAL,
+                topix_api_calls REAL,
+                topix_cache_path TEXT,
+                relative_strength_feature_enabled INTEGER,
+                relative_strength_scoring_enabled INTEGER,
+                relative_strength_benchmark_provider_called INTEGER,
+                relative_strength_cache_exists INTEGER,
+                relative_strength_calculated INTEGER,
                 investor_context_source TEXT,
                 investor_context_week TEXT,
                 overseas_net_buy REAL,
@@ -894,6 +902,8 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
                 benchmark_source, benchmark_return_5d, benchmark_return_10d, benchmark_return_20d,
                 relative_strength_5d, relative_strength_10d, relative_strength_20d,
                 relative_strength_score, topix_records_loaded, topix_api_calls,
+                topix_cache_path, relative_strength_feature_enabled, relative_strength_scoring_enabled,
+                relative_strength_benchmark_provider_called, relative_strength_cache_exists, relative_strength_calculated,
                 investor_context_source, investor_context_week, overseas_net_buy,
                 overseas_net_buy_4w_sum, overseas_net_buy_4w_trend, overseas_buy_sell_ratio,
                 individual_net_buy, institution_net_buy, trust_bank_net_buy,
@@ -907,7 +917,7 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
                 earnings_filter_checked, earnings_filter_blocked, earnings_filter_reason, earnings_announcement_date,
                 source_provider, ai_reason, ai_risk, ai_confidence,
                 ai_score, config_version, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -949,6 +959,12 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
                     item.get("relative_strength_score"),
                     item.get("topix_records_loaded"),
                     item.get("topix_api_calls"),
+                    item.get("topix_cache_path"),
+                    1 if item.get("relative_strength_feature_enabled") else 0,
+                    1 if item.get("relative_strength_scoring_enabled") else 0,
+                    1 if item.get("relative_strength_benchmark_provider_called") else 0,
+                    1 if item.get("relative_strength_cache_exists") else 0,
+                    1 if item.get("relative_strength_calculated") else 0,
                     item.get("investor_context_source"),
                     item.get("investor_context_week"),
                     item.get("overseas_net_buy"),
@@ -1290,6 +1306,7 @@ def _drop_removed_score_columns(connection: sqlite3.Connection) -> None:
 
 def _add_relative_strength_columns(connection: sqlite3.Connection, table: str) -> None:
     _add_column_if_missing(connection, table, "benchmark_source", "TEXT")
+    _add_column_if_missing(connection, table, "topix_cache_path", "TEXT")
     for column in [
         "stock_return_5d",
         "stock_return_10d",
@@ -1303,6 +1320,11 @@ def _add_relative_strength_columns(connection: sqlite3.Connection, table: str) -
         "relative_strength_score",
         "topix_records_loaded",
         "topix_api_calls",
+        "relative_strength_feature_enabled",
+        "relative_strength_scoring_enabled",
+        "relative_strength_benchmark_provider_called",
+        "relative_strength_cache_exists",
+        "relative_strength_calculated",
     ]:
         _add_column_if_missing(connection, table, column, "REAL")
 
