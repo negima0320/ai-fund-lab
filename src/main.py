@@ -2011,6 +2011,7 @@ def build_experiment_batch_summary(
         registry_item = profiles[profile_id]
         row = rows_by_profile.get(profile_id, {"profile_id": profile_id})
         diff = _experiment_diff(base_profile_id, profile_id, db_path, start_date_text, end_date_text) if db_path.exists() else {}
+        activation = _experiment_feature_activation(load_profile(profile_id), start_date_text, end_date_text) if db_path.exists() else {}
         if "selection_diff_count" in diff:
             selection_diff_count = int(diff.get("selection_diff_count") or 0)
         else:
@@ -2036,6 +2037,9 @@ def build_experiment_batch_summary(
                 "removed_count": diff.get("removed_count", 0),
                 "selection_diff_count": selection_diff_count,
                 "outcome_diff_count": outcome_diff_count,
+                "feature_active": activation.get("feature_active", {}),
+                "feature_trigger_count": activation.get("feature_trigger_count", {}),
+                "inactive_in_practice": activation.get("inactive_in_practice", []),
                 "practical_effect": practical_effect,
                 "effect_reason": diff.get("effect_reason") or _profile_effect_reason(selection_diff_count, outcome_diff_count),
                 "no_practical_effect": "yes" if practical_effect == "no_practical_effect" else "no",
@@ -2094,6 +2098,13 @@ def _experiment_diff(base_profile_id: str, target_profile_id: str, db_path: Path
     except Exception:
         return {}
     return payload or {}
+
+
+def _experiment_feature_activation(config: dict[str, Any], start_date_text: str, end_date_text: str) -> dict[str, Any]:
+    try:
+        return build_feature_analysis(config, ROOT, start_date_text, end_date_text).get("feature_activation_audit", {})
+    except Exception:
+        return {}
 
 
 def _enabled_registry_features(item: dict[str, Any]) -> list[str]:
@@ -2214,8 +2225,8 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             "",
             "## Results",
             "",
-            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | selection_diff_count | outcome_diff_count | practical_effect | effect_reason | verdict | verdict_reason |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | selection_diff_count | outcome_diff_count | feature_active | feature_trigger_count | practical_effect | effect_reason | verdict | verdict_reason |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for row in summary.get("experiments", []):
@@ -2232,9 +2243,16 @@ def _experiment_summary_table_row(row: dict[str, Any]) -> str:
         f"{_format_optional_percent(row.get('expectancy'))} | {_format_optional_percent(row.get('max_drawdown'))} | "
         f"{row.get('total_trades')} | {row.get('newly_selected_count')} | {row.get('removed_count')} | "
         f"{row.get('selection_diff_count')} | {row.get('outcome_diff_count')} | "
+        f"{_compact_json(row.get('feature_active', {}))} | {_compact_json(row.get('feature_trigger_count', {}))} | "
         f"{row.get('practical_effect')} | {row.get('effect_reason', '-')} | "
         f"{row.get('verdict', row.get('judgement', '-'))} | {row.get('verdict_reason', '-')} |"
     )
+
+
+def _compact_json(value: Any) -> str:
+    if not value:
+        return "{}"
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def render_experiment_profile_markdown(row: dict[str, Any]) -> str:
@@ -2259,6 +2277,9 @@ def render_experiment_profile_markdown(row: dict[str, Any]) -> str:
             f"- removed_count: {row.get('removed_count', 0)}",
             f"- selection_diff_count: {row.get('selection_diff_count', 0)}",
             f"- outcome_diff_count: {row.get('outcome_diff_count', 0)}",
+            f"- feature_active: {_compact_json(row.get('feature_active', {}))}",
+            f"- feature_trigger_count: {_compact_json(row.get('feature_trigger_count', {}))}",
+            f"- inactive_in_practice: {', '.join(row.get('inactive_in_practice') or []) or '-'}",
             f"- practical_effect: {row.get('practical_effect', 'no')}",
             f"- effect_reason: {row.get('effect_reason', '-')}",
             f"- verdict: {row.get('verdict', row.get('judgement', '-'))}",

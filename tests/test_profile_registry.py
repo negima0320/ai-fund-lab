@@ -159,6 +159,32 @@ def test_experiment_verdict_not_no_practical_effect_when_metrics_change_with_out
     assert "execution_or_exit_effect" in result["reasons"]
 
 
+def test_experiment_summary_row_includes_feature_activation() -> None:
+    row = {
+        "profile_id": "rookie_dealer_02_v2_9",
+        "role": "experiment",
+        "description": "財務スコア検証",
+        "required_plan": "free",
+        "enabled_features": ["financial_context"],
+        "total_trades": 10,
+        "newly_selected_count": 0,
+        "removed_count": 0,
+        "selection_diff_count": 0,
+        "outcome_diff_count": 0,
+        "feature_active": {"financial_context": False},
+        "feature_trigger_count": {"financial_context": 0},
+        "practical_effect": "no_practical_effect",
+        "effect_reason": "selection_diff_count=0 and outcome_diff_count=0",
+        "verdict": "no_practical_effect",
+        "verdict_reason": "no_practical_effect",
+    }
+
+    rendered = main_module._experiment_summary_table_row(row)
+
+    assert '{"financial_context":false}' in rendered
+    assert '{"financial_context":0}' in rendered
+
+
 def test_experiment_capability_warning_for_light_profile_on_free_plan() -> None:
     result = main_module.resolve_experiment_capabilities(["rookie_dealer_02_v2_6"], "free")
 

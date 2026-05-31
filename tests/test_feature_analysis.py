@@ -223,6 +223,41 @@ def test_feature_analysis_groups_closed_trade_results(config_copy: dict, tmp_pat
     assert "technical_score average: 41.50" in render_feature_analysis_markdown(analysis)
 
 
+def test_feature_activation_audit_marks_enabled_feature_inactive_in_practice(config_copy: dict, tmp_path) -> None:
+    config_copy["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    config_copy.setdefault("features", {})["financial_context"] = True
+    config_copy.setdefault("scoring", {})["use_financial_score"] = True
+    initialize_database(config_copy, tmp_path)
+    save_scoring_results(
+        config_copy,
+        tmp_path,
+        {
+            "date": "2026-03-01",
+            "scores": [
+                {
+                    "code": "1001",
+                    "name": "No Financial Trigger",
+                    "rank": 1,
+                    "total_score": 45,
+                    "technical_score": 45,
+                    "selected": True,
+                }
+            ],
+        },
+    )
+
+    analysis = build_feature_analysis(config_copy, tmp_path)
+    audit = analysis["feature_activation_audit"]
+
+    assert audit["features"]["financial_context"]["enabled"] is True
+    assert audit["features"]["financial_context"]["non_zero_score_count"] == 0
+    assert audit["features"]["financial_context"]["status"] == "inactive_in_practice"
+    assert "financial_context" in audit["inactive_in_practice"]
+    markdown = render_feature_analysis_markdown(analysis)
+    assert "## Feature Activation Audit" in markdown
+    assert "inactive_in_practice" in markdown
+
+
 def test_score_effective_range_audit_marks_inactive_components(config_copy: dict, tmp_path) -> None:
     config_copy["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
     initialize_database(config_copy, tmp_path)

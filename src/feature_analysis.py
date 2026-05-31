@@ -119,6 +119,7 @@ def build_feature_analysis(
     score_formula_audit = _score_formula_audit(config, records, scoring_rows, component_validation)
     score_effective_range_audit = _score_effective_range_audit(config, records, scoring_rows)
     earnings_exposure = _earnings_calendar_exposure(records, scoring_rows)
+    feature_activation_audit = build_feature_activation_audit(config, records, scoring_rows)
 
     return {
         "profile_id": profile_id,
@@ -154,6 +155,7 @@ def build_feature_analysis(
         },
         "score_formula_audit": score_formula_audit,
         "score_effective_range_audit": score_effective_range_audit,
+        "feature_activation_audit": feature_activation_audit,
         "earnings_calendar_exposure": earnings_exposure,
         "relative_strength_analysis": {
             "benchmark_source": _group_by(records, lambda item: item.get("benchmark_source") or "unknown"),
@@ -234,6 +236,10 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "## Score Effective Range Audit",
         "",
         *_score_effective_range_audit_lines(analysis.get("score_effective_range_audit", {})),
+        "",
+        "## Feature Activation Audit",
+        "",
+        *_feature_activation_audit_lines(analysis.get("feature_activation_audit", {})),
         "",
         "## Relative Strength Analysis",
         "",
@@ -371,6 +377,92 @@ def _earnings_calendar_exposure(records: list[dict[str, Any]], scoring_rows: lis
 
 def _is_earnings_exposed(record: dict[str, Any]) -> bool:
     return bool(record.get("earnings_filter_blocked") or record.get("earnings_announcement_date"))
+
+
+def build_feature_activation_audit(
+    config: dict[str, Any],
+    records: list[dict[str, Any]],
+    scoring_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    features = config.get("features", {}) if isinstance(config.get("features"), dict) else {}
+    scoring = config.get("scoring", {}) if isinstance(config.get("scoring"), dict) else {}
+    earnings_filter = config.get("earnings_filter", {}) if isinstance(config.get("earnings_filter"), dict) else {}
+    items = {
+        "relative_strength": _activation_item(
+            enabled=bool(features.get("relative_strength")) and bool(scoring.get("use_relative_strength_score")),
+            trigger_count=_non_zero_count(records, scoring_rows, "relative_strength_score"),
+            trigger_label="non_zero_score_count",
+        ),
+        "investor_context": _activation_item(
+            enabled=bool(features.get("investor_context")) and bool(scoring.get("use_investor_context_score")),
+            trigger_count=_non_zero_count(records, scoring_rows, "investor_context_score"),
+            trigger_label="non_zero_score_count",
+        ),
+        "financial_context": _activation_item(
+            enabled=bool(features.get("financial_context")) and bool(scoring.get("use_financial_score")),
+            trigger_count=_non_zero_count(records, scoring_rows, "financial_score"),
+            trigger_label="non_zero_score_count",
+        ),
+        "earnings_filter": _activation_item(
+            enabled=bool(earnings_filter.get("enabled")),
+            trigger_count=_earnings_filter_rejected_count(scoring_rows),
+            trigger_label="rejected_count",
+        ),
+    }
+    return {
+        "features": items,
+        "feature_active": {
+            name: item["enabled"] and item["actual_trigger_count"] > 0
+            for name, item in items.items()
+        },
+        "feature_trigger_count": {
+            name: item["actual_trigger_count"]
+            for name, item in items.items()
+        },
+        "inactive_in_practice": [
+            name for name, item in items.items()
+            if item["enabled"] and item["actual_trigger_count"] == 0
+        ],
+    }
+
+
+def _activation_item(enabled: bool, trigger_count: int, trigger_label: str) -> dict[str, Any]:
+    status = "disabled"
+    if enabled:
+        status = "active" if trigger_count > 0 else "inactive_in_practice"
+    return {
+        "enabled": enabled,
+        "actual_trigger_count": trigger_count,
+        trigger_label: trigger_count,
+        "status": status,
+    }
+
+
+def _non_zero_count(records: list[dict[str, Any]], scoring_rows: list[dict[str, Any]], key: str) -> int:
+    count = 0
+    for row in [*records, *scoring_rows]:
+        value = _feature_value(row, key)
+        if value is not None and abs(value) > 0:
+            count += 1
+    return count
+
+
+def _feature_value(row: dict[str, Any], key: str) -> float | None:
+    value = _number(row.get(key))
+    if value is not None:
+        return value
+    components = _json_dict(row.get("score_components"))
+    return _number(components.get(key))
+
+
+def _earnings_filter_rejected_count(scoring_rows: list[dict[str, Any]]) -> int:
+    return sum(
+        1
+        for row in scoring_rows
+        if bool(row.get("earnings_filter_blocked"))
+        or "決算予定日前後" in str(row.get("rejected_reason") or "")
+        or "決算予定日前後" in str(row.get("earnings_filter_reason") or "")
+    )
 
 
 def _group_by(records: list[dict[str, Any]], bucket_fn: Any, bucket_order: list[str] | None = None) -> list[dict[str, Any]]:
@@ -578,6 +670,35 @@ def _score_effective_range_audit_lines(audit: dict[str, Any]) -> list[str]:
             f"zero_count {item.get('zero_count')}, "
             f"status {item.get('status')}"
         )
+    return lines
+
+
+def _feature_activation_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- データなし"]
+    lines = []
+    features = audit.get("features", {})
+    for name in ["relative_strength", "investor_context", "financial_context", "earnings_filter"]:
+        item = features.get(name, {})
+        lines.extend(
+            [
+                f"### {name}",
+                "",
+                f"- enabled: {str(bool(item.get('enabled'))).lower()}",
+                f"- actual_trigger_count: {item.get('actual_trigger_count', 0)}",
+            ]
+        )
+        if "rejected_count" in item:
+            lines.append(f"- rejected_count: {item.get('rejected_count', 0)}")
+        if "non_zero_score_count" in item:
+            lines.append(f"- non_zero_score_count: {item.get('non_zero_score_count', 0)}")
+        lines.extend([f"- status: {item.get('status', 'disabled')}", ""])
+    inactive = audit.get("inactive_in_practice", [])
+    lines.extend(["### inactive_in_practice", ""])
+    if inactive:
+        lines.extend(f"- {name}" for name in inactive)
+    else:
+        lines.append("- なし")
     return lines
 
 
