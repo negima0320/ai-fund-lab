@@ -21,6 +21,17 @@ profiles:
       financial_context: false
       earnings_filter: false
 
+  rookie_dealer_02_v2_7:
+    role: experiment
+    description: 決算予定日フィルター検証
+    required_plan: free
+    compare_to: rookie_dealer_02_v2_1
+    features:
+      relative_strength: false
+      investor_context: false
+      financial_context: false
+      earnings_filter: true
+
   rookie_dealer_02_v2_8:
     role: experiment
     description: 投資部門別情報検証
@@ -34,7 +45,7 @@ profiles:
 
   rookie_dealer_02_v2_9:
     role: experiment
-    description: 財務情報capability検証
+    description: 財務スコア検証
     required_plan: free
     compare_to: rookie_dealer_02_v2_1
     features:

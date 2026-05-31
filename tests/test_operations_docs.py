@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import yaml
+import main as main_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -101,3 +102,46 @@ def test_operation_schedule_safety_defaults() -> None:
     assert schedule["execution_policy"]["require_position_check"] is True
     assert schedule["safety"]["require_manual_approval"] is True
     assert schedule["safety"]["forbid_live_auto_order"] is True
+
+
+def test_operation_simulation_reads_schedule_and_estimates_api() -> None:
+    simulation = main_module.build_operation_simulation("rookie_dealer_02_v2_1", 1)
+
+    assert simulation["dry_run"] is True
+    assert simulation["operation_days"]
+    assert simulation["api_usage"]["daily_total"] > 0
+    assert simulation["orders"]["actual_orders"] == 0
+    assert simulation["launchd_validation"]["status"] == "OK"
+
+
+def test_operation_simulation_does_not_call_external_execution(monkeypatch) -> None:
+    called = []
+    monkeypatch.setattr(main_module, "run_backtest", lambda *args, **kwargs: called.append("backtest"))
+    monkeypatch.setattr(main_module, "run_demo_auto_order", lambda *args, **kwargs: called.append("order"))
+
+    main_module.build_operation_simulation("rookie_dealer_02_v2_1", 7)
+
+    assert called == []
+
+
+def test_launchd_validation_detects_missing_script(tmp_path, monkeypatch) -> None:
+    launchd_dir = tmp_path / "docs" / "launchd"
+    launchd_dir.mkdir(parents=True)
+    plist = launchd_dir / "bad.plist"
+    plist.write_text(
+        """<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\"><dict>
+<key>Label</key><string>bad</string>
+<key>WorkingDirectory</key><string>{root}</string>
+<key>ProgramArguments</key><array><string>{root}/scripts/missing.sh</string></array>
+</dict></plist>
+""".format(root=tmp_path),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+
+    result = main_module.validate_launchd_files()
+
+    assert result["status"] == "ERROR"
+    assert "missing script" in result["checks"][0]["message"]

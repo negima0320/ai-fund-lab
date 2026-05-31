@@ -6,6 +6,7 @@ import csv
 import calendar
 import json
 import os
+import plistlib
 import re
 import shutil
 import sqlite3
@@ -58,11 +59,12 @@ from db import (
 from feature_analysis import build_feature_analysis, render_feature_analysis_markdown, score_detail_groups
 from indicators import calculate_indicators
 from investor_context import INVESTOR_CONTEXT_EMPTY, build_investor_context
-from jquants_plan import jquants_capability_status, jquants_has_capability, jquants_profile_compatibility, normalize_jquants_plan
+from jquants_plan import DISPLAY_CAPABILITIES, jquants_capability_status, jquants_has_capability, jquants_profile_compatibility, normalize_jquants_plan
 from market_context import build_market_context, neutral_market_context
 from news_provider import build_news_provider
 from paper_trade import execute_paper_trade_day, execute_real_data_paper_trade, initial_live_paper_state, initial_paper_state
 from portfolio import build_daily_summary
+import profile_registry as profile_registry_service
 from profile_loader import DEFAULT_PROFILE_ID, list_profiles, load_profile
 from reflection import generate_reflections
 from report import generate_daily_report
@@ -107,6 +109,9 @@ def main() -> None:
     if args.mode == "preflight":
         run_preflight(RUNTIME_SETTINGS["profile_id"])
         return
+    if args.mode == "simulate-operation":
+        run_simulate_operation(RUNTIME_SETTINGS["profile_id"], args.days)
+        return
     if args.mode == "list-profiles":
         run_list_profiles()
         return
@@ -120,13 +125,22 @@ def main() -> None:
         run_compare_experiments(args.base_profile, args.start_date, args.end_date)
         return
     if args.mode == "run-experiments":
-        run_experiments(args.base_profile, args.start_date, args.end_date, args.profiles, args.skip_backtest)
+        run_experiments(args.base_profile, args.start_date, args.end_date, args.profiles, args.skip_backtest, args.skip_analyze)
         return
     if args.mode == "validate-config":
-        run_validate_config(RUNTIME_SETTINGS["profile_id"])
+        run_validate_config(args.profile, args.strict)
         return
-    if args.mode in {"clean-reports", "clean-experiments", "clean-cache"}:
-        run_clean_command(args.mode, RUNTIME_SETTINGS["profile_id"], provider_name, args.yes)
+    if args.mode in {"clean-reports", "clean-experiments", "clean-cache", "clean-articles"}:
+        run_clean_command(
+            args.mode,
+            profile_id=args.profile,
+            provider_name=provider_name,
+            yes=args.yes and not args.dry_run,
+            older_than_days=args.older_than_days,
+            include_latest=args.include_latest,
+            cache_kind=args.cache_kind,
+            verbose=args.verbose,
+        )
         return
     config = load_config(CONFIG_PATH)
     if args.mode == "status":
@@ -304,6 +318,7 @@ def parse_args() -> Any:
             "release-notes",
             "full-paper-run",
             "preflight",
+            "simulate-operation",
             "list-profiles",
             "profile-info",
             "healthcheck",
@@ -329,6 +344,7 @@ def parse_args() -> Any:
             "clean-reports",
             "clean-experiments",
             "clean-cache",
+            "clean-articles",
         ],
         default="demo",
         help="Execution mode. Use demo, healthcheck, list-stocks, fetch-prices, or calculate-indicators.",
@@ -433,9 +449,46 @@ def parse_args() -> Any:
         help="Use existing backtest/analyze results for run-experiments.",
     )
     parser.add_argument(
+        "--skip-analyze",
+        action="store_true",
+        help="Skip analyze in run-experiments and use existing analysis outputs where required.",
+    )
+    parser.add_argument(
         "--yes",
         action="store_true",
         help="Actually delete files for clean modes. Without this flag clean modes are dry-run.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Explicit dry-run for clean modes. This is the default unless --yes is specified.",
+    )
+    parser.add_argument(
+        "--older-than-days",
+        type=int,
+        default=None,
+        help="Clean only files older than N days.",
+    )
+    parser.add_argument(
+        "--include-latest",
+        action="store_true",
+        help="Include latest files in clean modes. Latest files are kept by default.",
+    )
+    parser.add_argument(
+        "--cache-kind",
+        choices=["prices", "topix_prices", "earnings_calendar", "investor_types", "financial_statements", "all"],
+        default="all",
+        help="Cache category for clean-cache.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show each clean target path.",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Treat validate-config warnings as failures.",
     )
     args = parser.parse_args()
     _apply_period_preset(args)
@@ -498,8 +551,6 @@ def parse_args() -> Any:
             parser.error("--since and --until must be in YYYY-MM-DD format.")
         if since_date > until_date:
             parser.error("--since must be earlier than or equal to --until.")
-    if args.mode == "clean-reports" and not (args.profile or _config_get(_load_provider_runtime_config(), ("profile", "default"))):
-        parser.error("--profile PROFILE is required for clean-reports when config/profile.default is not set.")
     return args
 
 
@@ -587,54 +638,271 @@ def _resolve_setting_value(cli_value: Any, config_value: Any, default_value: Any
     return default_value, "default"
 
 
-def run_validate_config(profile_id: str) -> None:
-    result = build_config_validation(profile_id, RUNTIME_SETTINGS or None)
+def run_simulate_operation(profile_id: str, days: int) -> None:
+    simulation = build_operation_simulation(profile_id, days)
+    print(render_operation_simulation(simulation))
+
+
+def build_operation_simulation(profile_id: str, days: int, start_date: date | None = None) -> dict[str, Any]:
+    if days < 1:
+        raise ValueError("days must be 1 or greater")
+    schedule_path = ROOT / "config" / "operation_schedule.yaml"
+    schedule = _load_operation_schedule_for_validation()
+    config = load_profile(profile_id)
+    _apply_runtime_provider_settings(config)
+    _apply_jquants_plan_settings(config)
+    start = start_date or _today_jst()
+    simulation_days = [_simulate_operation_day(start + timedelta(days=offset), schedule) for offset in range(days)]
+    api_usage = estimate_operation_api_usage(config, days)
+    return {
+        "mode": "simulate-operation",
+        "dry_run": True,
+        "profile_id": profile_id,
+        "days": days,
+        "schedule_path": str(schedule_path.relative_to(ROOT)),
+        "schedule": schedule,
+        "operation_days": simulation_days,
+        "api_usage": api_usage,
+        "files": expected_operation_files(profile_id, config),
+        "launchd_validation": validate_launchd_files(),
+        "orders": {
+            "actual_orders": 0,
+            "preview_only": True,
+            "expected_order_events": ["preview_orders", "paper/demo order check"],
+        },
+    }
+
+
+def _simulate_operation_day(day: date, schedule: dict[str, Any]) -> dict[str, Any]:
+    flow = schedule.get("daily_flow", {}) if isinstance(schedule.get("daily_flow"), dict) else {}
+    events = []
+    event_specs = [
+        ("data_fetch_time", "data-fetch", ["listed info cache check", "price cache check"]),
+        ("screening_time", "run-daily", ["screening", "scoring", "candidate generation"]),
+        ("report_time", "report", ["daily paper report", "analysis summary files"]),
+        ("evening_paper_run_time", "evening-selection", ["preflight", "screen", "score", "preview-orders", "analyze"]),
+        ("order_review_time", "order-review", ["preview_orders review", "risk check result"]),
+        ("demo_order_time", "paper order", ["cash check", "position check", "duplicate order check", "demo/paper order preview"]),
+        ("article_time", "article", ["daily note article"]),
+        ("analyze_time", "analyze", ["analysis_latest.md", "feature_analysis.md", "selection_quality.md"]),
+    ]
+    seen = set()
+    for key, name, expected in event_specs:
+        time_text = flow.get(key)
+        if not time_text or (time_text, name) in seen:
+            continue
+        seen.add((time_text, name))
+        events.append({"time": str(time_text), "name": name, "expected": expected})
+    return {"date": day.isoformat(), "events": sorted(events, key=lambda item: item["time"])}
+
+
+def estimate_operation_api_usage(config: dict[str, Any], days: int) -> dict[str, Any]:
+    plan = _jquants_plan(config)
+    features = config.get("features", {}) if isinstance(config.get("features"), dict) else {}
+    earnings_filter = config.get("earnings_filter", {}) if isinstance(config.get("earnings_filter"), dict) else {}
+    daily = {
+        "prices_calls": 20,
+        "topix_calls": 1 if features.get("relative_strength") and jquants_has_capability(plan, "topix_prices") else 0,
+        "investor_types_calls": 1 if features.get("investor_context") and jquants_has_capability(plan, "investor_types") else 0,
+        "earnings_calendar_calls": 1 if earnings_filter.get("enabled") else 0,
+    }
+    daily_total = sum(daily.values())
+    monthly_total = daily_total * 20
+    limit_per_minute = _jquants_requests_per_minute(config)
+    return {
+        "plan": plan,
+        "daily": daily,
+        "daily_total": daily_total,
+        "monthly_total": monthly_total,
+        "limit_per_minute": limit_per_minute,
+        "limit_status": "OK" if daily_total <= limit_per_minute * 10 else "REVIEW",
+        "simulated_total": daily_total * days,
+    }
+
+
+def expected_operation_files(profile_id: str, config: dict[str, Any]) -> dict[str, list[str]]:
+    files = {
+        "reports": [
+            f"reports/{profile_id}/backtests/analysis_latest.md",
+            f"reports/{profile_id}/backtests/feature_analysis.md",
+            f"reports/{profile_id}/backtests/selection_quality.md",
+            f"reports/{profile_id}/broker/account_snapshot_latest.md",
+        ],
+        "articles": [],
+        "experiments": [],
+        "logs": [
+            "logs/paper_run.log",
+            "logs/demo_orders.log",
+        ],
+    }
+    reporting = config.get("reporting", {}) if isinstance(config.get("reporting"), dict) else {}
+    if reporting.get("article_output_mode", "daily_only") == "daily_only":
+        files["articles"].append("reports/articles/daily/YYYY/MM/daily_note.md")
+    return files
+
+
+def validate_launchd_files() -> dict[str, Any]:
+    launchd_dir = ROOT / "docs" / "launchd"
+    plist_paths = sorted(launchd_dir.glob("*.plist")) if launchd_dir.exists() else []
+    checks = []
+    for path in plist_paths:
+        try:
+            payload = plistlib.loads(path.read_bytes())
+        except Exception as exc:
+            checks.append({"status": "ERROR", "path": str(path.relative_to(ROOT)), "message": f"plist parse failed: {exc}"})
+            continue
+        program_args = payload.get("ProgramArguments") or []
+        missing_scripts = []
+        for arg in program_args:
+            if isinstance(arg, str) and arg.endswith(".sh"):
+                script_path = Path(arg)
+                if not script_path.is_absolute():
+                    script_path = ROOT / script_path
+                if not script_path.exists():
+                    missing_scripts.append(str(script_path))
+        working_dir = Path(payload.get("WorkingDirectory") or ROOT)
+        checks.append(
+            {
+                "status": "OK" if not missing_scripts and working_dir.exists() else "ERROR",
+                "path": str(path.relative_to(ROOT)),
+                "label": payload.get("Label", ""),
+                "working_directory": str(working_dir),
+                "missing_scripts": missing_scripts,
+                "message": "OK" if not missing_scripts and working_dir.exists() else f"missing script: {', '.join(missing_scripts) or 'working directory missing'}",
+            }
+        )
+    return {
+        "status": "OK" if checks and all(item["status"] == "OK" for item in checks) else "ERROR" if checks else "WARN",
+        "checks": checks,
+    }
+
+
+def render_operation_simulation(simulation: dict[str, Any]) -> str:
+    lines = [
+        "# Operation Simulation",
+        "",
+        f"- dry_run: {str(simulation['dry_run']).lower()}",
+        f"- profile_id: {simulation['profile_id']}",
+        f"- days: {simulation['days']}",
+        f"- schedule: {simulation['schedule_path']}",
+        "",
+        "## Daily Timeline",
+        "",
+    ]
+    for day in simulation["operation_days"]:
+        lines.append(day["date"])
+        lines.append("")
+        for event in day["events"]:
+            lines.append(event["time"])
+            lines.append(event["name"])
+            lines.append("expected:")
+            for expected in event["expected"]:
+                lines.append(f"- {expected}")
+            lines.append("")
+    api = simulation["api_usage"]
+    lines.extend(
+        [
+            "## Estimated API Usage",
+            "",
+            "J-Quants:",
+            f"- prices calls: {api['daily']['prices_calls']}",
+            f"- topix calls: {api['daily']['topix_calls']}",
+            f"- investor_types calls: {api['daily']['investor_types_calls']}",
+            f"- earnings_calendar calls: {api['daily']['earnings_calendar_calls']}",
+            "",
+            f"daily: {api['daily_total']} calls",
+            f"monthly: {api['monthly_total']} calls",
+            f"plan: {api['plan']}",
+            f"limit: {api['limit_status']}",
+            "",
+            "## Expected Files",
+            "",
+        ]
+    )
+    for group, paths in simulation["files"].items():
+        lines.append(f"{group}:")
+        if paths:
+            for path in paths:
+                lines.append(f"- {path}")
+        else:
+            lines.append("- none")
+        lines.append("")
+    launchd = simulation["launchd_validation"]
+    lines.extend(["## launchd validation", "", launchd["status"], ""])
+    for check in launchd["checks"]:
+        lines.append(f"- {check['path']}: {check['message']}")
+    lines.extend(["", "## Orders", "", f"- actual_orders: {simulation['orders']['actual_orders']}", "- broker/API execution: not_called"])
+    return "\n".join(lines)
+
+
+def run_validate_config(profile_id: str | None = None, strict: bool = False) -> None:
+    result = build_config_validation(profile_id, RUNTIME_SETTINGS or None, strict=strict)
     print("Config Validation")
     print(f"status: {result['status']}")
-    print(f"profile: {result['profile_id']}")
-    print(f"jquants_plan: {result['jquants_plan']}")
+    print(f"strict: {str(strict).lower()}")
+    print(f"profiles: {', '.join(result['profile_ids'])}")
+    print(f"J-Quants Plan: {result['jquants_plan']}")
+    print(f"Source: {result['jquants_plan_source']}")
+    print("Capabilities:")
+    for capability in DISPLAY_CAPABILITIES:
+        print(f"- {capability}: {result['capabilities'].get(capability, 'disabled')}")
     for check in result["checks"]:
         print(f"[{check['status']}] {check['name']}: {check['message']}")
-    if result["fail_count"]:
+    print("Validation Summary:")
+    print(f"- errors: {result['fail_count']}")
+    print(f"- warnings: {result['warn_count']}")
+    print(f"- checked_profiles: {result['checked_profiles']}")
+    if result["exit_code"]:
         raise SystemExit(1)
 
 
 def build_config_validation(
-    profile_id: str,
+    profile_id: str | None,
     runtime_settings: dict[str, Any] | None = None,
     provider_config: dict[str, Any] | None = None,
     registry: dict[str, Any] | None = None,
     operation_schedule: dict[str, Any] | None = None,
     profile_config: dict[str, Any] | None = None,
+    strict: bool = False,
 ) -> dict[str, Any]:
     settings = runtime_settings or _runtime_settings_or_defaults()
     provider_payload = provider_config if provider_config is not None else _load_provider_runtime_config()
-    registry_payload = registry if registry is not None else load_profile_registry()
-    plan = normalize_jquants_plan(settings.get("jquants_plan") or _config_get(provider_payload, ("jquants", "plan")) or "free")
+    registry_payload = registry if registry is not None else _load_profile_registry_for_validation()
+    jquants_validation = _load_jquants_validation_config(provider_payload, settings)
+    plan = jquants_validation["plan"]
     checks: list[dict[str, str]] = []
-    profile_path = ROOT / "config" / "profiles" / f"{profile_id}.yaml"
-    _validation_check(checks, profile_path.exists(), "profile_yaml", f"{profile_path.relative_to(ROOT)} exists", f"{profile_path.relative_to(ROOT)} is missing")
-    try:
-        config = profile_config if profile_config is not None else load_profile(profile_id)
-        _validation_check(checks, True, "profile_load", f"{profile_id} can be loaded", "")
-    except Exception as exc:
-        config = {}
-        _validation_check(checks, False, "profile_load", "", f"{profile_id} cannot be loaded: {exc}")
-
+    _validate_jquants_config(checks, jquants_validation)
+    target_profile_ids = _validation_target_profiles(profile_id, registry_payload)
+    if profile_config is not None and profile_id:
+        profile_configs = {profile_id: profile_config}
+    else:
+        profile_configs = {}
     _validate_registry_consistency(checks, registry_payload, profile_id)
-    _validate_plan_capabilities(checks, profile_id, plan)
-    _validate_score_config(checks, config)
+    _validate_registry_details(checks, registry_payload)
+    for target_profile_id in target_profile_ids:
+        config = profile_configs.get(target_profile_id)
+        if config is None:
+            config = _load_profile_for_validation(checks, target_profile_id)
+        _validate_plan_capabilities(checks, target_profile_id, plan, registry_payload)
+        _validate_profile_config(checks, target_profile_id, config, plan)
     schedule = operation_schedule if operation_schedule is not None else _load_operation_schedule_for_validation()
-    _validate_safety_config(checks, provider_payload, schedule, settings)
+    _validate_safety_config(checks, provider_payload, schedule, settings, strict)
 
     fail_count = sum(1 for item in checks if item["status"] == "FAIL")
     warn_count = sum(1 for item in checks if item["status"] == "WARN")
+    exit_code = 1 if fail_count or (strict and warn_count) else 0
     return {
         "status": "FAILED" if fail_count else "OK_WITH_WARNINGS" if warn_count else "OK",
-        "profile_id": profile_id,
+        "profile_id": profile_id or "all",
+        "profile_ids": target_profile_ids,
         "jquants_plan": plan,
+        "jquants_plan_source": jquants_validation["source"],
+        "capabilities": jquants_validation["capabilities"],
         "fail_count": fail_count,
         "warn_count": warn_count,
+        "checked_profiles": len(target_profile_ids),
+        "strict": strict,
+        "exit_code": exit_code,
         "checks": checks,
     }
 
@@ -643,7 +911,93 @@ def _validation_check(checks: list[dict[str, str]], ok: bool, name: str, ok_mess
     checks.append({"status": "OK" if ok else fail_status, "name": name, "message": ok_message if ok else fail_message})
 
 
-def _validate_registry_consistency(checks: list[dict[str, str]], registry: dict[str, Any], profile_id: str) -> None:
+def _load_profile_registry_for_validation() -> dict[str, Any]:
+    path = ROOT / "config" / "profile_registry.yaml"
+    if not path.exists():
+        return {"profiles": {}}
+    try:
+        return load_profile_registry(path)
+    except Exception:
+        return {"profiles": {}}
+
+
+def _validation_target_profiles(profile_id: str | None, registry: dict[str, Any]) -> list[str]:
+    if profile_id:
+        return [profile_id]
+    return sorted(registry_profiles(registry).keys())
+
+
+def _load_profile_for_validation(checks: list[dict[str, str]], profile_id: str) -> dict[str, Any]:
+    profile_path = ROOT / "config" / "profiles" / f"{profile_id}.yaml"
+    _validation_check(
+        checks,
+        profile_path.exists(),
+        f"profile.{profile_id}.yaml",
+        f"{profile_path.relative_to(ROOT)} exists",
+        f"{profile_path.relative_to(ROOT)} is missing",
+    )
+    try:
+        config = load_profile(profile_id)
+        _validation_check(checks, True, f"profile.{profile_id}.load", f"{profile_id} can be loaded", "")
+        return config
+    except Exception as exc:
+        _validation_check(checks, False, f"profile.{profile_id}.load", "", f"{profile_id} cannot be loaded: {exc}")
+        return {}
+
+
+def _load_jquants_validation_config(provider_config: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+    jquants_path = ROOT / "config" / "jquants.yaml"
+    config_plan = None
+    source = "default"
+    if jquants_path.exists():
+        try:
+            payload = load_versioned_config(jquants_path)
+            config_plan = _config_get(payload if isinstance(payload, dict) else {}, ("jquants", "plan"))
+            source = "config/jquants.yaml"
+        except Exception:
+            config_plan = None
+    if config_plan is None:
+        config_plan = _config_get(provider_config, ("jquants", "plan"))
+        source = "config/provider.yaml" if config_plan is not None else source
+    runtime_plan = settings.get("jquants_plan")
+    runtime_source = settings.get("sources", {}).get("jquants_plan")
+    if runtime_source == "cli":
+        raw_plan = runtime_plan
+        source = "cli"
+    else:
+        raw_plan = config_plan or runtime_plan or "free"
+    plan = normalize_jquants_plan(raw_plan)
+    return {
+        "plan": plan,
+        "raw_plan": raw_plan,
+        "source": source,
+        "capabilities": jquants_capability_status(plan),
+    }
+
+
+def _validate_jquants_config(checks: list[dict[str, str]], jquants_validation: dict[str, Any]) -> None:
+    raw_plan = str(jquants_validation.get("raw_plan") or "")
+    plan_ok = raw_plan in {"free", "light"}
+    _validation_check(
+        checks,
+        plan_ok,
+        "jquants.plan",
+        f"jquants.plan is {jquants_validation['plan']}",
+        f"jquants.plan must be free or light: {raw_plan}",
+    )
+    for capability, status in jquants_validation.get("capabilities", {}).items():
+        checks.append({"status": "OK", "name": f"jquants.capability.{capability}", "message": status})
+
+
+def _validate_registry_consistency(checks: list[dict[str, str]], registry: dict[str, Any], profile_id: str | None) -> None:
+    registry_path = ROOT / "config" / "profile_registry.yaml"
+    _validation_check(
+        checks,
+        registry_path.exists(),
+        "profile_registry_exists",
+        "config/profile_registry.yaml exists",
+        "config/profile_registry.yaml is missing",
+    )
     profiles = registry_profiles(registry)
     registered_missing = []
     for registered_id in profiles:
@@ -673,44 +1027,80 @@ def _validate_registry_consistency(checks: list[dict[str, str]], registry: dict[
             ),
         }
     )
-    if profile_id in profiles:
+    if profile_id is None:
+        checks.append({"status": "OK", "name": "profile_registry_target", "message": "all registry profiles selected"})
+    elif profile_id in profiles:
         checks.append({"status": "OK", "name": "profile_registry_target", "message": f"{profile_id} is registered"})
     else:
         checks.append({"status": "WARN", "name": "profile_registry_target", "message": f"{profile_id} is not listed in profile_registry.yaml"})
 
 
-def _validate_plan_capabilities(checks: list[dict[str, str]], profile_id: str, plan: str) -> None:
+def _validate_registry_details(checks: list[dict[str, str]], registry: dict[str, Any]) -> None:
+    result = profile_registry_service.validate_registry(registry)
+    for item in result.get("checks", []):
+        checks.append(
+            {
+                "status": item["status"],
+                "name": f"registry.{item['name']}",
+                "message": item["message"],
+            }
+        )
+
+
+def _validate_plan_capabilities(checks: list[dict[str, str]], profile_id: str, plan: str, registry: dict[str, Any] | None = None) -> None:
     compatibility = jquants_profile_compatibility(profile_id, plan)
+    registry_item = registry_profiles(registry).get(profile_id, {}) if registry else {}
+    required_plan = registry_item.get("required_plan")
+    if required_plan == "light" and plan == "free":
+        checks.append(
+            {
+                "status": "WARN",
+                "name": f"profile.{profile_id}.required_plan",
+                "message": f"{profile_id} requires light but current plan is free",
+            }
+        )
     missing = compatibility.get("missing_capabilities", [])
     fallback = compatibility.get("fallback_applied", [])
     unresolved = compatibility.get("unresolved_missing_capabilities", [])
     if not missing:
-        checks.append({"status": "OK", "name": "jquants_capabilities", "message": "required capabilities are available"})
+        checks.append({"status": "OK", "name": f"profile.{profile_id}.jquants_capabilities", "message": "required capabilities are available"})
     elif unresolved:
-        checks.append({"status": "FAIL", "name": "jquants_capabilities", "message": f"missing capabilities: {', '.join(unresolved)}"})
+        checks.append({"status": "FAIL", "name": f"profile.{profile_id}.jquants_capabilities", "message": f"missing capabilities: {', '.join(unresolved)}"})
     else:
         fallback_text = ", ".join(f"{item['capability']} ({item['policy']})" for item in fallback)
-        checks.append({"status": "WARN", "name": "jquants_capabilities", "message": f"missing capabilities have fallback: {fallback_text}"})
+        checks.append({"status": "WARN", "name": f"profile.{profile_id}.jquants_capabilities", "message": f"missing capabilities have fallback: {fallback_text}"})
 
 
-def _validate_score_config(checks: list[dict[str, str]], config: dict[str, Any]) -> None:
+def _validate_profile_config(checks: list[dict[str, str]], profile_id: str, config: dict[str, Any], plan: str) -> None:
+    prefix = f"profile.{profile_id}"
+    _validation_check(checks, bool(config.get("profile_id")), f"{prefix}.profile_id", "profile_id is set", "profile_id is missing")
+    _validation_check(checks, bool(config.get("profile_name")), f"{prefix}.profile_name", "profile_name is set", "profile_name is missing")
+    _validation_check(checks, isinstance(config.get("scoring", {}), dict), f"{prefix}.scoring", "scoring config is present", "scoring config is missing")
+    selection = config.get("selection", {}) if isinstance(config.get("selection"), dict) else {}
+    has_threshold = any(key in selection for key in ["min_score", "fallback_min_score", "top_pick_min_score"])
+    _validation_check(checks, has_threshold, f"{prefix}.selection_threshold", "selection threshold is set", "selection threshold is missing")
+    _validate_score_config(checks, config, prefix)
+    _validate_profile_feature_consistency(checks, profile_id, config, plan)
+
+
+def _validate_score_config(checks: list[dict[str, str]], config: dict[str, Any], prefix: str = "profile") -> None:
     stale_paths = _stale_score_config_paths(config)
     _validation_check(
         checks,
         not stale_paths,
-        "stale_score_components",
+        f"{prefix}.stale_score_components",
         "news_score, fixed financial_score, and base_score are not configured",
         f"stale score settings found: {', '.join(stale_paths)}",
     )
     theoretical_max = _configured_theoretical_max_score(config)
     min_score = _to_float(_config_get(config, ("selection", "min_score")))
     if min_score is None:
-        checks.append({"status": "WARN", "name": "selection_threshold", "message": "selection.min_score is not set"})
+        checks.append({"status": "WARN", "name": f"{prefix}.selection_threshold_value", "message": "selection.min_score is not set"})
     else:
         _validation_check(
             checks,
             min_score <= theoretical_max,
-            "selection_threshold",
+            f"{prefix}.selection_threshold_value",
             f"selection.min_score {min_score:g} is within theoretical max {theoretical_max:g}",
             f"selection.min_score {min_score:g} exceeds theoretical max {theoretical_max:g}",
         )
@@ -721,10 +1111,50 @@ def _validate_score_config(checks: list[dict[str, str]], config: dict[str, Any])
     _validation_check(
         checks,
         not stale_terms,
-        "score_formula_terms",
+        f"{prefix}.score_formula_terms",
         f"score formula is active-component only: {formula}",
         f"score formula contains inactive terms: {', '.join(stale_terms)}",
     )
+
+
+def _validate_profile_feature_consistency(checks: list[dict[str, str]], profile_id: str, config: dict[str, Any], plan: str) -> None:
+    prefix = f"profile.{profile_id}"
+    features = config.get("features", {}) if isinstance(config.get("features"), dict) else {}
+    scoring = config.get("scoring", {}) if isinstance(config.get("scoring"), dict) else {}
+    _validation_check(
+        checks,
+        not scoring.get("use_relative_strength_score") or bool(features.get("relative_strength")),
+        f"{prefix}.relative_strength_feature",
+        "relative_strength score feature is consistent",
+        "use_relative_strength_score=true but features.relative_strength is not enabled",
+    )
+    _validation_check(
+        checks,
+        not scoring.get("use_investor_context_score") or bool(features.get("investor_context")),
+        f"{prefix}.investor_context_feature",
+        "investor_context score feature is consistent",
+        "use_investor_context_score=true but features.investor_context is not enabled",
+    )
+    _validation_check(
+        checks,
+        not scoring.get("use_financial_score") or bool(features.get("financial_context")),
+        f"{prefix}.financial_context_feature",
+        "financial score feature is consistent",
+        "use_financial_score=true but features.financial_context is not enabled",
+    )
+    earnings_filter = config.get("earnings_filter", {}) if isinstance(config.get("earnings_filter"), dict) else {}
+    if earnings_filter.get("enabled"):
+        if jquants_has_capability(plan, "earnings_calendar"):
+            checks.append({"status": "OK", "name": f"{prefix}.earnings_filter_capability", "message": "earnings_calendar capability is available"})
+        else:
+            checks.append({"status": "FAIL", "name": f"{prefix}.earnings_filter_capability", "message": "earnings_filter requires earnings_calendar capability"})
+    light_features = []
+    if features.get("relative_strength") and not jquants_has_capability(plan, "topix_prices"):
+        light_features.append("relative_strength/topix_prices")
+    if features.get("investor_context") and not jquants_has_capability(plan, "investor_types"):
+        light_features.append("investor_context/investor_types")
+    if light_features:
+        checks.append({"status": "WARN", "name": f"{prefix}.light_features_on_free", "message": f"light-only features need fallback or disable: {', '.join(light_features)}"})
 
 
 def _stale_score_config_paths(config: dict[str, Any]) -> list[str]:
@@ -772,61 +1202,206 @@ def _validate_safety_config(
     provider_config: dict[str, Any],
     schedule: dict[str, Any],
     runtime_settings: dict[str, Any],
+    strict: bool = False,
 ) -> None:
     schedule_policy = schedule.get("execution_policy", {}) if isinstance(schedule.get("execution_policy"), dict) else {}
     schedule_safety = schedule.get("safety", {}) if isinstance(schedule.get("safety"), dict) else {}
     broker_mode = str(runtime_settings.get("broker_mode") or _config_get(provider_config, ("broker", "mode")) or schedule_policy.get("broker") or "paper")
     auto_order_enabled = bool(runtime_settings.get("auto_order_enabled") or _config_get(provider_config, ("operation", "auto_order_enabled")) or schedule_policy.get("auto_order_enabled", False))
+    checks.append({"status": "OK", "name": "safety.broker_mode", "message": f"broker_mode: {broker_mode}"})
+    if broker_mode == "tachibana_live":
+        checks.append(
+            {
+                "status": "FAIL" if strict else "WARN",
+                "name": "safety.live_broker_mode",
+                "message": "broker mode is tachibana_live",
+            }
+        )
+    checks.append(
+        {
+            "status": "OK" if broker_mode in {"paper", "tachibana_demo"} else "WARN",
+            "name": "safety.broker_mode_allowed",
+            "message": f"broker mode {broker_mode}",
+        }
+    )
+    checks.append(
+        {
+            "status": "OK" if not auto_order_enabled else "WARN",
+            "name": "safety.auto_order_enabled",
+            "message": f"auto_order_enabled: {str(auto_order_enabled).lower()}",
+        }
+    )
     live_auto_order = broker_mode == "tachibana_live" and auto_order_enabled
-    _validation_check(checks, not live_auto_order, "live_auto_order", "live auto order is disabled", "live auto order is enabled")
+    _validation_check(checks, not live_auto_order, "safety.live_auto_order", "live auto order is disabled", "live auto order is enabled")
     require_manual = bool(schedule_safety.get("require_manual_approval", False))
     forbid_live = bool(schedule_safety.get("forbid_live_auto_order", schedule_policy.get("forbid_live_auto_order", False)))
-    _validation_check(checks, require_manual, "require_manual_approval", "manual approval is required", "require_manual_approval is false")
-    _validation_check(checks, forbid_live, "forbid_live_auto_order", "live auto order is forbidden", "forbid_live_auto_order is false")
+    _validation_check(checks, require_manual, "safety.require_manual_approval", "manual approval is required", "require_manual_approval is false")
+    _validation_check(checks, forbid_live, "safety.forbid_live_auto_order", "live auto order is forbidden", "forbid_live_auto_order is false")
 
 
-def run_clean_command(mode: str, profile_id: str, provider_name: str, yes: bool = False) -> None:
-    targets = build_clean_targets(mode, profile_id, provider_name)
-    result = execute_clean_targets(targets, yes=yes)
-    print(f"{mode}: {'delete' if yes else 'dry-run'}")
-    for target in targets:
-        print(f"- {target.relative_to(ROOT) if _is_relative_to(target, ROOT) else target}")
-    print(f"target_count: {len(targets)}")
+def run_clean_command(
+    mode: str,
+    profile_id: str | None = None,
+    provider_name: str | None = None,
+    yes: bool = False,
+    older_than_days: int | None = None,
+    include_latest: bool = False,
+    cache_kind: str = "all",
+    verbose: bool = False,
+) -> None:
+    plan = build_clean_plan(mode, profile_id, provider_name, older_than_days, include_latest, cache_kind)
+    result = execute_clean_targets([Path(item["path"]) for item in plan["targets"]], yes=yes)
+    title = _clean_title(mode, yes)
+    print(title)
+    print(f"- target_profile: {profile_id or 'all'}")
+    print(f"- files: {plan['file_count']}")
+    print(f"- total_size: {_format_bytes(plan['total_size'])}")
+    print(f"- latest_kept: {plan['latest_kept']}")
+    if plan.get("oldest_mtime"):
+        print(f"- oldest: {plan['oldest_mtime']}")
+        print(f"- newest: {plan['newest_mtime']}")
+    if verbose:
+        for item in plan["targets"]:
+            print(f"- {item['relative_path']} ({_format_bytes(item['size'])})")
+    if not yes:
+        print("- use --yes to delete")
     print(f"deleted_count: {result['deleted_count']}")
 
 
-def build_clean_targets(mode: str, profile_id: str | None = None, provider_name: str | None = None) -> list[Path]:
+def _clean_title(mode: str, yes: bool) -> str:
+    names = {
+        "clean-reports": "Clean Reports",
+        "clean-cache": "Clean Cache",
+        "clean-experiments": "Clean Experiments",
+        "clean-articles": "Clean Articles",
+    }
+    return f"{names.get(mode, mode)} {'Delete' if yes else 'Dry Run'}"
+
+
+def build_clean_plan(
+    mode: str,
+    profile_id: str | None = None,
+    provider_name: str | None = None,
+    older_than_days: int | None = None,
+    include_latest: bool = False,
+    cache_kind: str = "all",
+) -> dict[str, Any]:
+    roots = _clean_roots(mode, profile_id, provider_name, cache_kind)
+    cutoff = (datetime.now() - timedelta(days=older_than_days)).timestamp() if older_than_days is not None else None
+    targets = []
+    latest_kept = 0
+    skipped_symlink = 0
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if path.is_symlink():
+                skipped_symlink += 1
+                continue
+            if not path.is_file():
+                continue
+            if not _clean_path_allowed(path, mode):
+                continue
+            if not include_latest and _is_latest_file(path):
+                latest_kept += 1
+                continue
+            stat = path.stat()
+            if cutoff is not None and stat.st_mtime >= cutoff:
+                continue
+            if mode == "clean-articles" and profile_id and profile_id not in path.parts and profile_id not in path.name:
+                continue
+            targets.append(
+                {
+                    "path": str(path),
+                    "relative_path": str(path.relative_to(ROOT)) if _is_relative_to(path, ROOT) else str(path),
+                    "size": stat.st_size,
+                    "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                }
+            )
+    mtimes = [item["mtime"] for item in targets]
+    return {
+        "mode": mode,
+        "dry_run": True,
+        "targets": sorted(targets, key=lambda item: item["relative_path"]),
+        "file_count": len(targets),
+        "total_size": sum(int(item["size"]) for item in targets),
+        "latest_kept": latest_kept,
+        "skipped_symlink": skipped_symlink,
+        "oldest_mtime": min(mtimes) if mtimes else None,
+        "newest_mtime": max(mtimes) if mtimes else None,
+    }
+
+
+def _clean_roots(mode: str, profile_id: str | None = None, provider_name: str | None = None, cache_kind: str = "all") -> list[Path]:
     if mode == "clean-reports":
-        if not profile_id:
-            raise SystemExit("--profile PROFILE is required for clean-reports")
-        candidates = [
-            ROOT / "reports" / profile_id,
-            ROOT / "reports" / "backtests" / profile_id,
-            ROOT / "reports" / "paper" / profile_id,
-        ]
-    elif mode == "clean-experiments":
-        candidates = [
-            ROOT / "reports" / "experiments",
-            ROOT / "reports" / "profile_comparisons",
-        ]
-    elif mode == "clean-cache":
+        if profile_id:
+            return [ROOT / "reports" / profile_id]
+        reports = ROOT / "reports"
+        roots = [reports / "profile_comparisons"]
+        if reports.exists():
+            roots.extend(
+                path
+                for path in reports.iterdir()
+                if path.is_dir() and path.name not in {"articles", "experiments", "profile_comparisons"}
+            )
+        return roots
+    if mode == "clean-experiments":
+        return [ROOT / "reports" / "experiments"]
+    if mode == "clean-articles":
+        return [ROOT / "reports" / "articles"]
+    if mode == "clean-cache":
         provider = provider_name or "jquants"
-        candidates = [ROOT / "data" / "cache" / provider]
-    else:
-        raise SystemExit(f"Unsupported clean mode: {mode}")
-    return [path for path in candidates if path.exists()]
+        base = ROOT / "data" / "cache" / provider
+        if provider != "jquants":
+            return []
+        if cache_kind and cache_kind != "all":
+            return [base / cache_kind]
+        return [base]
+    raise SystemExit(f"Unsupported clean mode: {mode}")
+
+
+def build_clean_targets(mode: str, profile_id: str | None = None, provider_name: str | None = None) -> list[Path]:
+    return [Path(item["path"]) for item in build_clean_plan(mode, profile_id, provider_name)["targets"]]
 
 
 def execute_clean_targets(targets: list[Path], yes: bool = False) -> dict[str, Any]:
     deleted = []
     if yes:
         for target in targets:
-            if target.is_dir():
-                shutil.rmtree(target)
-            else:
-                target.unlink()
+            if target.is_symlink() or not target.is_file() or not _clean_path_allowed_for_any_mode(target):
+                continue
+            target.unlink()
             deleted.append(str(target))
     return {"dry_run": not yes, "target_count": len(targets), "deleted_count": len(deleted), "deleted": deleted}
+
+
+def _clean_path_allowed(path: Path, mode: str) -> bool:
+    allowed = {
+        "clean-reports": [ROOT / "reports"],
+        "clean-experiments": [ROOT / "reports" / "experiments"],
+        "clean-articles": [ROOT / "reports" / "articles"],
+        "clean-cache": [ROOT / "data" / "cache" / "jquants"],
+    }
+    return any(_is_relative_to(path.resolve(), root.resolve()) for root in allowed.get(mode, []))
+
+
+def _clean_path_allowed_for_any_mode(path: Path) -> bool:
+    return any(
+        _clean_path_allowed(path, mode)
+        for mode in ["clean-reports", "clean-experiments", "clean-articles", "clean-cache"]
+    )
+
+
+def _is_latest_file(path: Path) -> bool:
+    return "latest" in path.name.lower()
+
+
+def _format_bytes(size: int) -> str:
+    value = float(size)
+    for unit in ["B", "KB", "MB", "GB"]:
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f}{unit}" if unit != "B" else f"{int(value)}B"
+        value /= 1024
 
 
 def _is_relative_to(path: Path, base: Path) -> bool:
@@ -1111,7 +1686,7 @@ def run_analyze(config: dict[str, Any], start_date: str | None = None, end_date:
     print(f"selection_quality_json: {selection_quality_json_path.relative_to(ROOT)}")
 
 
-def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_text: str) -> None:
+def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_text: str) -> tuple[Path, Path]:
     profiles = [load_profile(profile_id) for profile_id in profile_ids]
     db_path = get_database_path(profiles[0], ROOT)
     if not db_path.exists():
@@ -1160,23 +1735,18 @@ def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_
             print("No practical effect")
     print(f"markdown: {markdown_path.relative_to(ROOT)}")
     print(f"json: {json_path.relative_to(ROOT)}")
+    return markdown_path, json_path
 
 
 PROFILE_REGISTRY_PATH = ROOT / "config" / "profile_registry.yaml"
 
 
 def load_profile_registry(path: Path = PROFILE_REGISTRY_PATH) -> dict[str, Any]:
-    if not path.exists():
-        raise FileNotFoundError(f"Profile registry not found: {path}")
-    return load_versioned_config(path)
+    return profile_registry_service.load_profile_registry(path)
 
 
 def registry_profiles(registry: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
-    payload = registry or load_profile_registry()
-    profiles = payload.get("profiles", {})
-    if not isinstance(profiles, dict):
-        raise ValueError("profile_registry.yaml must contain a profiles mapping")
-    return {str(profile_id): dict(value or {}) for profile_id, value in profiles.items()}
+    return profile_registry_service.registry_profiles(registry)
 
 
 def registry_profile_ids(registry: dict[str, Any] | None = None) -> list[str]:
@@ -1184,87 +1754,51 @@ def registry_profile_ids(registry: dict[str, Any] | None = None) -> list[str]:
 
 
 def registry_experiment_profile_ids(base_profile_id: str, registry: dict[str, Any] | None = None) -> list[str]:
-    profiles = registry_profiles(registry)
-    return [
-        profile_id
-        for profile_id, item in sorted(profiles.items())
-        if item.get("role") == "experiment" and str(item.get("compare_to") or base_profile_id) == base_profile_id
-    ]
+    return profile_registry_service.get_experiments(base_profile_id, registry)
 
 
 def run_list_profiles() -> None:
     rows = build_profile_registry_rows(load_profile_registry())
-    print("profile_id | role | required_plan | enabled_features | description")
+    print("profile_id | role | required_plan | enabled_features | compare_to | description")
     for row in rows:
         print(
             f"{row['profile_id']} | {row['role']} | {row['required_plan']} | "
-            f"{row['enabled_features'] or '-'} | {row['description']}"
+            f"{row['enabled_features'] or '-'} | {row['compare_to'] or '-'} | {row['description']}"
         )
 
 
 def build_profile_registry_rows(registry: dict[str, Any]) -> list[dict[str, Any]]:
-    rows = []
-    for profile_id, item in registry_profiles(registry).items():
-        features = item.get("features", {}) if isinstance(item.get("features"), dict) else {}
-        enabled_features = [feature for feature, enabled in features.items() if bool(enabled)]
-        rows.append(
-            {
-                "profile_id": profile_id,
-                "role": item.get("role", ""),
-                "required_plan": item.get("required_plan", ""),
-                "enabled_features": ", ".join(enabled_features),
-                "description": item.get("description", ""),
-            }
-        )
-    return sorted(rows, key=lambda row: row["profile_id"])
+    return [
+        {
+            **row,
+            "enabled_features": ", ".join(row.get("enabled_features") or []),
+        }
+        for row in profile_registry_service.list_profiles(registry, include_deprecated=True)
+    ]
 
 
 def run_profile_info(profile_id: str) -> None:
     info = build_profile_info(profile_id, load_profile_registry())
     print(f"profile_id: {info['profile_id']}")
     print(f"role: {info['role']}")
-    print(f"description: {info['description']}")
     print(f"required_plan: {info['required_plan']}")
+    print(f"compare_to: {info['compare_to'] or '-'}")
+    print(f"description: {info['description']}")
+    print(f"enabled features: {', '.join(info['enabled_features']) or 'none'}")
+    print(f"profile yaml path: {info['profile_yaml_path']}")
     print(f"score formula: {info['score_formula']}")
     print(f"required capabilities: {', '.join(info['required_capabilities']) or 'none'}")
-    print(f"enabled features: {', '.join(info['enabled_features']) or 'none'}")
-    print(f"enabled filters: {', '.join(info['enabled_filters']) or 'none'}")
+    print(f"recommended backtest command: {info['recommended_backtest_command']}")
     print(f"recommended compare command: {info['recommended_compare_command']}")
 
 
 def build_profile_info(profile_id: str, registry: dict[str, Any]) -> dict[str, Any]:
-    profiles = registry_profiles(registry)
-    if profile_id not in profiles:
+    try:
+        return profile_registry_service.get_profile_info(profile_id, registry)
+    except KeyError as exc:
         raise SystemExit(f"Profile not found in registry: {profile_id}")
-    item = profiles[profile_id]
-    config = load_profile(profile_id)
-    features = item.get("features", {}) if isinstance(item.get("features"), dict) else {}
-    enabled_features = [feature for feature, enabled in features.items() if bool(enabled)]
-    enabled_filters = []
-    if config.get("volume_filter", {}).get("enabled"):
-        enabled_filters.append("volume_filter")
-    if config.get("earnings_filter", {}).get("enabled"):
-        enabled_filters.append("earnings_filter")
-    if config.get("market_filter", {}).get("enabled", True):
-        enabled_filters.append("market_filter")
-    compare_to = item.get("compare_to") or ""
-    command = (
-        f"python src/main.py --mode compare-profiles --profiles {compare_to} {profile_id} "
-        "--start-date YYYY-MM-DD --end-date YYYY-MM-DD"
-        if compare_to
-        else "N/A"
-    )
-    return {
-        "profile_id": profile_id,
-        "role": item.get("role", ""),
-        "description": item.get("description", ""),
-        "required_plan": item.get("required_plan", ""),
-        "score_formula": config.get("scoring", {}).get("total_score_formula", "technical_score + market_context_score + penalty_score"),
-        "required_capabilities": sorted(jquants_profile_compatibility(profile_id, item.get("required_plan", "free"))["profile_required_capabilities"]),
-        "enabled_features": enabled_features,
-        "enabled_filters": enabled_filters,
-        "recommended_compare_command": command,
-    }
+    except FileNotFoundError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def run_compare_experiments(base_profile_id: str | None, start_date_text: str | None = None, end_date_text: str | None = None) -> None:
@@ -1290,29 +1824,112 @@ def run_experiments(
     end_date_text: str,
     requested_profiles: list[str] | None = None,
     skip_backtest: bool = False,
+    skip_analyze: bool = False,
 ) -> None:
     global ACTIVE_PROFILE_ID
     registry = load_profile_registry()
     base = base_profile_id or _registry_baseline_profile_id(registry)
     experiment_ids = select_experiment_profiles(base, registry, requested_profiles)
-    profile_ids = [base, *experiment_ids]
+    capability = resolve_experiment_capabilities(experiment_ids, _runtime_settings_or_defaults().get("jquants_plan", "free"))
+    runnable_experiment_ids = [item["profile_id"] for item in capability["runnable"]]
+    skipped_profiles = capability["skipped"]
+    profile_ids = [base, *runnable_experiment_ids]
+    if skip_backtest:
+        _ensure_experiment_db_rows(profile_ids, start_date_text, end_date_text)
+    if skip_backtest and skip_analyze:
+        _ensure_experiment_analysis_outputs(profile_ids)
     previous_profile = ACTIVE_PROFILE_ID
+    compare_paths: tuple[Path, Path] | None = None
     try:
         if not skip_backtest:
             for profile_id in profile_ids:
                 ACTIVE_PROFILE_ID = profile_id
                 print(f"run-experiments backtest start: {profile_id}")
                 run_backtest("jquants", start_date_text, end_date_text)
+                if not skip_analyze:
+                    print(f"run-experiments analyze start: {profile_id}")
+                    run_analyze(load_config(CONFIG_PATH), start_date_text, end_date_text)
+        elif not skip_analyze:
+            for profile_id in profile_ids:
+                ACTIVE_PROFILE_ID = profile_id
                 print(f"run-experiments analyze start: {profile_id}")
                 run_analyze(load_config(CONFIG_PATH), start_date_text, end_date_text)
         try:
-            run_compare_profiles(profile_ids, start_date_text, end_date_text)
+            compare_paths = run_compare_profiles(profile_ids, start_date_text, end_date_text)
         except SystemExit as exc:
             print(f"run-experiments compare warning: {exc}")
-        summary = build_experiment_batch_summary(base, experiment_ids, registry, start_date_text, end_date_text)
-        write_experiment_batch_outputs(summary, start_date_text, end_date_text)
+        summary = build_experiment_batch_summary(
+            base,
+            runnable_experiment_ids,
+            registry,
+            start_date_text,
+            end_date_text,
+            skipped_profiles=skipped_profiles,
+            capability_warnings=capability["warnings"],
+        )
+        write_experiment_batch_outputs(summary, start_date_text, end_date_text, base, compare_paths)
     finally:
         ACTIVE_PROFILE_ID = previous_profile
+
+
+def resolve_experiment_capabilities(experiment_ids: list[str], current_plan: str) -> dict[str, Any]:
+    runnable = []
+    skipped = []
+    warnings = []
+    for profile_id in experiment_ids:
+        compatibility = jquants_profile_compatibility(profile_id, current_plan)
+        unresolved = compatibility.get("unresolved_missing_capabilities", [])
+        fallback = compatibility.get("fallback_applied", [])
+        if unresolved:
+            skipped.append(
+                {
+                    "profile_id": profile_id,
+                    "status": "skipped",
+                    "skip_reason": f"missing capabilities: {', '.join(unresolved)}",
+                    "required_plan": registry_profiles().get(profile_id, {}).get("required_plan", ""),
+                }
+            )
+            continue
+        if fallback:
+            warnings.append(
+                {
+                    "profile_id": profile_id,
+                    "warning": "; ".join(f"{item['capability']}: {item['policy']}" for item in fallback),
+                }
+            )
+        runnable.append({"profile_id": profile_id, "compatibility": compatibility})
+    return {"runnable": runnable, "skipped": skipped, "warnings": warnings}
+
+
+def _ensure_experiment_db_rows(profile_ids: list[str], start_date_text: str, end_date_text: str) -> None:
+    db_path = get_database_path(load_profile(profile_ids[0]), ROOT)
+    if not db_path.exists():
+        raise SystemExit(f"--skip-backtest requires existing SQLite DB: {db_path}")
+    missing = []
+    with sqlite3.connect(db_path) as connection:
+        for profile_id in profile_ids:
+            count = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM portfolio_snapshots
+                WHERE profile_id = ? AND date BETWEEN ? AND ?
+                """,
+                (profile_id, start_date_text, end_date_text),
+            ).fetchone()[0]
+            if not count:
+                missing.append(profile_id)
+    if missing:
+        raise SystemExit(f"--skip-backtest requires existing backtest rows for: {', '.join(missing)}")
+
+
+def _ensure_experiment_analysis_outputs(profile_ids: list[str]) -> None:
+    missing = []
+    for profile_id in profile_ids:
+        path = ROOT / "reports" / profile_id / "backtests" / "analysis_latest.json"
+        if not path.exists():
+            missing.append(str(path.relative_to(ROOT)))
+    if missing:
+        raise SystemExit(f"--skip-analyze requires existing analysis outputs: {', '.join(missing)}")
 
 
 def select_experiment_profiles(
@@ -1336,6 +1953,8 @@ def build_experiment_batch_summary(
     registry: dict[str, Any],
     start_date_text: str,
     end_date_text: str,
+    skipped_profiles: list[dict[str, Any]] | None = None,
+    capability_warnings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     profiles = registry_profiles(registry)
     db_path = get_database_path(load_profile(base_profile_id), ROOT)
@@ -1354,6 +1973,7 @@ def build_experiment_batch_summary(
         experiment_rows.append(
             {
                 "profile_id": profile_id,
+                "role": registry_item.get("role", ""),
                 "description": registry_item.get("description", ""),
                 "required_plan": registry_item.get("required_plan", ""),
                 "enabled_features": _enabled_registry_features(registry_item),
@@ -1370,7 +1990,26 @@ def build_experiment_batch_summary(
                 "no_practical_effect": "no" if practical_effect else "yes",
                 "judgement": judgement["judgement"],
                 "judgement_reasons": judgement["reasons"],
+                "verdict": judgement["judgement"],
+                "verdict_reason": "; ".join(judgement["reasons"]),
                 "candidate": "yes" if judgement["judgement"] == "candidate" else "no",
+            }
+        )
+    for skipped in skipped_profiles or []:
+        item = profiles.get(skipped["profile_id"], {})
+        experiment_rows.append(
+            {
+                "profile_id": skipped["profile_id"],
+                "role": item.get("role", "experiment"),
+                "description": item.get("description", ""),
+                "required_plan": item.get("required_plan", skipped.get("required_plan", "")),
+                "enabled_features": _enabled_registry_features(item),
+                "status": "skipped",
+                "skip_reason": skipped.get("skip_reason", ""),
+                "verdict": "skipped",
+                "verdict_reason": skipped.get("skip_reason", ""),
+                "practical_effect": "no",
+                "candidate": "no",
             }
         )
     return {
@@ -1382,10 +2021,13 @@ def build_experiment_batch_summary(
             "profile_id": base_profile_id,
             "description": profiles.get(base_profile_id, {}).get("description", ""),
             "required_plan": profiles.get(base_profile_id, {}).get("required_plan", ""),
+            "role": profiles.get(base_profile_id, {}).get("role", ""),
             "enabled_features": _enabled_registry_features(profiles.get(base_profile_id, {})),
             **base_row,
         },
         "experiments": experiment_rows,
+        "skipped_profiles": skipped_profiles or [],
+        "capability_warnings": capability_warnings or [],
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
 
@@ -1424,8 +2066,17 @@ def _experiment_judgement(base_row: dict[str, Any], row: dict[str, Any], diff: d
     reasons: list[str] = []
     if None in {base_profit, target_profit, base_pf, target_pf, base_dd, target_dd, base_trades, target_trades}:
         return {"judgement": "needs_review", "reasons": ["missing_metrics"]}
-    if diff is not None and not (diff.get("newly_selected_count") or diff.get("removed_count")):
+    no_practical_diff = diff is not None and not (diff.get("newly_selected_count") or diff.get("removed_count"))
+    metrics_identical = (
+        target_profit == base_profit
+        and target_pf == base_pf
+        and target_dd == base_dd
+        and target_trades == base_trades
+    )
+    if no_practical_diff:
         reasons.append("no_practical_effect")
+    if no_practical_diff and metrics_identical:
+        return {"judgement": "no_practical_effect", "reasons": reasons}
     trade_count_ok = target_trades >= base_trades * 0.5
     if not trade_count_ok:
         reasons.append("trade_count_below_50_percent")
@@ -1449,14 +2100,26 @@ def _experiment_judgement(base_row: dict[str, Any], row: dict[str, Any], diff: d
     return {"judgement": "rejected", "reasons": reasons}
 
 
-def write_experiment_batch_outputs(summary: dict[str, Any], start_date_text: str, end_date_text: str) -> tuple[Path, Path]:
-    output_dir = ROOT / "reports" / "experiments" / f"{start_date_text}_to_{end_date_text}"
+def write_experiment_batch_outputs(
+    summary: dict[str, Any],
+    start_date_text: str,
+    end_date_text: str,
+    base_profile_id: str | None = None,
+    compare_paths: tuple[Path, Path] | None = None,
+) -> tuple[Path, Path]:
+    output_dir = experiment_batch_output_dir(start_date_text, end_date_text, base_profile_id or str(summary.get("base_profile") or "base"))
     profiles_dir = output_dir / "profiles"
     profiles_dir.mkdir(parents=True, exist_ok=True)
     markdown_path = output_dir / "experiment_summary.md"
     json_path = output_dir / "experiment_summary.json"
     write_text(markdown_path, render_experiment_batch_markdown(summary))
     write_json(json_path, summary)
+    if compare_paths:
+        compare_markdown, compare_json = compare_paths
+        if compare_markdown.exists():
+            shutil.copyfile(compare_markdown, output_dir / "compare_profiles.md")
+        if compare_json.exists():
+            shutil.copyfile(compare_json, output_dir / "compare_profiles.json")
     for row in [summary.get("base", {}), *summary.get("experiments", [])]:
         profile_id = row.get("profile_id")
         if profile_id:
@@ -1467,6 +2130,10 @@ def write_experiment_batch_outputs(summary: dict[str, Any], start_date_text: str
     return markdown_path, json_path
 
 
+def experiment_batch_output_dir(start_date_text: str, end_date_text: str, base_profile_id: str) -> Path:
+    return ROOT / "reports" / "experiments" / f"{start_date_text}_to_{end_date_text}" / base_profile_id
+
+
 def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
     lines = [
         "# Experiment Batch Summary",
@@ -1474,12 +2141,20 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
         f"- base_profile: {summary.get('base_profile')}",
         f"- period: {summary.get('start_date')} to {summary.get('end_date')}",
         f"- generated_at: {summary.get('generated_at')}",
-        "",
-        "## Results",
-        "",
-        "| profile_id | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | practical_effect | judgement | candidate |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
+    if summary.get("capability_warnings"):
+        lines.extend(["", "## Capability Warnings", ""])
+        for warning in summary.get("capability_warnings", []):
+            lines.append(f"- {warning.get('profile_id')}: {warning.get('warning')}")
+    lines.extend(
+        [
+            "",
+            "## Results",
+            "",
+            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | practical_effect | verdict | verdict_reason |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
     for row in summary.get("experiments", []):
         lines.append(_experiment_summary_table_row(row))
     return "\n".join(lines)
@@ -1488,12 +2163,12 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
 def _experiment_summary_table_row(row: dict[str, Any]) -> str:
     enabled = ", ".join(row.get("enabled_features") or []) or "-"
     return (
-        f"| {row.get('profile_id')} | {row.get('description', '')} | {row.get('required_plan', '')} | {enabled} | "
+        f"| {row.get('profile_id')} | {row.get('role', '')} | {row.get('description', '')} | {row.get('required_plan', '')} | {enabled} | "
         f"{_format_optional_number(row.get('final_assets'))} | {_format_optional_number(row.get('net_cumulative_profit'))} | "
         f"{_format_optional_percent(row.get('win_rate'))} | {_format_optional_number(row.get('profit_factor'))} | "
         f"{_format_optional_percent(row.get('expectancy'))} | {_format_optional_percent(row.get('max_drawdown'))} | "
         f"{row.get('total_trades')} | {row.get('newly_selected_count')} | {row.get('removed_count')} | "
-        f"{row.get('practical_effect')} | {row.get('judgement', '-')} | {row.get('candidate')} |"
+        f"{row.get('practical_effect')} | {row.get('verdict', row.get('judgement', '-'))} | {row.get('verdict_reason', '-')} |"
     )
 
 
@@ -1502,9 +2177,12 @@ def render_experiment_profile_markdown(row: dict[str, Any]) -> str:
         [
             f"# {row.get('profile_id')}",
             "",
+            f"- role: {row.get('role', '')}",
             f"- description: {row.get('description', '')}",
             f"- required_plan: {row.get('required_plan', '')}",
             f"- enabled_features: {', '.join(row.get('enabled_features') or []) or '-'}",
+            f"- status: {row.get('status', 'completed')}",
+            f"- skip_reason: {row.get('skip_reason', '-')}",
             f"- final_assets: {_format_optional_number(row.get('final_assets'))}",
             f"- net_cumulative_profit: {_format_optional_number(row.get('net_cumulative_profit'))}",
             f"- win_rate: {_format_optional_percent(row.get('win_rate'))}",
@@ -1515,8 +2193,8 @@ def render_experiment_profile_markdown(row: dict[str, Any]) -> str:
             f"- newly_selected_count: {row.get('newly_selected_count', 0)}",
             f"- removed_count: {row.get('removed_count', 0)}",
             f"- practical_effect: {row.get('practical_effect', 'no')}",
-            f"- judgement: {row.get('judgement', '-')}",
-            f"- judgement_reasons: {', '.join(row.get('judgement_reasons') or []) or '-'}",
+            f"- verdict: {row.get('verdict', row.get('judgement', '-'))}",
+            f"- verdict_reason: {row.get('verdict_reason', ', '.join(row.get('judgement_reasons') or []) or '-')}",
             f"- candidate: {row.get('candidate', 'no')}",
         ]
     )
