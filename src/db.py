@@ -104,6 +104,10 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
                 relative_strength_score REAL,
                 topix_records_loaded REAL,
                 topix_api_calls REAL,
+                earnings_calendar_records_count REAL,
+                earnings_info_found INTEGER,
+                earnings_candidate_date TEXT,
+                earnings_days_until_earnings REAL,
                 investor_context_source TEXT,
                 investor_context_week TEXT,
                 overseas_net_buy REAL,
@@ -246,6 +250,23 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
                 earnings_filter_blocked INTEGER,
                 earnings_filter_reason TEXT,
                 earnings_announcement_date TEXT,
+                earnings_calendar_records_count REAL,
+                earnings_info_found INTEGER,
+                earnings_candidate_date TEXT,
+                earnings_days_until_earnings REAL,
+                earnings_pipeline_feature_enabled INTEGER,
+                earnings_pipeline_fetch_start TEXT,
+                earnings_pipeline_fetch_end TEXT,
+                earnings_pipeline_cache_path TEXT,
+                earnings_pipeline_cache_exists INTEGER,
+                earnings_pipeline_cache_records REAL,
+                earnings_pipeline_cache_loaded INTEGER,
+                earnings_pipeline_index_built INTEGER,
+                earnings_pipeline_candidate_matching_called INTEGER,
+                earnings_pipeline_records_loaded REAL,
+                earnings_pipeline_matched_candidates REAL,
+                earnings_pipeline_rejected_candidates REAL,
+                earnings_pipeline_reason TEXT,
                 source_provider TEXT,
                 config_version TEXT,
                 created_at TEXT NOT NULL
@@ -489,6 +510,10 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
         _add_column_if_missing(connection, "trades", "earnings_filter_blocked", "INTEGER")
         _add_column_if_missing(connection, "trades", "earnings_filter_reason", "TEXT")
         _add_column_if_missing(connection, "trades", "earnings_announcement_date", "TEXT")
+        _add_column_if_missing(connection, "trades", "earnings_calendar_records_count", "REAL")
+        _add_column_if_missing(connection, "trades", "earnings_info_found", "INTEGER")
+        _add_column_if_missing(connection, "trades", "earnings_candidate_date", "TEXT")
+        _add_column_if_missing(connection, "trades", "earnings_days_until_earnings", "REAL")
         _add_column_if_missing(connection, "trades", "selected_reason", "TEXT")
         _add_column_if_missing(connection, "trades", "broker_provider", "TEXT")
         _add_column_if_missing(connection, "trades", "order_status", "TEXT")
@@ -551,6 +576,23 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
         _add_column_if_missing(connection, "scoring_results", "earnings_filter_blocked", "INTEGER")
         _add_column_if_missing(connection, "scoring_results", "earnings_filter_reason", "TEXT")
         _add_column_if_missing(connection, "scoring_results", "earnings_announcement_date", "TEXT")
+        _add_column_if_missing(connection, "scoring_results", "earnings_calendar_records_count", "REAL")
+        _add_column_if_missing(connection, "scoring_results", "earnings_info_found", "INTEGER")
+        _add_column_if_missing(connection, "scoring_results", "earnings_candidate_date", "TEXT")
+        _add_column_if_missing(connection, "scoring_results", "earnings_days_until_earnings", "REAL")
+        _add_column_if_missing(connection, "scoring_results", "earnings_pipeline_feature_enabled", "INTEGER")
+        _add_column_if_missing(connection, "scoring_results", "earnings_pipeline_fetch_start", "TEXT")
+        _add_column_if_missing(connection, "scoring_results", "earnings_pipeline_fetch_end", "TEXT")
+        _add_column_if_missing(connection, "scoring_results", "earnings_pipeline_cache_path", "TEXT")
+        _add_column_if_missing(connection, "scoring_results", "earnings_pipeline_cache_exists", "INTEGER")
+        _add_column_if_missing(connection, "scoring_results", "earnings_pipeline_cache_records", "REAL")
+        _add_column_if_missing(connection, "scoring_results", "earnings_pipeline_cache_loaded", "INTEGER")
+        _add_column_if_missing(connection, "scoring_results", "earnings_pipeline_index_built", "INTEGER")
+        _add_column_if_missing(connection, "scoring_results", "earnings_pipeline_candidate_matching_called", "INTEGER")
+        _add_column_if_missing(connection, "scoring_results", "earnings_pipeline_records_loaded", "REAL")
+        _add_column_if_missing(connection, "scoring_results", "earnings_pipeline_matched_candidates", "REAL")
+        _add_column_if_missing(connection, "scoring_results", "earnings_pipeline_rejected_candidates", "REAL")
+        _add_column_if_missing(connection, "scoring_results", "earnings_pipeline_reason", "TEXT")
         _add_column_if_missing(connection, "scoring_results", "market_filter_applied", "INTEGER")
         _add_column_if_missing(connection, "scoring_results", "market_regime", "TEXT")
         _add_column_if_missing(connection, "scoring_results", "market_filter_reason", "TEXT")
@@ -633,7 +675,7 @@ def save_pending_orders(config: dict[str, Any], root: Path, pending_orders: list
                 order_id, action, code, name, created_date,
                 scheduled_execution_date, intended_price, status, score,
                 reason, config_version, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -807,6 +849,10 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                     1 if trade.get("earnings_filter_blocked") else 0,
                     trade.get("earnings_filter_reason"),
                     trade.get("earnings_announcement_date"),
+                    trade.get("earnings_calendar_records_count"),
+                    1 if trade.get("earnings_info_found") else 0,
+                    trade.get("earnings_candidate_date"),
+                    trade.get("earnings_days_until_earnings"),
                     trade.get("selected_reason") or trade.get("reason") or trade.get("buy_reason"),
                     trade.get("reason") or trade.get("buy_reason"),
                     trade.get("round_lot_size"),
@@ -863,6 +909,7 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                 advance_ratio, candlestick_signals,
                 earnings_filter_checked, earnings_filter_blocked,
                 earnings_filter_reason, earnings_announcement_date,
+                earnings_calendar_records_count, earnings_info_found, earnings_candidate_date, earnings_days_until_earnings,
                 selected_reason, reason, round_lot_size,
                 use_round_lot, skipped_reason, intended_price, executed_price,
                 slippage_amount, slippage_rate, stop_loss_rate,
@@ -873,7 +920,7 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                 estimated_tax, net_profit, net_profit_rate, dealer_comment,
                 broker_provider, order_status, live_trading, safety_checked,
                 config_version, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -915,9 +962,16 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
                 penalty_score, score_components, score_components_total,
                 score_components_match, market_filter_applied, market_regime, market_filter_reason,
                 earnings_filter_checked, earnings_filter_blocked, earnings_filter_reason, earnings_announcement_date,
+                earnings_calendar_records_count, earnings_info_found, earnings_candidate_date, earnings_days_until_earnings,
+                earnings_pipeline_feature_enabled, earnings_pipeline_fetch_start, earnings_pipeline_fetch_end,
+                earnings_pipeline_cache_path, earnings_pipeline_cache_exists,
+                earnings_pipeline_cache_records, earnings_pipeline_cache_loaded, earnings_pipeline_index_built,
+                earnings_pipeline_candidate_matching_called,
+                earnings_pipeline_records_loaded, earnings_pipeline_matched_candidates, earnings_pipeline_rejected_candidates,
+                earnings_pipeline_reason,
                 source_provider, ai_reason, ai_risk, ai_confidence,
                 ai_score, config_version, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -1001,6 +1055,23 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
                     1 if item.get("earnings_filter_blocked") else 0,
                     item.get("earnings_filter_reason"),
                     item.get("earnings_announcement_date"),
+                    item.get("earnings_calendar_records_count"),
+                    1 if item.get("earnings_info_found") else 0,
+                    item.get("earnings_candidate_date"),
+                    item.get("earnings_days_until_earnings"),
+                    1 if item.get("earnings_pipeline_feature_enabled") else 0,
+                    item.get("earnings_pipeline_fetch_start"),
+                    item.get("earnings_pipeline_fetch_end"),
+                    item.get("earnings_pipeline_cache_path"),
+                    1 if item.get("earnings_pipeline_cache_exists") else 0,
+                    item.get("earnings_pipeline_cache_records"),
+                    1 if item.get("earnings_pipeline_cache_loaded") else 0,
+                    1 if item.get("earnings_pipeline_index_built") else 0,
+                    1 if item.get("earnings_pipeline_candidate_matching_called") else 0,
+                    item.get("earnings_pipeline_records_loaded"),
+                    item.get("earnings_pipeline_matched_candidates"),
+                    item.get("earnings_pipeline_rejected_candidates"),
+                    item.get("earnings_pipeline_reason"),
                     item.get("source_provider") or scoring_log.get("source_provider"),
                     item.get("ai_reason"),
                     item.get("ai_risk"),

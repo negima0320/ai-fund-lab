@@ -51,6 +51,8 @@ def earnings_filter_result(
     after_days = int(filter_config.get("block_after_business_days", 0))
     block_on_day = bool(filter_config.get("block_on_earnings_day", True))
 
+    matched_date: str | None = None
+    matched_days_until: int | None = None
     for record in records:
         if str(record.get("Code") or "").strip() != code:
             continue
@@ -58,14 +60,34 @@ def earnings_filter_result(
         if not earnings_date_text:
             continue
         earnings_date = date.fromisoformat(earnings_date_text)
+        days_until = (earnings_date - target_date).days
+        if matched_date is None or abs(days_until) < abs(matched_days_until or 999999):
+            matched_date = earnings_date_text
+            matched_days_until = days_until
         blocked_dates = set()
         if block_on_day:
             blocked_dates.add(earnings_date)
         blocked_dates.update(_business_days_before(earnings_date, before_days))
         blocked_dates.update(_business_days_after(earnings_date, after_days))
         if target_date in blocked_dates:
-            return _result(True, True, earnings_date_text, EARNINGS_FILTER_REJECTED_REASON)
-    return _result(True, False, None, "")
+            return _result(
+                True,
+                True,
+                earnings_date_text,
+                EARNINGS_FILTER_REJECTED_REASON,
+                info_found=True,
+                candidate_earnings_date=earnings_date_text,
+                days_until_earnings=days_until,
+            )
+    return _result(
+        True,
+        False,
+        None,
+        "",
+        info_found=matched_date is not None,
+        candidate_earnings_date=matched_date,
+        days_until_earnings=matched_days_until,
+    )
 
 
 def earnings_counts(records: list[dict[str, Any]], target_date: date) -> dict[str, int]:
@@ -76,12 +98,23 @@ def earnings_counts(records: list[dict[str, Any]], target_date: date) -> dict[st
     }
 
 
-def _result(checked: bool, blocked: bool, earnings_date: str | None, reason: str) -> dict[str, Any]:
+def _result(
+    checked: bool,
+    blocked: bool,
+    earnings_date: str | None,
+    reason: str,
+    info_found: bool = False,
+    candidate_earnings_date: str | None = None,
+    days_until_earnings: int | None = None,
+) -> dict[str, Any]:
     return {
         "checked": checked,
         "blocked": blocked,
         "earnings_date": earnings_date,
         "reason": reason,
+        "info_found": info_found,
+        "candidate_earnings_date": candidate_earnings_date or earnings_date,
+        "days_until_earnings": days_until_earnings,
     }
 
 

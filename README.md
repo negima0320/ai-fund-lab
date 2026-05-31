@@ -889,6 +889,12 @@ python src/main.py --mode preflight
 
 J-QuantsやOpenAIの接続確認が失敗しても、preflight全体は可能な限り最後まで実行し、`WARN` として表示します。APIキーの値はコンソールにも保存ファイルにも出力しません。
 
+J-Quants各APIの実疎通まで確認したい場合だけ、smoke test付きで実行します。通常preflightでは大量APIを叩きません。
+
+```bash
+python src/main.py --mode preflight --profile rookie_dealer_02_v2_7 --with-smoke-test
+```
+
 結果はprofile別に以下へ保存します。
 
 - `reports/<profile_id>/backtests/preflight_latest.json`
@@ -1199,7 +1205,7 @@ Free / Light のprofile別互換性は [docs/jquants_plan_matrix.md](docs/jquant
 | 項目 | Free | Light |
 | --- | --- | --- |
 | レート制限 | 5 requests/min | 60 requests/min |
-| 利用可能API | listed_info, prices, financial_statements, earnings_calendar, trading_calendar | FreeのAPI + topix_prices, investor_types |
+| 利用可能API | listed_info, prices, financial_statements, earnings_calendar | FreeのAPI + topix_prices, investor_types, trading_calendar |
 | 並列取得 | disabled | enabled |
 | 推奨用途 | 短期間の検証、通常のpaper運用 | 長期間backtest、Relative Strength検証、データ取得高速化 |
 
@@ -1215,6 +1221,7 @@ J-Quants APIはv2 endpointのみを利用します。旧v1 endpoint（例: `/pri
 | 投資部門別情報 | `/equities/investor-types` |
 | 決算発表予定日 | `/equities/earnings-calendar` |
 | 財務サマリー | `/fins/summary` |
+| 取引カレンダー | `/markets/calendar` |
 
 投資部門別情報はLight planの `/equities/investor-types` から取得し、`data/cache/jquants/investor_types/YYYY-MM-DD_to_YYYY-MM-DD.json` に保存します。v2.8では週次データとして扱い、海外投資家の買い越し/売り越し、4週合計、改善/悪化トレンド、個人投資家との需給差を市場地合い補正として `investor_context_score` に変換します。個別銘柄のAI判断ではなく、ルールベースの市場コンテキストです。
 
@@ -1242,6 +1249,26 @@ python src/main.py --mode healthcheck --provider jquants
 ```
 
 成功すると、上場銘柄一覧エンドポイントに接続し、件数を表示します。
+
+Light契約後やAPI追加後は、全endpointのsmoke testを先に実行します。
+
+```bash
+python src/main.py --mode jquants-smoke-test --endpoint all
+```
+
+個別APIだけ確認することもできます。
+
+```bash
+python src/main.py --mode jquants-smoke-test --endpoint listed_info
+python src/main.py --mode jquants-smoke-test --endpoint prices
+python src/main.py --mode jquants-smoke-test --endpoint topix_prices
+python src/main.py --mode jquants-smoke-test --endpoint investor_types
+python src/main.py --mode jquants-smoke-test --endpoint earnings_calendar
+python src/main.py --mode jquants-smoke-test --endpoint financial_statements
+python src/main.py --mode jquants-smoke-test --endpoint trading_calendar
+```
+
+smoke testは `config/jquants.yaml` のplanを使い、endpoint URL、params、status_code、records、first_record_keys、response_body_sample、cache_saved、cache_path、error_reasonを表示します。`records=0` はHTTP 200でも `EMPTY` として扱い、レスポンス本文サンプルを表示します。Free planでLight専用APIを確認した場合は `SKIPPED_PLAN` になり、APIは呼びません。結果は `logs/jquants_api.log` にも記録されます。
 
 ```text
 J-Quants connection successful

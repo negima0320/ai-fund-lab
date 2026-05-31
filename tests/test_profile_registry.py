@@ -174,6 +174,9 @@ def test_experiment_summary_row_includes_feature_activation() -> None:
         "feature_data_enabled": {"financial_context": True},
         "feature_scoring_enabled": {"financial_context": False},
         "feature_trigger_count": {"financial_context": 0},
+        "earnings_calendar_records": 3,
+        "earnings_filter_rejected_count": 1,
+        "earnings_filter_status": "active",
         "practical_effect": "no_practical_effect",
         "effect_reason": "selection_diff_count=0 and outcome_diff_count=0",
         "verdict": "no_practical_effect",
@@ -185,6 +188,7 @@ def test_experiment_summary_row_includes_feature_activation() -> None:
     assert '{"financial_context":true}' in rendered
     assert '{"financial_context":false}' in rendered
     assert '{"financial_context":0}' in rendered
+    assert "| 3 | 1 | active |" in rendered
 
 
 def test_experiment_capability_warning_for_light_profile_on_free_plan() -> None:

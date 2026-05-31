@@ -96,6 +96,7 @@ def test_topix_api_error_logs_http_status_and_body(monkeypatch, tmp_path) -> Non
 
     monkeypatch.setattr(main_module, "ROOT", tmp_path)
     monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+    monkeypatch.setattr(main_module, "load_config", lambda _path: config)
 
     payload = main_module._load_topix_prices_for_period(date(2026, 1, 1), date(2026, 1, 26), config)
     log = (tmp_path / "logs" / "jquants_api.log").read_text(encoding="utf-8")
@@ -270,7 +271,23 @@ def test_financial_statements_uses_v2_fins_summary_endpoint(monkeypatch) -> None
     records = provider.fetch_financial_statements(date(2026, 1, 1), date(2026, 1, 26))
 
     assert records == [{"Date": "2026-01-26", "LocalCode": "1001"}]
-    assert calls == [("/fins/summary", {"from": "2026-01-01", "to": "2026-01-26"})]
+    assert calls == [("/fins/summary", {})]
+
+
+def test_financial_statements_single_day_uses_v2_date_param(monkeypatch) -> None:
+    provider = _provider_without_init("light")
+    calls = []
+
+    def fake_fetch(path, params):
+        calls.append((path, params))
+        return [{"DiscDate": "2026-01-26", "Code": "1001"}]
+
+    monkeypatch.setattr(provider, "_get_paginated_records", fake_fetch)
+
+    records = provider.fetch_financial_statements(date(2026, 1, 26), date(2026, 1, 26))
+
+    assert records == [{"DiscDate": "2026-01-26", "Code": "1001"}]
+    assert calls == [("/fins/summary", {"date": "20260126"})]
 
 
 def test_investor_types_uses_v2_equities_investor_types_endpoint(monkeypatch) -> None:
@@ -417,6 +434,7 @@ def test_investor_types_smoke_reports_empty_response_body_sample(monkeypatch, tm
 
     monkeypatch.setattr(main_module, "ROOT", tmp_path)
     monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+    monkeypatch.setattr(main_module, "load_config", lambda _path: config)
 
     result = main_module.build_jquants_smoke_test("investor_types", config)
 
@@ -434,6 +452,200 @@ def test_investor_types_smoke_reports_empty_response_body_sample(monkeypatch, tm
     output = capsys.readouterr().out
     assert "endpoint: investor_types" in output
     assert "response_body_sample: {\"data\":[]}" in output
+
+
+def test_jquants_smoke_all_skips_light_only_endpoints_on_free(monkeypatch, tmp_path) -> None:
+    config = {"jquants": {"plan": "free", "requests_per_minute": 5, "parallel_fetch": False}}
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            self.last_request_metadata = {"url": "https://api.jquants.com/v2/test", "params": {}, "status_code": 200, "response_body": '{"data":[{}]}'}
+
+        def get_listed_stocks(self):
+            return [{"Code": "1001", "CompanyName": "Listed"}]
+
+        def get_daily_prices(self, _date):
+            return [{"Code": "1001", "Close": 1000}]
+
+        def fetch_topix_prices_cached(self, *_args, **_kwargs):
+            raise AssertionError("topix_prices should be skipped on free plan")
+
+        def fetch_investor_types_cached(self, *_args, **_kwargs):
+            raise AssertionError("investor_types should be skipped on free plan")
+
+        def fetch_earnings_calendar_cached(self, *_args, **_kwargs):
+            return {"records": [{"Code": "1001", "Date": "2026-03-06"}], "saved": True, "cache_path": "earnings.json", "api_status": "200"}
+
+        def fetch_financial_statements_cached(self, *_args, **_kwargs):
+            return {"records": [{"LocalCode": "1001"}], "saved": True, "cache_path": "financial.json", "api_status": "200"}
+
+        def _get_paginated_records(self, *_args, **_kwargs):
+            return [{"Date": "2026-03-06", "HolidayDivision": "0"}]
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    summary = main_module.build_jquants_smoke_test("all", config)
+    by_endpoint = {row["endpoint"]: row for row in summary["endpoints"]}
+
+    assert by_endpoint["listed_info"]["result"] == "OK"
+    assert by_endpoint["prices"]["cache_saved"] is True
+    assert by_endpoint["topix_prices"]["result"] == "SKIPPED_PLAN"
+    assert by_endpoint["investor_types"]["result"] == "SKIPPED_PLAN"
+    assert by_endpoint["trading_calendar"]["result"] == "SKIPPED_PLAN"
+    assert by_endpoint["earnings_calendar"]["result"] == "OK"
+    assert by_endpoint["financial_statements"]["result"] == "OK"
+
+
+def test_jquants_smoke_all_runs_light_endpoints(monkeypatch, tmp_path) -> None:
+    config = {"jquants": {"plan": "light", "requests_per_minute": 60, "parallel_fetch": True}}
+    calls = {"topix_prices": 0, "investor_types": 0}
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            self.last_request_metadata = {"url": "https://api.jquants.com/v2/test", "params": {}, "status_code": 200, "response_body": '{"data":[{}]}'}
+
+        def get_listed_stocks(self):
+            return [{"Code": "1001"}]
+
+        def get_daily_prices(self, _date):
+            return [{"Code": "1001", "Close": 1000}]
+
+        def fetch_topix_prices_cached(self, *_args, **_kwargs):
+            calls["topix_prices"] += 1
+            return {"records": [{"date": "2026-03-06", "close": 2000}], "saved": True, "cache_path": "topix.json", "api_status": "200"}
+
+        def fetch_investor_types_cached(self, *_args, **_kwargs):
+            calls["investor_types"] += 1
+            return {"records": [{"Date": "2026-03-06", "overseas_net_buy": 100}], "saved": True, "cache_path": "investor.json", "api_status": "200"}
+
+        def fetch_earnings_calendar_cached(self, *_args, **_kwargs):
+            return {"records": [{"Code": "1001", "Date": "2026-03-06"}], "saved": True, "cache_path": "earnings.json", "api_status": "200"}
+
+        def fetch_financial_statements_cached(self, *_args, **_kwargs):
+            return {"records": [{"LocalCode": "1001"}], "saved": True, "cache_path": "financial.json", "api_status": "200"}
+
+        def _get_paginated_records(self, *_args, **_kwargs):
+            return [{"Date": "2026-03-06"}]
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    summary = main_module.build_jquants_smoke_test("all", config)
+    by_endpoint = {row["endpoint"]: row for row in summary["endpoints"]}
+
+    assert calls == {"topix_prices": 1, "investor_types": 1}
+    assert by_endpoint["topix_prices"]["result"] == "OK"
+    assert by_endpoint["investor_types"]["result"] == "OK"
+
+
+def test_jquants_smoke_empty_and_error_result_classification() -> None:
+    assert main_module._jquants_smoke_result(200, [{"x": 1}], {}) == "OK"
+    assert main_module._jquants_smoke_result(200, [], {}) == "EMPTY"
+    assert main_module._jquants_smoke_result(401, [], {}) == "AUTH_OR_PLAN_ERROR"
+    assert main_module._jquants_smoke_result(403, [], {}) == "AUTH_OR_PLAN_ERROR"
+    assert main_module._jquants_smoke_result(400, [], {}) == "BAD_REQUEST"
+    assert main_module._jquants_smoke_result(404, [], {}) == "ENDPOINT_NOT_FOUND"
+    assert main_module._jquants_smoke_result(429, [], {}) == "RATE_LIMITED"
+    assert main_module._jquants_smoke_result(500, [], {}) == "SERVER_ERROR"
+
+
+def test_jquants_smoke_financial_bad_request_is_classified(monkeypatch, tmp_path) -> None:
+    config = {"jquants": {"plan": "light", "requests_per_minute": 60, "parallel_fetch": True}}
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            self.last_request_metadata = {}
+
+        def fetch_financial_statements_cached(self, *_args, **_kwargs):
+            return {
+                "records": [],
+                "saved": False,
+                "cache_path": "financial.json",
+                "api_status": "bad_request",
+                "http_status": 400,
+                "reason": "bad_request",
+                "request_url": "https://api.jquants.com/v2/fins/summary?from=2026-01-01",
+                "request_params": {"from": "2026-01-01"},
+                "response_body": '{"message":"bad request"}',
+            }
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    result = main_module.build_jquants_smoke_test("financial_statements", config)
+
+    assert result["status_code"] == 400
+    assert result["result"] == "BAD_REQUEST"
+    assert result["error_reason"] == "bad_request"
+
+
+def test_jquants_smoke_trading_calendar_uses_v2_markets_calendar(monkeypatch, tmp_path) -> None:
+    config = {"jquants": {"plan": "light", "requests_per_minute": 60, "parallel_fetch": True}}
+    calls = []
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            self.last_request_metadata = {"url": "https://api.jquants.com/v2/markets/calendar", "params": {}, "status_code": 200, "response_body": '{"data":[{}]}'}
+
+        def _get_paginated_records(self, path, params):
+            calls.append((path, params))
+            return [{"Date": "2026-05-29"}]
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    result = main_module.build_jquants_smoke_test("trading_calendar", config)
+
+    assert result["result"] == "OK"
+    assert calls == [("/markets/calendar", {"from": "20260429", "to": "20260529"})]
+
+
+def test_jquants_smoke_logs_result(monkeypatch, tmp_path) -> None:
+    config = {"jquants": {"plan": "free", "requests_per_minute": 5, "parallel_fetch": False}}
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            self.last_request_metadata = {"url": "https://api.jquants.com/v2/equities/master", "params": {}, "status_code": 200, "response_body": '{"data":[{}]}'}
+
+        def get_listed_stocks(self):
+            return [{"Code": "1001"}]
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    result = main_module.build_jquants_smoke_test("listed_info", config)
+    api_log = (tmp_path / "logs" / "jquants_api.log").read_text(encoding="utf-8")
+
+    assert result["cache_saved"] is True
+    assert "/data/cache/jquants/listed_info/" in result["cache_path"]
+    assert result["cache_path"].endswith(".json")
+    assert "endpoint=listed_info" in api_log
+    assert "result=OK" in api_log
+
+
+def test_preflight_smoke_test_adds_endpoint_results(monkeypatch) -> None:
+    results = []
+
+    monkeypatch.setattr(
+        main_module,
+        "build_jquants_smoke_test",
+        lambda _endpoint, _config: {
+            "endpoint": "all",
+            "endpoints": [
+                {"endpoint": "listed_info", "result": "OK", "records": 10},
+                {"endpoint": "topix_prices", "result": "SKIPPED_PLAN", "records": 0},
+                {"endpoint": "investor_types", "result": "EMPTY", "records": 0},
+            ],
+        },
+    )
+
+    main_module._check_jquants_smoke_preflight(results, {"jquants": {"plan": "free"}})
+
+    statuses = {row["message"]: row["status"] for row in results}
+    assert statuses["smoke listed_info: OK records=10"] == "OK"
+    assert statuses["smoke topix_prices: SKIPPED_PLAN records=0"] == "SKIP"
+    assert statuses["smoke investor_types: EMPTY records=0"] == "WARN"
 
 
 def test_preflight_cache_status_reports_missing_cache_as_false(monkeypatch, tmp_path) -> None:

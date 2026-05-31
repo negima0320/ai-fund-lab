@@ -36,6 +36,12 @@ def score_candidates(screening_log: dict[str, Any], config: dict[str, Any]) -> d
             }
         )
 
+    earnings_matched_count = sum(1 for item in scored if item.get("earnings_info_found") or item.get("earnings_candidate_date"))
+    earnings_rejected_count = sum(1 for item in scored if item.get("earnings_filter_blocked"))
+    for item in scored:
+        item["earnings_pipeline_matched_candidates"] = earnings_matched_count
+        item["earnings_pipeline_rejected_candidates"] = earnings_rejected_count
+
     scored.sort(key=lambda item: (item["total_score"], item["confidence"]), reverse=True)
     max_positions = int(config["portfolio"]["max_positions"])
     confidence_min = float(config["scoring"]["confidence_min_for_buy"])
@@ -153,6 +159,11 @@ def score_real_candidates(
     market_filter = _market_filter_config(config)
     market_regime = str((market_context or {}).get("market_regime") or "neutral")
     advance_ratio = _optional_float((market_context or {}).get("advance_ratio"))
+    earnings_calendar_records_count = len(config.get("_earnings_calendar_records") or [])
+    earnings_pipeline = {}
+    earnings_metadata = config.get("_earnings_calendar_metadata")
+    if isinstance(earnings_metadata, dict) and isinstance(earnings_metadata.get("pipeline"), dict):
+        earnings_pipeline = dict(earnings_metadata["pipeline"])
 
     for candidate in candidates:
         technical_parts = _real_technical_score_parts(candidate)
@@ -296,6 +307,23 @@ def score_real_candidates(
                 "earnings_filter_blocked": earnings_result["blocked"],
                 "earnings_filter_reason": earnings_result["reason"],
                 "earnings_announcement_date": earnings_result["earnings_date"],
+                "earnings_calendar_records_count": earnings_calendar_records_count,
+                "earnings_info_found": earnings_result.get("info_found", False),
+                "earnings_candidate_date": earnings_result.get("candidate_earnings_date"),
+                "earnings_days_until_earnings": earnings_result.get("days_until_earnings"),
+                "earnings_pipeline_feature_enabled": earnings_pipeline.get("feature_enabled", False),
+                "earnings_pipeline_fetch_start": earnings_pipeline.get("fetch_start"),
+                "earnings_pipeline_fetch_end": earnings_pipeline.get("fetch_end"),
+                "earnings_pipeline_cache_path": earnings_pipeline.get("cache_path"),
+                "earnings_pipeline_cache_exists": earnings_pipeline.get("cache_exists", False),
+                "earnings_pipeline_cache_records": earnings_pipeline.get("cache_records", earnings_calendar_records_count),
+                "earnings_pipeline_cache_loaded": earnings_pipeline.get("cache_loaded", False),
+                "earnings_pipeline_index_built": earnings_pipeline.get("index_built", False),
+                "earnings_pipeline_candidate_matching_called": earnings_result["checked"],
+                "earnings_pipeline_records_loaded": earnings_pipeline.get("earnings_records_loaded", earnings_calendar_records_count),
+                "earnings_pipeline_matched_candidates": None,
+                "earnings_pipeline_rejected_candidates": None,
+                "earnings_pipeline_reason": earnings_pipeline.get("reason", ""),
                 "source_provider": source_provider,
                 "fallback": candidate.get("fallback", False),
             }

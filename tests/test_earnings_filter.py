@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import json
 
 import pytest
 
@@ -63,6 +64,29 @@ def test_earnings_calendar_api_success_creates_cache_file(tmp_path, monkeypatch)
     assert (tmp_path / "jquants" / "earnings_calendar" / "2026-03-06.json").exists()
 
 
+def test_earnings_calendar_period_cache_is_created_once(tmp_path, monkeypatch) -> None:
+    provider = _provider_without_init()
+    calls = {"count": 0}
+
+    def fake_fetch(*_args, **_kwargs):
+        calls["count"] += 1
+        return [
+            {"Date": "2026-01-10", "Code": "1001"},
+            {"Date": "2026-03-01", "Code": "1002"},
+            {"Date": "2026-04-01", "Code": "1003"},
+        ]
+
+    monkeypatch.setattr(provider, "fetch_earnings_calendar", fake_fetch)
+
+    payload = provider.fetch_earnings_calendar_period_cached(tmp_path, date(2026, 1, 1), date(2026, 3, 6))
+    cached = provider.fetch_earnings_calendar_period_cached(tmp_path, date(2026, 1, 1), date(2026, 3, 6))
+
+    assert calls["count"] == 1
+    assert [row["Code"] for row in payload["records"]] == ["1001", "1002"]
+    assert cached["from_cache"] is True
+    assert (tmp_path / "jquants" / "earnings_calendar" / "2026-01-01_to_2026-03-06.json").exists()
+
+
 def test_historical_backtest_does_not_fetch_current_earnings_calendar(monkeypatch, tmp_path) -> None:
     config = _earnings_config()
     monkeypatch.setattr(main_module, "ROOT", tmp_path)
@@ -77,6 +101,69 @@ def test_historical_backtest_does_not_fetch_current_earnings_calendar(monkeypatc
     assert payload["records"] == []
     assert payload["metadata"]["filter_available"] is False
     assert "future leak" in payload["metadata"]["warning"]
+
+
+def test_historical_earnings_pipeline_loads_existing_asof_cache(monkeypatch, tmp_path) -> None:
+    config = _earnings_config()
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    cache_path = tmp_path / "data" / "cache" / "jquants" / "earnings_calendar" / "2026-03-05.json"
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_text(json.dumps({"records": [{"Date": "2026-03-06", "Code": "1001"}]}), encoding="utf-8")
+
+    def fail_provider(*args, **kwargs):
+        raise AssertionError("historical cache hit must not fetch API")
+
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", fail_provider)
+
+    payload = main_module._load_earnings_calendar_for_date(date(2026, 3, 6), config)
+
+    assert payload["records"] == [{"Date": "2026-03-06", "Code": "1001"}]
+    assert payload["metadata"]["filter_available"] is True
+    assert payload["metadata"]["pipeline"]["cache_exists"] is True
+    assert payload["metadata"]["pipeline"]["cache_records"] == 1
+    assert payload["metadata"]["pipeline"]["cache_loaded"] is True
+
+
+def test_backtest_preloads_earnings_calendar_period_once(monkeypatch, tmp_path) -> None:
+    config = _earnings_config()
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    main_module._reset_jquants_api_session()
+    calls = {"count": 0}
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            self.last_request_metadata = {"url": "https://api.jquants.com/v2/equities/earnings-calendar", "params": {}, "status_code": 200}
+
+        def fetch_earnings_calendar_period_cached(self, _cache_root, start_date, end_date, force_refresh=False):
+            calls["count"] += 1
+            assert start_date == date(2025, 12, 18)
+            assert end_date == date(2026, 3, 20)
+            return {
+                "records": [{"Date": "2026-03-06", "Code": "1001"}],
+                "cache_path": str(tmp_path / "data" / "cache" / "jquants" / "earnings_calendar" / "2025-12-18_to_2026-03-20.json"),
+                "from_cache": False,
+                "saved": True,
+                "filter_available": True,
+                "available": True,
+                "reason": "",
+            }
+
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    main_module._preload_light_api_context(config, date(2026, 1, 1), date(2026, 3, 6))
+    payload = main_module._load_earnings_calendar_for_date(date(2026, 1, 5), config)
+    result = score_real_candidates([_candidate("1001", "2026-03-05")], "2026-03-05", {**config, "_earnings_calendar_records": payload["records"], "_earnings_calendar_metadata": payload["metadata"]}, "jquants")
+
+    assert calls["count"] == 1
+    assert payload["records"] == [{"Date": "2026-03-06", "Code": "1001"}]
+    assert payload["metadata"]["pipeline"]["fetch_start"] == "2025-12-18"
+    assert payload["metadata"]["pipeline"]["fetch_end"] == "2026-03-20"
+    assert payload["metadata"]["pipeline"]["index_built"] is True
+    score = result["scores"][0]
+    assert score["earnings_calendar_records_count"] == 1
+    assert score["earnings_info_found"] is True
+    assert score["earnings_filter_blocked"] is True
+    assert score["earnings_pipeline_candidate_matching_called"] is True
 
 
 @pytest.mark.parametrize(
@@ -98,9 +185,13 @@ def test_earnings_filter_blocks_around_earnings_business_days(target_date: str, 
     )["scores"][0]
 
     assert result["earnings_filter_blocked"] is expected_blocked
+    assert result["earnings_calendar_records_count"] == 1
+    assert result["earnings_info_found"] is True
+    assert result["earnings_candidate_date"] == "2026-03-06"
     assert result["selected"] is (not expected_blocked)
     if expected_blocked:
         assert result["rejected_reason"] == EARNINGS_FILTER_REJECTED_REASON
+        assert result["earnings_announcement_date"] == "2026-03-06"
 
 
 def test_non_earnings_candidate_is_not_filtered() -> None:
@@ -109,6 +200,7 @@ def test_non_earnings_candidate_is_not_filtered() -> None:
 
     assert result["selected"] is True
     assert result["earnings_filter_blocked"] is False
+    assert result["earnings_info_found"] is False
 
 
 def test_sell_orders_are_not_filtered_by_earnings_filter() -> None:

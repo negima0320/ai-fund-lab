@@ -568,6 +568,10 @@ def _technical_snapshot(item: dict[str, Any]) -> dict[str, Any]:
         "earnings_filter_blocked": item.get("earnings_filter_blocked", False),
         "earnings_filter_reason": item.get("earnings_filter_reason", ""),
         "earnings_announcement_date": item.get("earnings_announcement_date"),
+        "earnings_calendar_records_count": item.get("earnings_calendar_records_count"),
+        "earnings_info_found": item.get("earnings_info_found", False),
+        "earnings_candidate_date": item.get("earnings_candidate_date"),
+        "earnings_days_until_earnings": item.get("earnings_days_until_earnings"),
     }
 
 
@@ -631,6 +635,10 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "earnings_filter_blocked",
         "earnings_filter_reason",
         "earnings_announcement_date",
+        "earnings_calendar_records_count",
+        "earnings_info_found",
+        "earnings_candidate_date",
+        "earnings_days_until_earnings",
     ]
     return {key: position.get(key) for key in keys if key in position}
 

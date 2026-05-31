@@ -401,6 +401,150 @@ def test_feature_activation_audit_marks_v2_7_earnings_filter_inactive_in_practic
     assert earnings["status"] == "inactive_in_practice"
 
 
+def test_earnings_filter_debug_reports_records_and_rejections(tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_7")
+    config["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    initialize_database(config, tmp_path)
+    save_scoring_results(
+        config,
+        tmp_path,
+        {
+            "date": "2026-03-05",
+            "scores": [
+                {
+                    "code": "1001",
+                    "name": "Blocked",
+                    "rank": 1,
+                    "selected": False,
+                    "earnings_calendar_records_count": 3,
+                    "earnings_filter_checked": True,
+                    "earnings_filter_blocked": True,
+                    "earnings_filter_reason": "決算予定日前後のため新規買付見送り",
+                    "earnings_announcement_date": "2026-03-06",
+                    "earnings_info_found": True,
+                    "earnings_candidate_date": "2026-03-06",
+                    "earnings_days_until_earnings": 1,
+                    "earnings_pipeline_feature_enabled": True,
+                    "earnings_pipeline_fetch_start": "2026-03-01",
+                    "earnings_pipeline_fetch_end": "2026-03-20",
+                    "earnings_pipeline_cache_path": "data/cache/jquants/earnings_calendar/2026-03-05.json",
+                    "earnings_pipeline_cache_exists": True,
+                    "earnings_pipeline_cache_records": 3,
+                    "earnings_pipeline_cache_loaded": True,
+                    "earnings_pipeline_index_built": True,
+                    "earnings_pipeline_candidate_matching_called": True,
+                    "earnings_pipeline_records_loaded": 3,
+                    "earnings_pipeline_matched_candidates": 1,
+                    "earnings_pipeline_rejected_candidates": 1,
+                },
+                {
+                    "code": "1002",
+                    "name": "Unknown",
+                    "rank": 2,
+                    "selected": True,
+                    "earnings_calendar_records_count": 3,
+                    "earnings_filter_checked": True,
+                    "earnings_filter_blocked": False,
+                    "earnings_info_found": False,
+                },
+            ],
+        },
+    )
+
+    analysis = build_feature_analysis(config, tmp_path)
+    debug = analysis["earnings_filter_debug"]
+    markdown = render_feature_analysis_markdown(analysis)
+
+    assert debug["earnings_calendar_records"] == 3
+    assert debug["candidate_count"] == 2
+    assert debug["earnings_info_found_count"] == 1
+    assert debug["earnings_info_missing_count"] == 1
+    assert debug["earnings_filter_candidate_count"] == 1
+    assert debug["earnings_filter_rejected_count"] == 1
+    assert debug["earnings_filter_applied_count"] == 2
+    assert debug["unknown_earnings_count"] == 1
+    assert debug["status"] == "active"
+    assert debug["days_to_earnings_distribution"]["-2 to +2"] == 1
+    assert debug["days_to_earnings_distribution"]["unknown"] == 1
+    assert debug["nearest_earnings_candidates"][0]["company_name"] == "Blocked"
+    assert debug["nearest_earnings_candidates"][0]["action"] == "rejected"
+    assert debug["top_rejected_candidates"][0]["code"] == "1001"
+    pipeline = analysis["earnings_pipeline"]
+    assert pipeline["feature_enabled"] is True
+    assert pipeline["fetch_start"] == "2026-03-01"
+    assert pipeline["fetch_end"] == "2026-03-20"
+    assert pipeline["cache_exists"] is True
+    assert pipeline["cache_records"] == 3
+    assert pipeline["cache_loaded"] is True
+    assert pipeline["index_built"] is True
+    assert pipeline["candidate_matching_called"] is True
+    assert pipeline["earnings_records_loaded"] == 3
+    assert pipeline["matched_candidates"] == 1
+    assert pipeline["rejected_candidates"] == 1
+    assert "## Earnings Filter Debug" in markdown
+    assert "## Earnings Pipeline" in markdown
+    assert "cache exists: true" in markdown
+    assert "days_to_earnings distribution" in markdown
+    assert "nearest earnings candidates" in markdown
+    assert "Top rejected candidates" in markdown
+
+
+def test_earnings_filter_debug_statuses(tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_7")
+    config["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    initialize_database(config, tmp_path)
+
+    unavailable = build_feature_analysis(config, tmp_path)["earnings_filter_debug"]
+    assert unavailable["status"] == "earnings_data_unavailable"
+
+    save_scoring_results(
+        config,
+        tmp_path,
+        {
+            "date": "2026-03-05",
+            "scores": [
+                {
+                    "code": "1002",
+                    "name": "No Match",
+                    "rank": 1,
+                    "selected": True,
+                    "earnings_calendar_records_count": 3,
+                    "earnings_filter_checked": True,
+                    "earnings_filter_blocked": False,
+                    "earnings_info_found": False,
+                }
+            ],
+        },
+    )
+    no_match = build_feature_analysis(config, tmp_path)["earnings_filter_debug"]
+    assert no_match["status"] == "no_candidate_match"
+
+    save_scoring_results(
+        config,
+        tmp_path,
+        {
+            "date": "2026-03-06",
+            "scores": [
+                {
+                    "code": "1003",
+                    "name": "Far Earnings",
+                    "rank": 1,
+                    "selected": True,
+                    "earnings_calendar_records_count": 3,
+                    "earnings_filter_checked": True,
+                    "earnings_filter_blocked": False,
+                    "earnings_info_found": True,
+                    "earnings_candidate_date": "2026-03-20",
+                    "earnings_days_until_earnings": 14,
+                }
+            ],
+        },
+    )
+    inactive = build_feature_analysis(config, tmp_path)["earnings_filter_debug"]
+    assert inactive["status"] == "inactive_in_practice"
+    assert inactive["days_to_earnings_distribution"]["+8 to +14"] == 1
+
+
 def test_feature_activation_audit_shows_v2_6_relative_strength_layers(tmp_path) -> None:
     config = load_profile("rookie_dealer_02_v2_6")
     config["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")

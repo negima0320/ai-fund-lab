@@ -21,7 +21,6 @@ JQUANTS_PLAN_CAPABILITIES: dict[str, set[str]] = {
         "prices",
         "financial_statements",
         "earnings_calendar",
-        "trading_calendar",
     },
     "light": {
         "listed_info",

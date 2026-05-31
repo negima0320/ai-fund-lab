@@ -124,7 +124,7 @@ def main() -> None:
         run_help()
         return
     if args.mode == "preflight":
-        run_preflight(RUNTIME_SETTINGS["profile_id"])
+        run_preflight(RUNTIME_SETTINGS["profile_id"], with_smoke_test=args.with_smoke_test)
         return
     if args.mode == "simulate-operation":
         run_simulate_operation(RUNTIME_SETTINGS["profile_id"], args.days)
@@ -507,9 +507,23 @@ def parse_args() -> Any:
     )
     parser.add_argument(
         "--endpoint",
-        choices=["topix_prices", "investor_types"],
+        choices=[
+            "all",
+            "listed_info",
+            "prices",
+            "topix_prices",
+            "investor_types",
+            "earnings_calendar",
+            "financial_statements",
+            "trading_calendar",
+        ],
         default="topix_prices",
         help="J-Quants endpoint for jquants-smoke-test.",
+    )
+    parser.add_argument(
+        "--with-smoke-test",
+        action="store_true",
+        help="Run J-Quants smoke tests during preflight. Regular preflight does not call every API.",
     )
     parser.add_argument(
         "--verbose",
@@ -937,12 +951,44 @@ def run_jquants_api_summary() -> None:
         )
 
 
+JQUANTS_SMOKE_ENDPOINTS = [
+    "listed_info",
+    "prices",
+    "topix_prices",
+    "investor_types",
+    "earnings_calendar",
+    "financial_statements",
+    "trading_calendar",
+]
+
+
 def run_jquants_smoke_test(endpoint: str) -> None:
     result = build_jquants_smoke_test(endpoint, load_config(CONFIG_PATH))
+    if endpoint == "all":
+        print("J-Quants Smoke Test Summary")
+        print("")
+        print("| endpoint | status_code | records | cache_saved | result |")
+        print("| --- | --- | ---: | --- | --- |")
+        for row in result.get("endpoints", []):
+            print(
+                f"| {row.get('endpoint')} | {row.get('status_code') or 'N/A'} | "
+                f"{row.get('records', 0)} | {str(bool(row.get('cache_saved'))).lower()} | {row.get('result')} |"
+            )
+        return
     print("J-Quants Smoke Test")
-    keys = ["endpoint", "url", "params", "status_code", "records", "first_record_keys", "cache_saved", "error_reason"]
-    if int(result.get("records") or 0) == 0:
-        keys.append("response_body_sample")
+    keys = [
+        "endpoint",
+        "url",
+        "params",
+        "status_code",
+        "records",
+        "first_record_keys",
+        "response_body_sample",
+        "cache_saved",
+        "cache_path",
+        "error_reason",
+        "result",
+    ]
     for key in keys:
         value = result.get(key)
         if isinstance(value, (dict, list)):
@@ -951,34 +997,56 @@ def run_jquants_smoke_test(endpoint: str) -> None:
 
 
 def build_jquants_smoke_test(endpoint: str, config: dict[str, Any]) -> dict[str, Any]:
-    if endpoint not in {"topix_prices", "investor_types"}:
+    if endpoint == "all":
+        return {
+            "endpoint": "all",
+            "plan": _jquants_plan(config),
+            "endpoints": [
+                build_jquants_smoke_test(item, config)
+                for item in JQUANTS_SMOKE_ENDPOINTS
+            ],
+        }
+    if endpoint not in set(JQUANTS_SMOKE_ENDPOINTS):
         raise ValueError(f"unsupported smoke endpoint: {endpoint}")
+    plan = _jquants_plan(config)
+    if not jquants_has_capability(plan, endpoint):
+        result = {
+            "endpoint": endpoint,
+            "url": "",
+            "params": {},
+            "status_code": "",
+            "records": 0,
+            "first_record_keys": [],
+            "response_body_sample": "",
+            "cache_saved": False,
+            "cache_path": "",
+            "error_reason": "capability disabled for current plan",
+            "result": "SKIPPED_PLAN",
+        }
+        _log_jquants_api_event(
+            endpoint=endpoint,
+            plan=plan,
+            cache_hit=False,
+            status="SKIPPED_PLAN",
+            records=0,
+            saved=False,
+            reason="capability_disabled",
+            result="SKIPPED_PLAN",
+        )
+        return result
     end_date = _business_day_on_or_before(date.today())
     start_date = _jquants_smoke_start_date(endpoint, end_date)
     provider = JQuantsDataProvider(
         ROOT / ".env",
         timeout_seconds=int(config.get("jquants", {}).get("request_timeout_seconds", 20)),
-        plan=_jquants_plan(config),
+        plan=plan,
         requests_per_minute=_jquants_requests_per_minute(config),
         parallel_fetch=_jquants_parallel_fetch(config),
         max_parallel_requests=_jquants_max_parallel_requests(config),
     )
     payload: dict[str, Any]
     try:
-        if endpoint == "topix_prices":
-            payload = provider.fetch_topix_prices_cached(
-                ROOT / "data" / "cache",
-                start_date=start_date,
-                end_date=end_date,
-                force_refresh=True,
-            )
-        else:
-            payload = provider.fetch_investor_types_cached(
-                ROOT / "data" / "cache",
-                start_date=start_date,
-                end_date=end_date,
-                force_refresh=True,
-            )
+        payload = _fetch_jquants_smoke_payload(provider, endpoint, start_date, end_date)
     except Exception as exc:
         payload = {
             "records": [],
@@ -990,41 +1058,160 @@ def build_jquants_smoke_test(endpoint: str, config: dict[str, Any]) -> dict[str,
     metadata = dict(getattr(provider, "last_request_metadata", {}) or {})
     records = payload.get("records", []) if isinstance(payload.get("records"), list) else []
     request_params = payload.get("request_params") or metadata.get("params") or {}
+    status_code = payload.get("http_status") or metadata.get("status_code") or payload.get("api_status") or ""
+    result_name = _jquants_smoke_result(status_code, records, payload)
+    error_reason = _jquants_smoke_error_reason(result_name, payload, records)
     result = {
         "endpoint": endpoint,
         "url": payload.get("request_url") or metadata.get("url") or "",
         "params": request_params,
-        "status_code": payload.get("http_status") or metadata.get("status_code") or payload.get("api_status") or "",
+        "status_code": status_code,
         "records": len(records),
         "first_record_keys": sorted(records[0].keys()) if records else [],
         "cache_saved": bool(payload.get("saved")),
-        "error_reason": str(payload.get("reason") or ("empty_response" if not records else "")),
+        "cache_path": payload.get("cache_path") or "",
+        "result": result_name,
+        "error_reason": error_reason,
         "response_body_sample": str(payload.get("response_body") or metadata.get("response_body") or "")[:500],
     }
     _log_jquants_api_event(
         endpoint=endpoint,
-        plan=_jquants_plan(config),
+        plan=plan,
         cache_hit=bool(payload.get("from_cache")),
         status=_provider_payload_status(payload),
         records=len(records),
         saved=bool(payload.get("saved")),
         cache_path=payload.get("cache_path"),
-        reason=str(payload.get("reason") or ""),
+        reason=error_reason,
+        result=result_name,
         **_payload_http_log_fields(payload, metadata),
     )
     return result
 
 
+def _fetch_jquants_smoke_payload(
+    provider: JQuantsDataProvider,
+    endpoint: str,
+    start_date: date,
+    end_date: date,
+) -> dict[str, Any]:
+    if endpoint == "listed_info":
+        records = provider.get_listed_stocks()
+        return _jquants_smoke_cache_payload(endpoint, records, f"{end_date.isoformat()}.json", provider, end_date, end_date)
+    if endpoint == "prices":
+        records = provider.get_daily_prices(end_date)
+        return _jquants_smoke_cache_payload(endpoint, records, f"{end_date.isoformat()}.json", provider, end_date, end_date)
+    if endpoint == "topix_prices":
+        return provider.fetch_topix_prices_cached(ROOT / "data" / "cache", start_date=start_date, end_date=end_date, force_refresh=True)
+    if endpoint == "investor_types":
+        return provider.fetch_investor_types_cached(ROOT / "data" / "cache", start_date=start_date, end_date=end_date, force_refresh=True)
+    if endpoint == "earnings_calendar":
+        return provider.fetch_earnings_calendar_cached(ROOT / "data" / "cache", target_date=end_date, force_refresh=True)
+    if endpoint == "financial_statements":
+        return provider.fetch_financial_statements_cached(ROOT / "data" / "cache", start_date=start_date, end_date=end_date, force_refresh=True)
+    if endpoint == "trading_calendar":
+        records = provider._get_paginated_records(
+            "/markets/calendar",
+            {"from": start_date.strftime("%Y%m%d"), "to": end_date.strftime("%Y%m%d")},
+        )
+        return _jquants_smoke_cache_payload(
+            endpoint,
+            records,
+            f"{start_date.isoformat()}_to_{end_date.isoformat()}.json",
+            provider,
+            start_date,
+            end_date,
+        )
+    raise ValueError(f"unsupported smoke endpoint: {endpoint}")
+
+
+def _jquants_smoke_cache_payload(
+    endpoint: str,
+    records: list[dict[str, Any]],
+    filename: str,
+    provider: JQuantsDataProvider,
+    start_date: date,
+    end_date: date,
+) -> dict[str, Any]:
+    cache_path = ROOT / "data" / "cache" / "jquants" / endpoint / filename
+    saved = bool(records)
+    if saved:
+        write_json(cache_path, {"records": records})
+    else:
+        _record_jquants_empty_marker(endpoint, start_date, end_date, "empty_response")
+    return {
+        "records": records,
+        "cache_path": str(cache_path),
+        "from_cache": False,
+        "saved": saved,
+        "usable": saved,
+        "available": saved,
+        "api_status": "200",
+        "reason": "" if saved else "empty_response",
+        "request_url": (getattr(provider, "last_request_metadata", {}) or {}).get("url", ""),
+        "request_params": (getattr(provider, "last_request_metadata", {}) or {}).get("params", {}),
+        "http_status": (getattr(provider, "last_request_metadata", {}) or {}).get("status_code", ""),
+        "response_body": (getattr(provider, "last_request_metadata", {}) or {}).get("response_body", ""),
+    }
+
+
+def _jquants_smoke_result(status_code: Any, records: list[dict[str, Any]], payload: dict[str, Any]) -> str:
+    if str(payload.get("api_status") or "") == "SKIPPED_PLAN":
+        return "SKIPPED_PLAN"
+    try:
+        code = int(status_code)
+    except (TypeError, ValueError):
+        status = str(payload.get("api_status") or payload.get("reason") or "").lower()
+        if status == "auth_or_plan_error":
+            return "AUTH_OR_PLAN_ERROR"
+        if status == "bad_request":
+            return "BAD_REQUEST"
+        if status == "endpoint_not_found":
+            return "ENDPOINT_NOT_FOUND"
+        if status == "rate_limit":
+            return "RATE_LIMITED"
+        if status:
+            return "ERROR"
+        return "OK" if records else "EMPTY"
+    if code in {401, 403}:
+        return "AUTH_OR_PLAN_ERROR"
+    if code == 400:
+        return "BAD_REQUEST"
+    if code == 404:
+        return "ENDPOINT_NOT_FOUND"
+    if code == 429:
+        return "RATE_LIMITED"
+    if 500 <= code <= 599:
+        return "SERVER_ERROR"
+    if code == 200 and not records:
+        return "EMPTY"
+    if code == 200:
+        return "OK"
+    return "ERROR"
+
+
+def _jquants_smoke_error_reason(result: str, payload: dict[str, Any], records: list[dict[str, Any]]) -> str:
+    if result == "OK":
+        return ""
+    if result == "EMPTY":
+        return "empty_response"
+    return str(payload.get("reason") or payload.get("warning") or result.lower())
+
+
 def _jquants_smoke_start_date(endpoint: str, end_date: date) -> date:
     if endpoint == "investor_types":
         return end_date - timedelta(weeks=52)
+    if endpoint == "financial_statements":
+        return end_date
+    if endpoint == "trading_calendar":
+        return end_date - timedelta(days=30)
     return end_date - timedelta(days=14)
 
 
 def build_jquants_api_summary() -> dict[str, Any]:
     last_events = _last_jquants_api_events()
     endpoints = []
-    for endpoint in ["topix_prices", "investor_types", "earnings_calendar", "financial_statements"]:
+    for endpoint in JQUANTS_SMOKE_ENDPOINTS:
         cache = _jquants_cache_directory_summary(endpoint)
         event = last_events.get(endpoint, {})
         endpoints.append(
@@ -2277,7 +2464,9 @@ def build_experiment_batch_summary(
         registry_item = profiles[profile_id]
         row = rows_by_profile.get(profile_id, {"profile_id": profile_id})
         diff = _experiment_diff(base_profile_id, profile_id, db_path, start_date_text, end_date_text) if db_path.exists() else {}
-        activation = _experiment_feature_activation(load_profile(profile_id), start_date_text, end_date_text) if db_path.exists() else {}
+        feature_analysis = _experiment_feature_analysis(load_profile(profile_id), start_date_text, end_date_text) if db_path.exists() else {}
+        activation = feature_analysis.get("feature_activation_audit", {})
+        earnings_debug = feature_analysis.get("earnings_filter_debug", {})
         if "selection_diff_count" in diff:
             selection_diff_count = int(diff.get("selection_diff_count") or 0)
         else:
@@ -2306,6 +2495,9 @@ def build_experiment_batch_summary(
                 "feature_data_enabled": activation.get("feature_data_enabled", {}),
                 "feature_scoring_enabled": activation.get("feature_scoring_enabled", {}),
                 "feature_trigger_count": activation.get("feature_trigger_count", {}),
+                "earnings_calendar_records": earnings_debug.get("earnings_calendar_records", 0),
+                "earnings_filter_rejected_count": earnings_debug.get("earnings_filter_rejected_count", 0),
+                "earnings_filter_status": earnings_debug.get("status", ""),
                 "feature_status": {
                     name: item.get("status")
                     for name, item in (activation.get("features", {}) or {}).items()
@@ -2371,9 +2563,9 @@ def _experiment_diff(base_profile_id: str, target_profile_id: str, db_path: Path
     return payload or {}
 
 
-def _experiment_feature_activation(config: dict[str, Any], start_date_text: str, end_date_text: str) -> dict[str, Any]:
+def _experiment_feature_analysis(config: dict[str, Any], start_date_text: str, end_date_text: str) -> dict[str, Any]:
     try:
-        return build_feature_analysis(config, ROOT, start_date_text, end_date_text).get("feature_activation_audit", {})
+        return build_feature_analysis(config, ROOT, start_date_text, end_date_text)
     except Exception:
         return {}
 
@@ -2508,8 +2700,8 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             "",
             "## Results",
             "",
-            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | selection_diff_count | outcome_diff_count | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | practical_effect | effect_reason | verdict | verdict_reason |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | selection_diff_count | outcome_diff_count | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | earnings_calendar_records | earnings_filter_rejected_count | earnings_filter_status | practical_effect | effect_reason | verdict | verdict_reason |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for row in summary.get("experiments", []):
@@ -2528,6 +2720,7 @@ def _experiment_summary_table_row(row: dict[str, Any]) -> str:
         f"{row.get('selection_diff_count')} | {row.get('outcome_diff_count')} | "
         f"{_compact_json(row.get('feature_data_enabled', {}))} | {_compact_json(row.get('feature_scoring_enabled', {}))} | "
         f"{_compact_json(row.get('feature_trigger_count', {}))} | "
+        f"{row.get('earnings_calendar_records', 0)} | {row.get('earnings_filter_rejected_count', 0)} | {row.get('earnings_filter_status', '')} | "
         f"{row.get('practical_effect')} | {row.get('effect_reason', '-')} | "
         f"{row.get('verdict', row.get('judgement', '-'))} | {row.get('verdict_reason', '-')} |"
     )
@@ -3887,7 +4080,7 @@ def _format_status_number(value: Any) -> str:
         return str(value)
 
 
-def run_preflight(profile_id: str | None = None) -> None:
+def run_preflight(profile_id: str | None = None, with_smoke_test: bool = False) -> None:
     global ACTIVE_PROFILE_ID
     if profile_id:
         ACTIVE_PROFILE_ID = profile_id
@@ -3909,6 +4102,8 @@ def run_preflight(profile_id: str | None = None) -> None:
         _check_jquants_plan_capabilities(results, config)
         _check_earnings_filter_preflight(results, config)
         _check_investor_context_preflight(results, config)
+        if with_smoke_test:
+            _check_jquants_smoke_preflight(results, config)
 
     env_path = ROOT / ".env"
     if env_path.exists():
@@ -4261,6 +4456,15 @@ def _api_unavailable_payload(endpoint: str, reason: str) -> dict[str, Any]:
 
 
 def _preload_light_api_context(config: dict[str, Any], start_date: date, end_date: date) -> None:
+    if bool(config.get("earnings_filter", {}).get("enabled", False)):
+        earnings_start, earnings_end = _earnings_calendar_preload_range(start_date, end_date)
+        payload = _load_earnings_calendar_for_period(earnings_start, earnings_end, config)
+        _jquants_api_session().setdefault("payloads", {})["earnings_calendar"] = {
+            "records": payload.get("records", []),
+            "metadata": payload.get("metadata", {}),
+            "start_date": earnings_start.isoformat(),
+            "end_date": earnings_end.isoformat(),
+        }
     if _relative_strength_enabled_for_indicators(config) and _expected_relative_strength_benchmark_source(config) == "topix":
         topix_start = _topix_preload_start_date(start_date)
         payload = _load_topix_prices_for_period_with_options(topix_start, end_date, config, use_preloaded=False)
@@ -4286,6 +4490,10 @@ def _preload_light_api_context(config: dict[str, Any], start_date: date, end_dat
             "start_date": payload.get("start_date") or start_date.isoformat(),
             "end_date": payload.get("end_date") or end_date.isoformat(),
         }
+
+
+def _earnings_calendar_preload_range(start_date: date, end_date: date) -> tuple[date, date]:
+    return start_date - timedelta(days=14), end_date + timedelta(days=14)
 
 
 def _topix_preload_start_date(start_date: date) -> date:
@@ -4362,6 +4570,23 @@ def _check_jquants_plan_capabilities(results: list[dict[str, Any]], config: dict
     )
     _preflight_add(results, "OK" if compatibility["can_run_backtest"] else "FAIL", f"can_run_backtest: {str(compatibility['can_run_backtest']).lower()}")
     _preflight_add(results, "OK" if compatibility["can_run_paper"] else "FAIL", f"can_run_live/paper: {str(compatibility['can_run_paper']).lower()}")
+
+
+def _check_jquants_smoke_preflight(results: list[dict[str, Any]], config: dict[str, Any]) -> None:
+    try:
+        summary = build_jquants_smoke_test("all", config)
+    except Exception as exc:
+        _preflight_add(results, "FAIL", f"J-Quants smoke test failed: {exc}")
+        return
+    for row in summary.get("endpoints", []):
+        result = str(row.get("result") or "ERROR")
+        status = "OK" if result == "OK" else "SKIP" if result == "SKIPPED_PLAN" else "WARN"
+        _preflight_add(
+            results,
+            status,
+            f"smoke {row.get('endpoint')}: {result} records={row.get('records', 0)}",
+            row,
+        )
 
 
 def _jquants_endpoint_cache_status(endpoint: str, reference_date: date) -> dict[str, Any]:
@@ -4996,7 +5221,7 @@ def run_score(provider_name: str, target_date_text: str) -> None:
     earnings_payload = _load_earnings_calendar_for_date(target_date, config)
     if config.get("earnings_filter", {}).get("enabled") and earnings_payload["metadata"].get("filter_available", False):
         config["_earnings_calendar_records"] = earnings_payload["records"]
-        config["_earnings_calendar_metadata"] = earnings_payload["metadata"]
+    config["_earnings_calendar_metadata"] = earnings_payload["metadata"]
     investor_context_payload = _load_investor_context_for_date(target_date, config)
     config["_investor_context"] = investor_context_payload["context"]
     config["_investor_context_metadata"] = investor_context_payload["metadata"]
@@ -9104,15 +9329,176 @@ def _jquants_max_parallel_requests(config: dict[str, Any]) -> int:
     return max(1, int(config.get("jquants", {}).get("max_parallel_requests", 4)))
 
 
+def _load_earnings_calendar_for_period(
+    start_date: date,
+    end_date: date,
+    config: dict[str, Any],
+    force_refresh: bool | None = None,
+) -> dict[str, Any]:
+    cache_root = ROOT / "data" / "cache"
+    cache_path = cache_root / "jquants" / "earnings_calendar" / f"{start_date.isoformat()}_to_{end_date.isoformat()}.json"
+    allowed, stop_reason = _api_call_allowed("earnings_calendar")
+    if not allowed:
+        pipeline = _earnings_pipeline_metadata(
+            enabled=True,
+            cache_path=str(cache_path),
+            cache_exists=cache_path.exists(),
+            cache_records=0,
+            cache_loaded=False,
+            records_loaded=0,
+            fetch_start=start_date.isoformat(),
+            fetch_end=end_date.isoformat(),
+            reason=stop_reason,
+        )
+        return {"records": [], "metadata": {"filter_available": False, "warning": stop_reason, "disabled_reason": stop_reason, "pipeline": pipeline}}
+    try:
+        provider = JQuantsDataProvider(
+            ROOT / ".env",
+            timeout_seconds=int(config.get("jquants", {}).get("request_timeout_seconds", 20)),
+            plan=_jquants_plan(config),
+            requests_per_minute=_jquants_requests_per_minute(config),
+            parallel_fetch=_jquants_parallel_fetch(config),
+            max_parallel_requests=_jquants_max_parallel_requests(config),
+        )
+        payload = provider.fetch_earnings_calendar_period_cached(
+            cache_root,
+            start_date=start_date,
+            end_date=end_date,
+            force_refresh=FORCE_REFRESH_ACTIVE if force_refresh is None else force_refresh,
+        )
+        records = payload.get("records", []) if isinstance(payload.get("records"), list) else []
+        _log_jquants_api_event(
+            endpoint="earnings_calendar",
+            plan=_jquants_plan(config),
+            cache_hit=bool(payload.get("from_cache")),
+            status=_provider_payload_status(payload),
+            records=len(records),
+            saved=bool(payload.get("saved")),
+            cache_path=payload.get("cache_path"),
+            reason=str(payload.get("reason") or ""),
+            **_payload_http_log_fields(payload, getattr(provider, "last_request_metadata", {}) or {}),
+        )
+    except Exception as exc:
+        _record_api_error("earnings_calendar", _api_error_status(exc))
+        _log_jquants_api_event(
+            endpoint="earnings_calendar",
+            plan=_jquants_plan(config),
+            cache_hit=False,
+            status=_api_error_status(exc),
+            records=0,
+            saved=False,
+            cache_path=str(cache_path),
+            error=str(exc),
+            **_api_error_log_fields(exc),
+        )
+        payload = {
+            "records": [],
+            "cache_path": str(cache_path),
+            "from_cache": False,
+            "fallback_used": False,
+            "warning": str(exc),
+            "filter_available": False,
+            "available": False,
+            "saved": False,
+            "reason": _api_error_status(exc),
+        }
+        records = []
+    records = payload.get("records", []) if isinstance(payload.get("records"), list) else []
+    raw_reason = str(payload.get("reason") or payload.get("warning") or "")
+    cache_exists = Path(str(payload.get("cache_path") or cache_path)).exists()
+    reason = raw_reason
+    if not records:
+        if raw_reason == "empty_response":
+            reason = "empty_response"
+        elif not cache_exists:
+            reason = "cache_missing"
+        else:
+            reason = raw_reason or "empty_response"
+    pipeline = _earnings_pipeline_metadata(
+        enabled=True,
+        cache_path=str(payload.get("cache_path") or cache_path),
+        cache_exists=cache_exists,
+        cache_records=len(records),
+        cache_loaded=bool(records),
+        records_loaded=len(records),
+        fetch_start=start_date.isoformat(),
+        fetch_end=end_date.isoformat(),
+        index_built=bool(records),
+        reason=reason,
+    )
+    if not payload.get("filter_available", payload.get("available", False)) and bool(config.get("earnings_filter", {}).get("fail_open", True)):
+        print(f"earnings filter warning: disabled by fail_open. reason={reason}")
+    return {
+        "records": records,
+        "metadata": {
+            "cache_path": payload.get("cache_path"),
+            "from_cache": payload.get("from_cache"),
+            "fallback_used": payload.get("fallback_used"),
+            "warning": payload.get("warning"),
+            "reason": reason,
+            "filter_available": bool(payload.get("filter_available", payload.get("available", False))),
+            "available": bool(payload.get("available", False)),
+            "fetch_start": start_date.isoformat(),
+            "fetch_end": end_date.isoformat(),
+            "cache_exists": pipeline["cache_exists"],
+            "cache_records": pipeline["cache_records"],
+            "pipeline": pipeline,
+        },
+    }
+
+
 def _load_earnings_calendar_for_date(target_date: date, config: dict[str, Any], force_refresh: bool | None = None) -> dict[str, Any]:
+    enabled = bool(config.get("earnings_filter", {}).get("enabled", False))
     if not bool(config.get("earnings_filter", {}).get("enabled", False)):
-        return {"records": [], "metadata": {"filter_available": False, "reason": "earnings_filter disabled"}}
+        return {
+            "records": [],
+            "metadata": {
+                "filter_available": False,
+                "reason": "earnings_filter disabled",
+                "pipeline": _earnings_pipeline_metadata(
+                    enabled=False,
+                    cache_path="",
+                    cache_exists=False,
+                    cache_records=0,
+                    cache_loaded=False,
+                    records_loaded=0,
+                    reason="earnings_filter disabled",
+                ),
+            },
+        }
+    preloaded = _jquants_api_session().setdefault("payloads", {}).get("earnings_calendar")
+    if isinstance(preloaded, dict):
+        records = preloaded.get("records", []) if isinstance(preloaded.get("records"), list) else []
+        metadata = preloaded.get("metadata", {}) if isinstance(preloaded.get("metadata"), dict) else {}
+        pipeline = _earnings_pipeline_metadata(
+            enabled=True,
+            cache_path=str(metadata.get("cache_path") or ""),
+            cache_exists=bool(metadata.get("cache_exists")),
+            cache_records=int(metadata.get("cache_records") or len(records)),
+            cache_loaded=bool(metadata.get("filter_available") or metadata.get("available")),
+            records_loaded=len(records),
+            fetch_start=str(preloaded.get("start_date") or metadata.get("fetch_start") or ""),
+            fetch_end=str(preloaded.get("end_date") or metadata.get("fetch_end") or ""),
+            index_built=bool(records),
+            reason=str(metadata.get("warning") or metadata.get("reason") or ""),
+        )
+        return {
+            "records": records,
+            "metadata": {
+                **metadata,
+                "filter_available": bool(metadata.get("filter_available", metadata.get("available", bool(records)))),
+                "from_preloaded": True,
+                "pipeline": pipeline,
+            },
+        }
     cache_root = ROOT / "data" / "cache"
     cache_path = cache_root / "jquants" / "earnings_calendar" / f"{target_date.isoformat()}.json"
     requested_force_refresh = FORCE_REFRESH_ACTIVE if force_refresh is None else force_refresh
     if target_date < date.today():
-        if cache_path.exists():
-            payload = _read_earnings_calendar_cache(cache_path, target_date)
+        resolved_cache_path = _find_earnings_calendar_cache_for_date(cache_root, target_date)
+        cache_load_called = resolved_cache_path is not None
+        if resolved_cache_path is not None:
+            payload = _read_earnings_calendar_cache(resolved_cache_path, target_date)
         else:
             payload = {
                 "records": [],
@@ -9123,10 +9509,23 @@ def _load_earnings_calendar_for_date(target_date: date, config: dict[str, Any], 
                 "warning": "historical earnings calendar cache unavailable; disabled to avoid future leak",
                 "filter_available": False,
             }
+        records = payload.get("records", []) if isinstance(payload.get("records"), list) else []
+        payload["pipeline"] = _earnings_pipeline_metadata(
+            enabled=True,
+            cache_path=payload.get("cache_path") or str(cache_path),
+            cache_exists=bool(resolved_cache_path and resolved_cache_path.exists()),
+            cache_records=len(records),
+            cache_loaded=bool(cache_load_called and payload.get("filter_available", False)),
+            records_loaded=len(records),
+            fetch_start=str(payload.get("cache_date") or target_date.isoformat()),
+            fetch_end=str(payload.get("cache_date") or target_date.isoformat()),
+            index_built=bool(records),
+            reason=str(payload.get("warning") or payload.get("reason") or ""),
+        )
         if not payload.get("filter_available", False) and bool(config.get("earnings_filter", {}).get("fail_open", True)):
             print(f"earnings filter warning: disabled by fail_open. reason={payload.get('warning')}")
         return {
-            "records": payload.get("records", []),
+            "records": records,
             "metadata": {
                 "cache_path": payload.get("cache_path"),
                 "cache_date": payload.get("cache_date"),
@@ -9134,6 +9533,7 @@ def _load_earnings_calendar_for_date(target_date: date, config: dict[str, Any], 
                 "fallback_used": payload.get("fallback_used"),
                 "warning": payload.get("warning"),
                 "filter_available": payload.get("filter_available", False),
+                "pipeline": payload.get("pipeline", {}),
             },
         }
     allowed, stop_reason = _api_call_allowed("earnings_calendar")
@@ -9187,8 +9587,21 @@ def _load_earnings_calendar_for_date(target_date: date, config: dict[str, Any], 
         }
     if not payload.get("filter_available", False) and bool(config.get("earnings_filter", {}).get("fail_open", True)):
         print(f"earnings filter warning: disabled by fail_open. reason={payload.get('warning')}")
+    records = payload.get("records", []) if isinstance(payload.get("records"), list) else []
+    payload["pipeline"] = _earnings_pipeline_metadata(
+        enabled=True,
+        cache_path=payload.get("cache_path") or str(cache_path),
+        cache_exists=Path(str(payload.get("cache_path") or cache_path)).exists(),
+        cache_records=len(records),
+        cache_loaded=bool(payload.get("from_cache") and payload.get("filter_available", False)),
+        records_loaded=len(records),
+        fetch_start=target_date.isoformat(),
+        fetch_end=target_date.isoformat(),
+        index_built=bool(records),
+        reason=str(payload.get("warning") or payload.get("reason") or ""),
+    )
     return {
-        "records": payload.get("records", []),
+        "records": records,
         "metadata": {
             "cache_path": payload.get("cache_path"),
             "cache_date": payload.get("cache_date"),
@@ -9196,7 +9609,58 @@ def _load_earnings_calendar_for_date(target_date: date, config: dict[str, Any], 
             "fallback_used": payload.get("fallback_used"),
             "warning": payload.get("warning"),
             "filter_available": payload.get("filter_available", False),
+            "pipeline": payload.get("pipeline", {}),
         },
+    }
+
+
+def _find_earnings_calendar_cache_for_date(cache_root: Path, target_date: date) -> Path | None:
+    directory = cache_root / "jquants" / "earnings_calendar"
+    exact = directory / f"{target_date.isoformat()}.json"
+    if exact.exists():
+        return exact
+    if not directory.exists():
+        return None
+    candidates: list[tuple[date, Path]] = []
+    for path in directory.glob("*.json"):
+        try:
+            cache_date = date.fromisoformat(path.stem)
+        except ValueError:
+            continue
+        if cache_date <= target_date:
+            candidates.append((cache_date, path))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def _earnings_pipeline_metadata(
+    *,
+    enabled: bool,
+    cache_path: str,
+    cache_exists: bool,
+    cache_records: int,
+    cache_loaded: bool,
+    records_loaded: int,
+    fetch_start: str = "",
+    fetch_end: str = "",
+    index_built: bool = False,
+    reason: str = "",
+) -> dict[str, Any]:
+    return {
+        "feature_enabled": enabled,
+        "fetch_start": fetch_start,
+        "fetch_end": fetch_end,
+        "cache_path": cache_path,
+        "cache_exists": cache_exists,
+        "cache_records": int(cache_records or 0),
+        "cache_loaded": cache_loaded,
+        "index_built": index_built,
+        "candidate_matching_called": False,
+        "earnings_records_loaded": int(records_loaded or 0),
+        "matched_candidates": 0,
+        "rejected_candidates": 0,
+        "reason": reason,
     }
 
 
@@ -9919,6 +10383,19 @@ def _api_error_status(exc: Exception) -> str:
     return "error"
 
 
+def _record_jquants_empty_marker(endpoint: str, start_date: date, end_date: date, reason: str) -> None:
+    marker_path = ROOT / "data" / "cache" / "jquants" / "empty_ranges.json"
+    payload: dict[str, Any] = {}
+    if marker_path.exists():
+        try:
+            payload = read_json(marker_path)
+        except Exception:
+            payload = {}
+    ranges = payload.setdefault(endpoint, [])
+    ranges.append({"start": start_date.isoformat(), "end": end_date.isoformat(), "reason": reason})
+    write_json(marker_path, payload)
+
+
 def _api_error_log_fields(exc: Exception) -> dict[str, str]:
     if not isinstance(exc, JQuantsApiError):
         return {}
@@ -9978,6 +10455,7 @@ def _log_jquants_api_event(
     attempt: Any = "",
     retry_after: str = "",
     error_reason: str = "",
+    result: str = "",
 ) -> None:
     path = ROOT / "logs" / "jquants_api.log"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -10000,6 +10478,8 @@ def _log_jquants_api_event(
         line = f"{line} retry_after={retry_after}"
     if error_reason:
         line = f"{line} error_reason={error_reason}"
+    if result:
+        line = f"{line} result={result}"
     if request_url:
         line = f"{line} request_url={request_url}"
     if request_params:

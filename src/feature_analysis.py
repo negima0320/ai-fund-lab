@@ -124,6 +124,8 @@ def build_feature_analysis(
     score_formula_audit = _score_formula_audit(config, records, scoring_rows, component_validation)
     score_effective_range_audit = _score_effective_range_audit(config, records, scoring_rows)
     earnings_exposure = _earnings_calendar_exposure(records, scoring_rows)
+    earnings_filter_debug = _earnings_filter_debug(config, scoring_rows)
+    earnings_pipeline = _earnings_pipeline(scoring_rows, earnings_filter_debug)
     feature_activation_audit = build_feature_activation_audit(config, records, scoring_rows, _registry_features(root, profile_id))
     relative_strength_debug = _relative_strength_debug(scoring_rows)
     relative_strength_pipeline = _relative_strength_pipeline(config, scoring_rows)
@@ -166,6 +168,8 @@ def build_feature_analysis(
         "relative_strength_pipeline": relative_strength_pipeline,
         "relative_strength_debug": relative_strength_debug,
         "earnings_calendar_exposure": earnings_exposure,
+        "earnings_filter_debug": earnings_filter_debug,
+        "earnings_pipeline": earnings_pipeline,
         "relative_strength_analysis": {
             "benchmark_source": _group_by(records, lambda item: item.get("benchmark_source") or "unknown"),
             "relative_strength_score": _group_by(
@@ -267,6 +271,14 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "## Earnings Calendar Exposure",
         "",
         *_earnings_calendar_exposure_lines(analysis.get("earnings_calendar_exposure", {})),
+        "",
+        "## Earnings Filter Debug",
+        "",
+        *_earnings_filter_debug_lines(analysis.get("earnings_filter_debug", {})),
+        "",
+        "## Earnings Pipeline",
+        "",
+        *_earnings_pipeline_lines(analysis.get("earnings_pipeline", {})),
         "",
         "## market_regime別勝率",
         "",
@@ -387,6 +399,144 @@ def _earnings_calendar_exposure(records: list[dict[str, Any]], scoring_rows: lis
         "selected_earnings_exposure_count": selected_exposure,
         "stop_loss_earnings_exposure_count": stop_loss_exposure,
         "false_positive_earnings_exposure_count": false_positive_exposure,
+    }
+
+
+def _earnings_filter_debug(config: dict[str, Any], scoring_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    rows = list(scoring_rows)
+    earnings_filter = config.get("earnings_filter", {}) if isinstance(config.get("earnings_filter"), dict) else {}
+    enabled = bool(earnings_filter.get("enabled"))
+    records_count = int(max([_number(row.get("earnings_calendar_records_count")) or 0 for row in rows], default=0))
+    info_found = [row for row in rows if _boolish(row.get("earnings_info_found")) or row.get("earnings_candidate_date")]
+    rejected = [row for row in rows if _earnings_filter_row_rejected(row)]
+    checked = [row for row in rows if _boolish(row.get("earnings_filter_checked"))]
+    status = _earnings_filter_status(enabled, records_count, len(info_found), len(rejected))
+    warnings: list[str] = []
+    if enabled and status != "active":
+        warnings.append(status)
+    return {
+        "enabled": enabled,
+        "status": status,
+        "earnings_calendar_records": records_count,
+        "candidate_count": len(rows),
+        "earnings_info_found_count": len(info_found),
+        "earnings_info_missing_count": len(rows) - len(info_found),
+        "earnings_filter_candidate_count": len(rejected),
+        "earnings_filter_rejected_count": len(rejected),
+        "earnings_filter_applied_count": len(checked),
+        "unknown_earnings_count": len(rows) - len(info_found),
+        "days_to_earnings_distribution": _days_to_earnings_distribution(rows),
+        "selection_diff_relation": (
+            "earnings_filter_rejected_count is the direct selection-effect candidate count; "
+            "compare-profiles selection_diff should increase when these rows would otherwise pass selection."
+        ),
+        "warnings": sorted(set(warnings)),
+        "top_rejected_candidates": [_earnings_rejected_debug_record(row) for row in rejected[:20]],
+        "nearest_earnings_candidates": [_earnings_nearest_debug_record(row) for row in _nearest_earnings_rows(rows)[:20]],
+    }
+
+
+def _earnings_filter_status(enabled: bool, records_count: int, found_count: int, rejected_count: int) -> str:
+    if not enabled:
+        return "disabled"
+    if records_count == 0:
+        return "earnings_data_unavailable"
+    if found_count == 0:
+        return "no_candidate_match"
+    if rejected_count == 0:
+        return "inactive_in_practice"
+    return "active"
+
+
+def _earnings_pipeline(scoring_rows: list[dict[str, Any]], earnings_debug: dict[str, Any]) -> dict[str, Any]:
+    rows = list(scoring_rows)
+    first = rows[0] if rows else {}
+    cache_records = int(max([_number(row.get("earnings_pipeline_cache_records")) or 0 for row in rows], default=0))
+    records_loaded = int(max([_number(row.get("earnings_pipeline_records_loaded")) or 0 for row in rows], default=0))
+    matched = int(max([_number(row.get("earnings_pipeline_matched_candidates")) or 0 for row in rows], default=0))
+    rejected = int(max([_number(row.get("earnings_pipeline_rejected_candidates")) or 0 for row in rows], default=0))
+    return {
+        "feature_enabled": any(_boolish(row.get("earnings_pipeline_feature_enabled")) for row in rows)
+        or bool(earnings_debug.get("enabled")),
+        "fetch_start": first.get("earnings_pipeline_fetch_start") or "",
+        "fetch_end": first.get("earnings_pipeline_fetch_end") or "",
+        "cache_path": first.get("earnings_pipeline_cache_path") or "",
+        "cache_exists": any(_boolish(row.get("earnings_pipeline_cache_exists")) for row in rows),
+        "cache_records": cache_records,
+        "cache_loaded": any(_boolish(row.get("earnings_pipeline_cache_loaded")) for row in rows),
+        "index_built": any(_boolish(row.get("earnings_pipeline_index_built")) for row in rows),
+        "candidate_matching_called": any(_boolish(row.get("earnings_pipeline_candidate_matching_called")) for row in rows),
+        "earnings_records_loaded": records_loaded or int(earnings_debug.get("earnings_calendar_records") or 0),
+        "matched_candidates": matched or int(earnings_debug.get("earnings_info_found_count") or 0),
+        "rejected_candidates": rejected or int(earnings_debug.get("earnings_filter_rejected_count") or 0),
+        "reason": first.get("earnings_pipeline_reason") or "",
+    }
+
+
+def _days_to_earnings_distribution(rows: list[dict[str, Any]]) -> dict[str, int]:
+    buckets = {"<= -3": 0, "-2 to +2": 0, "+3 to +7": 0, "+8 to +14": 0, "+15+": 0, "unknown": 0}
+    for row in rows:
+        days = _number(row.get("earnings_days_until_earnings"))
+        if days is None:
+            buckets["unknown"] += 1
+        elif days <= -3:
+            buckets["<= -3"] += 1
+        elif -2 <= days <= 2:
+            buckets["-2 to +2"] += 1
+        elif 3 <= days <= 7:
+            buckets["+3 to +7"] += 1
+        elif 8 <= days <= 14:
+            buckets["+8 to +14"] += 1
+        else:
+            buckets["+15+"] += 1
+    return buckets
+
+
+def _earnings_filter_row_rejected(row: dict[str, Any]) -> bool:
+    return bool(row.get("earnings_filter_blocked")) or "決算予定日前後" in str(row.get("earnings_filter_reason") or "")
+
+
+def _earnings_rejected_debug_record(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "date": row.get("date"),
+        "code": row.get("code"),
+        "company_name": row.get("name"),
+        "earnings_date": row.get("earnings_candidate_date") or row.get("earnings_announcement_date"),
+        "days_to_earnings": _number(row.get("earnings_days_until_earnings")),
+        "reason": row.get("earnings_filter_reason") or row.get("rejected_reason"),
+        "action": "rejected",
+    }
+
+
+def _nearest_earnings_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    found = [
+        row for row in rows
+        if _number(row.get("earnings_days_until_earnings")) is not None
+    ]
+    return sorted(
+        found,
+        key=lambda row: (
+            abs(float(_number(row.get("earnings_days_until_earnings")) or 0)),
+            str(row.get("date") or ""),
+            str(row.get("code") or ""),
+        ),
+    )
+
+
+def _earnings_nearest_debug_record(row: dict[str, Any]) -> dict[str, Any]:
+    if _earnings_filter_row_rejected(row):
+        action = "rejected"
+    elif _boolish(row.get("selected")):
+        action = "selected"
+    else:
+        action = "candidate"
+    return {
+        "date": row.get("date"),
+        "code": row.get("code"),
+        "company_name": row.get("name"),
+        "earnings_date": row.get("earnings_candidate_date") or row.get("earnings_announcement_date"),
+        "days_to_earnings": _number(row.get("earnings_days_until_earnings")),
+        "action": action,
     }
 
 
@@ -1065,6 +1215,97 @@ def _earnings_calendar_exposure_lines(analysis: dict[str, Any]) -> list[str]:
         f"- selected銘柄のうち決算前後だった件数: {analysis.get('selected_earnings_exposure_count', 0)}",
         f"- stop_loss銘柄のうち決算前後だった件数: {analysis.get('stop_loss_earnings_exposure_count', 0)}",
         f"- false_positive銘柄のうち決算前後だった件数: {analysis.get('false_positive_earnings_exposure_count', 0)}",
+    ]
+
+
+def _earnings_filter_debug_lines(debug: dict[str, Any]) -> list[str]:
+    if not debug:
+        return ["- データなし"]
+    lines = [
+        f"- status: {debug.get('status') or 'unknown'}",
+        f"- earnings_calendar_records: {debug.get('earnings_calendar_records', 0)}",
+        f"- candidate_count: {debug.get('candidate_count', 0)}",
+        f"- earnings_info_found_count: {debug.get('earnings_info_found_count', 0)}",
+        f"- earnings_info_missing_count: {debug.get('earnings_info_missing_count', 0)}",
+        f"- earnings_filter_candidate_count: {debug.get('earnings_filter_candidate_count', 0)}",
+        f"- earnings_filter_rejected_count: {debug.get('earnings_filter_rejected_count', 0)}",
+        f"- earnings_filter_applied_count: {debug.get('earnings_filter_applied_count', 0)}",
+        f"- unknown_earnings_count: {debug.get('unknown_earnings_count', 0)}",
+        f"- selection_diff_relation: {debug.get('selection_diff_relation') or 'N/A'}",
+        "",
+        "### warnings",
+        "",
+    ]
+    warnings = debug.get("warnings", [])
+    lines.extend(f"- {warning}" for warning in warnings) if warnings else lines.append("- なし")
+    distribution = debug.get("days_to_earnings_distribution", {})
+    lines.extend(
+        [
+            "",
+            "### days_to_earnings distribution",
+            "",
+            f"- <= -3: {distribution.get('<= -3', 0)}",
+            f"- -2 to +2: {distribution.get('-2 to +2', 0)}",
+            f"- +3 to +7: {distribution.get('+3 to +7', 0)}",
+            f"- +8 to +14: {distribution.get('+8 to +14', 0)}",
+            f"- +15+: {distribution.get('+15+', 0)}",
+            f"- unknown: {distribution.get('unknown', 0)}",
+            "",
+            "### nearest earnings candidates",
+            "",
+            "| date | code | company_name | earnings_date | days_to_earnings | action |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    nearest = debug.get("nearest_earnings_candidates", [])
+    if nearest:
+        for row in nearest:
+            lines.append(
+                "| "
+                f"{row.get('date')} | {row.get('code')} | {row.get('company_name') or ''} | "
+                f"{row.get('earnings_date') or ''} | {_format_number(row.get('days_to_earnings'))} | {row.get('action') or ''} |"
+            )
+    else:
+        lines.append("| なし |  |  |  |  |  |")
+    lines.extend(
+        [
+            "",
+            "### Top rejected candidates",
+            "",
+            "| date | code | earnings_date | days_to_earnings | reason |",
+            "|---|---:|---|---:|---|",
+        ]
+    )
+    top = debug.get("top_rejected_candidates", [])
+    if top:
+        for row in top:
+            lines.append(
+                "| "
+                f"{row.get('date')} | {row.get('code')} | {row.get('earnings_date') or ''} | "
+                f"{_format_number(row.get('days_to_earnings'))} | {row.get('reason') or ''} |"
+            )
+    else:
+        lines.append("| なし |  |  |  |  |")
+    return lines
+
+
+def _earnings_pipeline_lines(pipeline: dict[str, Any]) -> list[str]:
+    if not pipeline:
+        return ["- データなし"]
+    return [
+        f"- feature enabled: {str(bool(pipeline.get('feature_enabled'))).lower()}",
+        f"- fetch_start: {pipeline.get('fetch_start') or 'N/A'}",
+        f"- fetch_end: {pipeline.get('fetch_end') or 'N/A'}",
+        f"- cache path: {pipeline.get('cache_path') or 'N/A'}",
+        f"- cache exists: {str(bool(pipeline.get('cache_exists'))).lower()}",
+        f"- cache records: {pipeline.get('cache_records', 0)}",
+        f"- cache loaded: {str(bool(pipeline.get('cache_loaded'))).lower()}",
+        f"- index built: {str(bool(pipeline.get('index_built'))).lower()}",
+        f"- candidate matching called: {str(bool(pipeline.get('candidate_matching_called'))).lower()}",
+        f"- earnings records loaded: {pipeline.get('earnings_records_loaded', 0)}",
+        f"- matched candidates: {pipeline.get('matched_candidates', 0)}",
+        f"- rejected candidates: {pipeline.get('rejected_candidates', 0)}",
+        f"- reason: {pipeline.get('reason') or 'N/A'}",
     ]
 
 

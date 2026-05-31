@@ -12,7 +12,7 @@ J-Quants連携はv2 endpointだけを使います。旧v1 endpoint（`/listed/in
 | prices | OK | OK | 株価四本値 |
 | financial_statements | OK | OK | 財務情報capability検証 |
 | earnings_calendar | OK | OK | 決算発表予定日フィルター |
-| trading_calendar | OK | OK | 営業日判定 |
+| trading_calendar | disabled | OK | 営業日判定 |
 | topix_prices | disabled | OK | TOPIX Relative Strength |
 | investor_types | disabled | OK | 投資部門別情報 |
 
