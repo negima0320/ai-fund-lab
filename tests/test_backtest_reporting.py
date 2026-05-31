@@ -68,6 +68,57 @@ def test_backtest_does_not_generate_article_markdown_by_default(monkeypatch, con
     assert not (tmp_path / "reports" / "articles" / "backtests").exists()
 
 
+def test_indicator_fetch_start_is_before_trade_start(config_copy) -> None:
+    config_copy.setdefault("backtest", {})["indicator_fetch_lookback_days"] = 180
+    config_copy.setdefault("jquants", {})["earliest_supported_date"] = {"free": "2024-01-01"}
+
+    trade_start = date(2024, 7, 22)
+    fetch_start = main_module._indicator_fetch_start_date(trade_start, config_copy)
+
+    assert fetch_start < trade_start
+
+
+def test_backtest_fetches_prices_from_indicator_lookback(monkeypatch, config_copy, tmp_path) -> None:
+    config_copy.setdefault("backtest", {})["indicator_fetch_lookback_days"] = 180
+    config_copy.setdefault("backtest", {})["indicator_min_history_days"] = 2
+    config_copy.setdefault("jquants", {})["earliest_supported_date"] = {"free": "2024-01-01"}
+    _patch_minimal_backtest(monkeypatch, config_copy, tmp_path)
+    captured: dict[str, object] = {"indicator_dates": []}
+
+    def fake_ensure_price_history(_provider: str, fetch_start: date, fetch_end: date) -> None:
+        captured["fetch_start"] = fetch_start
+        captured["fetch_end"] = fetch_end
+
+    def fake_available_cached_price_dates(start: date, _end: date) -> list[date]:
+        if start < date(2026, 1, 2):
+            return [date(2025, 12, 30), date(2026, 1, 2)]
+        return [date(2026, 1, 2)]
+
+    monkeypatch.setattr(main_module, "ensure_price_history_for_backtest", fake_ensure_price_history)
+    monkeypatch.setattr(main_module, "available_cached_price_dates", fake_available_cached_price_dates)
+    monkeypatch.setattr(main_module, "ensure_indicators", lambda _provider, target_date: captured["indicator_dates"].append(target_date))
+
+    main_module.run_backtest("jquants", "2026-01-02", "2026-01-02")
+
+    assert captured["fetch_start"] < date(2026, 1, 2)
+    assert captured["fetch_end"] == date(2026, 1, 2)
+    assert captured["indicator_dates"] == ["2026-01-02"]
+
+
+def test_backtest_skips_day_when_indicator_history_is_insufficient(monkeypatch, config_copy, tmp_path) -> None:
+    config_copy.setdefault("backtest", {})["indicator_fetch_lookback_days"] = 180
+    config_copy.setdefault("backtest", {})["indicator_min_history_days"] = 60
+    _patch_minimal_backtest(monkeypatch, config_copy, tmp_path)
+    calls = {"indicators": 0}
+
+    monkeypatch.setattr(main_module, "available_cached_price_dates", lambda *_args: [date(2026, 1, 2)])
+    monkeypatch.setattr(main_module, "ensure_indicators", lambda *_args: calls.__setitem__("indicators", calls["indicators"] + 1))
+
+    main_module.run_backtest("jquants", "2026-01-02", "2026-01-02")
+
+    assert calls["indicators"] == 0
+
+
 def test_run_daily_report_writer_generates_daily_article(config_copy, monkeypatch, tmp_path) -> None:
     config_copy["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
     monkeypatch.setattr(main_module, "ROOT", tmp_path)

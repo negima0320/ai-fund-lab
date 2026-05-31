@@ -46,6 +46,8 @@ backtest:
   disable_news_fetch: true
   disable_openai: true
   indicator_mode: fast
+  indicator_min_history_days: 60
+  indicator_fetch_lookback_days: 180
 
 market_filter:
   enabled: true

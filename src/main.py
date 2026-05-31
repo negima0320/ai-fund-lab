@@ -4455,7 +4455,12 @@ def _api_unavailable_payload(endpoint: str, reason: str) -> dict[str, Any]:
     }
 
 
-def _preload_light_api_context(config: dict[str, Any], start_date: date, end_date: date) -> None:
+def _preload_light_api_context(
+    config: dict[str, Any],
+    start_date: date,
+    end_date: date,
+    indicator_fetch_start_date: date | None = None,
+) -> None:
     if bool(config.get("earnings_filter", {}).get("enabled", False)):
         earnings_start, earnings_end = _earnings_calendar_preload_range(start_date, end_date)
         payload = _load_earnings_calendar_for_period(earnings_start, earnings_end, config)
@@ -4466,7 +4471,7 @@ def _preload_light_api_context(config: dict[str, Any], start_date: date, end_dat
             "end_date": earnings_end.isoformat(),
         }
     if _relative_strength_enabled_for_indicators(config) and _expected_relative_strength_benchmark_source(config) == "topix":
-        topix_start = _topix_preload_start_date(start_date)
+        topix_start = indicator_fetch_start_date or _topix_preload_start_date(start_date)
         payload = _load_topix_prices_for_period_with_options(topix_start, end_date, config, use_preloaded=False)
         _jquants_api_session().setdefault("payloads", {})["topix_prices"] = {
             "records": payload.get("records", []),
@@ -5055,6 +5060,30 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
             item["relative_strength_calculated"] = rs_calculated and item.get("relative_strength_5d") is not None
     excluded_count = len(prime_codes) - len(indicators)
     if not indicators:
+        if BACKTEST_MODE_ACTIVE:
+            print(
+                f"{BACKTEST_DAY_LOG_PREFIX} warning: No indicators calculated for {target_date_text}. "
+                "Price history may be insufficient or target date may have no data; skipping day."
+            )
+            payload = {
+                "provider": "jquants",
+                "date": target_date_text,
+                "indicator_mode": indicator_mode,
+                "relative_strength_enabled": enable_relative_strength,
+                "benchmark_source": benchmark_payload.get("benchmark_source"),
+                "lookback_business_days": lookback_days,
+                "input_days": input_days,
+                "input_rows": len(price_rows),
+                "target_stocks": target_stocks,
+                "calculated_count": 0,
+                "excluded_count": excluded_count,
+                "insufficient_history_count": insufficient_history_count,
+                "skip_reason": "insufficient_indicator_history",
+                "indicators": [],
+            }
+            write_json(output_path, payload)
+            write_json(profile_output_path, payload)
+            return
         raise SystemExit(f"No indicators calculated for {target_date_text}. Price history may be insufficient or target date may have no data.")
 
     payload = {
@@ -6248,17 +6277,18 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
     global BACKTEST_MODE_ACTIVE, BACKTEST_PROFILE_TIMINGS
     if provider_name != "jquants":
         raise SystemExit("backtest mode currently supports --provider jquants only.")
-    start_date = date.fromisoformat(start_date_text)
+    requested_start_date = date.fromisoformat(start_date_text)
     end_date = date.fromisoformat(end_date_text)
     config = load_config(CONFIG_PATH)
-    effective_start_date = max(start_date, jquants_earliest_supported_date(config, "prices") or start_date)
-    if effective_start_date != start_date:
+    effective_start_date = max(requested_start_date, jquants_earliest_supported_date(config, "prices") or requested_start_date)
+    if effective_start_date != requested_start_date:
         print(
             "warning: requested start-date is before J-Quants supported range; "
-            f"requested={start_date.isoformat()} effective={effective_start_date.isoformat()}"
+            f"requested={requested_start_date.isoformat()} effective={effective_start_date.isoformat()}"
         )
-        start_date = effective_start_date
-        start_date_text = start_date.isoformat()
+    start_date = effective_start_date
+    start_date_text = start_date.isoformat()
+    indicator_fetch_start_date = _indicator_fetch_start_date(start_date, config)
     range_key = f"{start_date_text}_to_{end_date_text}"
     BACKTEST_MODE_ACTIVE = True
     BACKTEST_PROFILE_TIMINGS = {}
@@ -6275,24 +6305,47 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
     processed_dates = []
 
     try:
-        _run_daily_step(1, 3, "fetch-period-prices", lambda: ensure_price_history_for_backtest(provider_name, start_date, end_date))
+        print("backtest date range:")
+        print(f"- requested_start_date: {requested_start_date.isoformat()}")
+        print(f"- effective_trade_start_date: {start_date.isoformat()}")
+        print(f"- indicator_fetch_start_date: {indicator_fetch_start_date.isoformat()}")
+        print(f"- indicator_fetch_lookback_days: {_backtest_indicator_fetch_lookback_days(config)}")
+        print(f"- indicator_min_history_days: {_backtest_indicator_min_history_days(config)}")
+        _run_daily_step(1, 3, "fetch-period-prices", lambda: ensure_price_history_for_backtest(provider_name, indicator_fetch_start_date, end_date))
         trading_dates = _run_daily_step(2, 3, "detect-trading-days", lambda: available_cached_price_dates(start_date, end_date))
         if not trading_dates:
             raise SystemExit("No cached trading days found for the backtest period. The period may be weekend, holiday, or unavailable.")
+        price_history_days = _indicator_history_day_count(indicator_fetch_start_date, end_date)
 
         print(f"backtest trading_days: {len(trading_dates)}")
+        print(f"backtest price_history_days: {price_history_days}")
+        print(f"backtest target_trading_days: {len(trading_dates)}")
         print(f"backtest news fetch: {'disabled' if _backtest_disable_news(config) else 'enabled'}")
         print(f"backtest OpenAI: {'disabled' if _backtest_disable_openai(config) else 'configured by profile'}")
         print(f"backtest indicator_mode: {_backtest_indicator_mode(config)}")
         print(f"backtest relative_strength: {'enabled' if _relative_strength_enabled_for_indicators(config) else 'disabled'}")
         print(f"backtest fast_analysis: {'enabled' if _fast_analysis_enabled(config) else 'disabled'}")
-        _preload_light_api_context(config, start_date, end_date)
+        _preload_light_api_context(config, start_date, end_date, indicator_fetch_start_date=indicator_fetch_start_date)
         for index, trading_date in enumerate(trading_dates, start=1):
             target_date_text = trading_date.isoformat()
             global BACKTEST_DAY_LOG_PREFIX
             BACKTEST_DAY_LOG_PREFIX = f"[day {index}/{len(trading_dates)}] {target_date_text}"
             print(f"[day {index}/{len(trading_dates)}] {target_date_text} start")
+            has_history, indicator_input_days, indicator_min_days = _has_minimum_indicator_history(indicator_fetch_start_date, trading_date, config)
+            if not has_history:
+                print(
+                    f"[day {index}/{len(trading_dates)}] {target_date_text} warning: "
+                    f"indicator history insufficient; input_days={indicator_input_days} "
+                    f"min_required={indicator_min_days}. skipping day."
+                )
+                continue
             _run_backtest_day_step(index, len(trading_dates), target_date_text, "calculate-indicators", lambda: ensure_indicators(provider_name, target_date_text), lambda: _backtest_indicator_metrics(target_date_text))
+            if not _indicator_payload_has_rows(config, target_date_text):
+                print(
+                    f"[day {index}/{len(trading_dates)}] {target_date_text} warning: "
+                    "indicator payload is empty after calculation; skipping day."
+                )
+                continue
             _run_backtest_day_step(index, len(trading_dates), target_date_text, "market-context", lambda: ensure_market_context(provider_name, target_date_text), lambda: _backtest_market_context_metrics(target_date_text))
             _run_backtest_day_step(index, len(trading_dates), target_date_text, "screen", lambda: run_screen(provider_name, target_date_text), lambda: _backtest_screen_metrics(config, target_date_text))
             scoring_log = _run_backtest_day_step(index, len(trading_dates), target_date_text, "score", lambda: score_for_date(provider_name, target_date_text), lambda: _backtest_score_metrics(config, target_date_text))
@@ -6622,6 +6675,43 @@ def _fast_analysis_enabled(config: dict[str, Any]) -> bool:
 def _backtest_indicator_mode(config: dict[str, Any]) -> str:
     mode = str(config.get("backtest", {}).get("indicator_mode", "fast"))
     return mode if mode in {"full", "fast", "minimal"} else "fast"
+
+
+def _backtest_indicator_fetch_lookback_days(config: dict[str, Any]) -> int:
+    return max(0, int(config.get("backtest", {}).get("indicator_fetch_lookback_days", 180)))
+
+
+def _backtest_indicator_min_history_days(config: dict[str, Any]) -> int:
+    return max(1, int(config.get("backtest", {}).get("indicator_min_history_days", 60)))
+
+
+def _indicator_fetch_start_date(trade_start_date: date, config: dict[str, Any]) -> date:
+    requested = trade_start_date - timedelta(days=_backtest_indicator_fetch_lookback_days(config))
+    earliest = jquants_earliest_supported_date(config, "prices")
+    return max(requested, earliest) if earliest else requested
+
+
+def _indicator_history_day_count(fetch_start_date: date, target_date: date) -> int:
+    return len(available_cached_price_dates(fetch_start_date, target_date))
+
+
+def _has_minimum_indicator_history(
+    fetch_start_date: date,
+    target_date: date,
+    config: dict[str, Any],
+) -> tuple[bool, int, int]:
+    input_days = _indicator_history_day_count(fetch_start_date, target_date)
+    min_days = _backtest_indicator_min_history_days(config)
+    return input_days >= min_days, input_days, min_days
+
+
+def _indicator_payload_has_rows(config: dict[str, Any], target_date_text: str) -> bool:
+    profile_path = processed_profile_path(config, f"indicators_{target_date_text}.json")
+    path = profile_path if profile_path.exists() else ROOT / "data" / "processed" / f"indicators_{target_date_text}.json"
+    if not path.exists():
+        return False
+    payload = read_json(path)
+    return bool(payload.get("indicators"))
 
 
 def _relative_strength_enabled_for_indicators(config: dict[str, Any]) -> bool:
