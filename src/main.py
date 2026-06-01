@@ -13,7 +13,7 @@ import shutil
 import sqlite3
 import sys
 import time
-from argparse import ArgumentParser
+from argparse import ArgumentParser, RawDescriptionHelpFormatter
 from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
@@ -138,6 +138,132 @@ LIGHT_API_CALL_LIMITS = {
     "financial_statements": 3,
 }
 JQUANTS_API_SESSION: dict[str, Any] = {}
+
+
+CLI_HELP_EPILOG = """\
+Mode overview:
+  Core:
+    demo                  Run the dummy-data MVP flow. Uses --days.
+    help                  Show this project help.
+    status                Show active profile/provider/DB/safety status. Use --format json.
+    init-db               Initialize or migrate the SQLite database.
+    analyze               Generate analysis_latest, feature_analysis, and selection_quality reports.
+    release-notes         Generate release notes from git history. Requires --since/--until.
+    full-paper-run        Run preflight, backtest, exports, and analysis for a period.
+    preflight             Check environment, config, DB, API keys, and safety settings.
+    simulate-operation    Simulate operation schedule for --days.
+
+  Profiles and experiments:
+    list-profiles         List registered profiles.
+    profile-info          Show one profile's registry/config details. Uses --profile.
+    compare-profiles      Compare specified profiles. Requires --profiles and date range.
+    compare-experiments   Compare registry experiments for a base profile.
+    run-experiments       Run baseline + experiment profiles for the same period.
+
+  Provider, broker, and health:
+    healthcheck           Check J-Quants connectivity.
+    tachibana-healthcheck Check Tachibana settings. Uses --env demo/live.
+    db-check              Validate database connectivity/content.
+    account-snapshot      Read broker account snapshot through the broker interface.
+    demo-auto-order       Demo auto-order path; live trading remains blocked.
+    jquants-api-summary   Print J-Quants API session/cache summary.
+    jquants-smoke-test    Smoke-test selected J-Quants endpoint. Uses --endpoint.
+    validate-config       Validate config/profile. Use --strict to fail on warnings.
+
+  Daily data pipeline:
+    list-stocks           Fetch listed stock master.
+    fetch-prices          Fetch prices for --date.
+    calculate-indicators  Build indicators for --date.
+    screen                Build candidates for --date.
+    score                 Score candidates for --date.
+    trade                 Execute paper trade for --date.
+    preview-orders        Preview orders without sending.
+    publish-article       Mark a manually published article URL. Requires --note-url.
+    run-daily             Run the daily pipeline for --date.
+    backtest              Run backtest for --start-date/--end-date.
+
+  AI/export/reporting:
+    export-ai-dataset     Export JSONL dataset for a period.
+    export-ai-summary     Export Markdown summary for a period.
+    performance-audit     Audit storage size, JSON parse samples, and optimization hints.
+
+  Storage/cache maintenance:
+    storage-audit         Report storage usage and duplicate processed files.
+    cleanup-storage       Clean safe old artifacts. Dry-run unless --apply.
+    compact-processed-cache Compact processed cache files. Dry-run unless --apply.
+    inspect-cache         Inspect indicators/candidates/market_context for --date.
+    clean-reports         Clean report artifacts. Dry-run unless --yes.
+    clean-experiments     Clean experiment outputs. Dry-run unless --yes.
+    clean-cache           Clean provider cache. Dry-run unless --yes.
+    clean-articles        Clean article artifacts. Dry-run unless --yes.
+
+Common option groups:
+  Profile/provider:
+    --profile, --profiles, --base/--base-profile, --provider, --jquants-plan
+  Dates:
+    --date for one-day modes; --start-date/--end-date or --period for period modes
+  Backtest/run-experiments load control:
+    --skip-price-fetch, --quiet, --progress-interval, --summary-only,
+    --no-daily-logs, --fast-analysis, --storage-mode, --entry-timing
+  Integrity and reuse:
+    --strict-integrity, --skip-backtest, --skip-analyze
+  Cleanup:
+    --yes, --apply, --dry-run, --older-than-days, --keep-days,
+    --keep-latest-experiments, --include-reports, --include-logs,
+    --include-processed, --include-latest, --cache-kind, --verbose
+
+Output, log, and cache hierarchy:
+  storage/
+    ai_fund_lab.sqlite3 is the SQLite DB used by operational/trade/report flows.
+    STOP_TRADING blocks new buys when present.
+  data/raw/
+    J-Quants raw snapshots such as prices_YYYY-MM-DD.json,
+    listed_stocks_jquants.json, prime_stocks_jquants.json, and no_data_days_jquants.json.
+  data/cache/jquants/
+    Provider/API response cache. Main subdirs are prices, topix_prices,
+    earnings_calendar, investor_types, financial_statements, listed_info,
+    and trading_calendar. unsupported_ranges.json and empty_ranges.json
+    suppress repeated impossible/empty API fetches.
+  data/processed/
+    Global files include indicators_YYYY-MM-DD.json and market_context_YYYY-MM-DD.json.
+    Profile files live under <profile_id>/ and include indicators_YYYY-MM-DD.json,
+    candidates_YYYY-MM-DD.json, and scored_candidates_YYYY-MM-DD.json.
+    Common processed cache lives under common/indicators/<cache_key>/ and
+    common/candidates/<cache_key>/ for reuse across compatible experiment profiles.
+  logs/
+    Daily/profile logs include screening/<profile_id>/, scoring/<profile_id>/,
+    ai_decision/<profile_id>/, market_context/<profile_id>/,
+    trades/<profile_id>/, portfolio/<profile_id>/, safety/<profile_id>/,
+    and reflections/<profile_id>/.
+    Backtest logs live under backtests/<profile_id>/<START>_to_<END>/ with
+    backtest_summary.json, scoring_YYYY-MM-DD.json, trades_YYYY-MM-DD.json,
+    portfolio_YYYY-MM-DD.json, summary.csv, and trades.csv.
+  reports/
+    Profile backtest analysis lives under <profile_id>/backtests/.
+    Backtest detail reports live under backtests/<profile_id>/<START>_to_<END>/.
+    Experiment summaries live under experiments/<START>_to_<END>/<base_profile>/.
+    Cross-profile comparison exports live under profile_comparisons/.
+    Daily article drafts/exports live under articles/daily/YYYY/MM/<profile_id>/.
+
+Cache notes:
+  data/cache/jquants is provider response cache; it is normally kept by cleanup-storage.
+  data/processed/common is the experiment common processed cache keyed by settings.
+  data/processed/<profile_id> is the runtime profile input/output path; compacting
+  can link compatible profile files back to the common processed cache.
+  scored_candidates are profile-specific because scoring settings and audits can differ.
+
+Examples:
+  python src/main.py --mode status
+  python src/main.py --mode run-daily --provider jquants --profile rookie_dealer_02_v2_1 --date 2026-03-06
+  python src/main.py --mode backtest --profile rookie_dealer_02_v2_1 --start-date 2026-01-01 --end-date 2026-03-06 --skip-price-fetch --quiet
+  python src/main.py --mode run-experiments --base-profile rookie_dealer_02_v2_1 --start-date 2026-01-01 --end-date 2026-03-06 --skip-price-fetch --quiet --strict-integrity
+  python src/main.py --mode inspect-cache --target indicators --date 2026-03-06
+  python src/main.py --mode cleanup-storage --keep-days 30 --include-reports --apply
+
+Notes:
+  Live trading is blocked in this project path. PaperBroker is the normal execution path.
+  Tachibana demo/live modes are read-only guarded, and API secrets are not printed.
+"""
 
 
 def main() -> None:
@@ -395,7 +521,11 @@ def main() -> None:
 
 
 def parse_args() -> Any:
-    parser = ArgumentParser(description="AIファンド研究所 MVP runner")
+    parser = ArgumentParser(
+        description="AIファンド研究所 MVP runner",
+        formatter_class=RawDescriptionHelpFormatter,
+        epilog=CLI_HELP_EPILOG,
+    )
     parser.add_argument(
         "--mode",
         choices=[
@@ -6750,57 +6880,9 @@ def render_full_paper_run_markdown(summary: dict[str, Any]) -> str:
 
 def run_help() -> None:
     print(
-        """AI Fund Lab / AIファンド研究所
-
-主要モード:
-- preflight: 環境、設定、DB、APIキー、セーフティ設定を確認
-- init-db: SQLite DBを初期化またはマイグレーション
-- healthcheck: J-Quants APIキーの疎通確認
-- tachibana-healthcheck: 立花証券デモ接続前の設定確認
-- account-snapshot: Broker共通IFで口座スナップショットを読み取り表示
-- demo-auto-order: tachibana_demo向け自動発注。live環境では停止
-- list-stocks: J-Quantsから東証プライム銘柄一覧を取得
-- fetch-prices: 指定日の株価データを取得
-- calculate-indicators: 指定日のテクニカル指標を計算
-- screen: 実データ指標から候補銘柄を抽出
-- score: 候補銘柄をスコアリング
-- trade: スコアリング済み銘柄で仮想売買
-- run-daily: 日次運用フローを1コマンドで実行
-- backtest: 指定期間のバックテストを実行
-- full-paper-run: PaperBrokerで事前チェックから分析まで通し実行
-- analyze: SQLiteから分析レポートを生成
-- compare-profiles: profile別のバックテスト結果を横並び比較
-- export-ai-dataset: AI改善用JSONLデータセットを生成
-- export-ai-summary: AI改善用Markdownサマリを生成
-- release-notes: Gitコミット履歴から開発ノートを生成
-- preview-orders: 発注せず注文候補をプレビュー
-- publish-article: note手動投稿後の記事をpublishedへ記録
-- status: 現在の設定、DB、記事、セーフティ状態を表示
-- demo: ダミーデータでMVPフローを実行
-
-推奨実行順:
-1. python src/main.py --mode preflight
-2. python src/main.py --mode init-db
-3. python src/main.py --mode tachibana-healthcheck --env demo
-4. python src/main.py --mode list-stocks --provider jquants
-5. python src/main.py --mode run-daily --provider jquants --date YYYY-MM-DD
-6. python src/main.py --mode preview-orders --provider jquants --date YYYY-MM-DD
-7. python src/main.py --mode analyze
-8. python src/main.py --mode backtest --provider jquants --start-date YYYY-MM-DD --end-date YYYY-MM-DD
-9. python src/main.py --mode compare-profiles --profiles rookie_dealer_01 rookie_dealer_02 --start-date YYYY-MM-DD --end-date YYYY-MM-DD
-10. python src/main.py --mode export-ai-summary --start-date YYYY-MM-DD --end-date YYYY-MM-DD
-11. python src/main.py --mode full-paper-run --provider jquants --start-date YYYY-MM-DD --end-date YYYY-MM-DD
-12. python src/main.py --mode release-notes --since YYYY-MM-DD --until YYYY-MM-DD
-
-補足:
-- 実売買は未実装です。
-- 現在はPaperBrokerのみ使用します。
-- Broker候補: paper / tachibana_demo / tachibana_live / kabu_station
-- Mac/Linuxでの実売買API候補は、立花証券 e支店 API を第一候補にします。
-- tachibana_demo / tachibana_live はRead Onlyモードで、実注文は出しません。
-- demo-auto-order は tachibana_demo のみ対象です。tachibana_live では必ず停止します。
-- APIキーや口座情報は表示しません。
-"""
+        "AI Fund Lab / AIファンド研究所\n\n"
+        "Use `python src/main.py --help` for the argparse option table.\n\n"
+        + CLI_HELP_EPILOG
     )
 
 
