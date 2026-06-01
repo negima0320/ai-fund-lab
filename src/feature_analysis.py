@@ -2471,7 +2471,7 @@ def _runtime_memory_cache_audit_lines(audit: dict[str, Any]) -> list[str]:
         "| cache_name | hit_count | miss_count | size | note |",
         "| --- | ---: | ---: | ---: | --- |",
     ]
-    for name in ["listed_stocks_raw", "listed_stocks_lookup", "raw_prices_by_date"]:
+    for name in ["listed_stocks_raw", "listed_stocks_lookup", "raw_prices_by_date", "indicator_runtime_cache"]:
         item = rows.get(name, {}) if isinstance(rows, dict) else {}
         if not isinstance(item, dict):
             item = {}

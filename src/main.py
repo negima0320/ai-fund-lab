@@ -136,11 +136,13 @@ RUNTIME_MEMORY_CACHE: dict[str, Any] = {
     "listed_stocks_master": {},
     "listed_stocks_lookup": {},
     "raw_prices_by_date": {},
+    "indicator_runtime_cache": {},
 }
 RUNTIME_MEMORY_CACHE_AUDIT: dict[str, dict[str, Any]] = {
     "listed_stocks_raw": {"hit_count": 0, "miss_count": 0, "size": 0, "note": "data/raw/listed_stocks_jquants.json"},
     "listed_stocks_lookup": {"hit_count": 0, "miss_count": 0, "size": 0, "note": "code -> market_section / listed_info"},
     "raw_prices_by_date": {"hit_count": 0, "miss_count": 0, "size": 0, "note": "data/raw/prices_YYYY-MM-DD.json"},
+    "indicator_runtime_cache": {"hit_count": 0, "miss_count": 0, "size": 0, "note": "data/processed/**/indicators_YYYY-MM-DD.json"},
 }
 LIGHT_API_CALL_LIMITS = {
     "topix_prices": 4,
@@ -5070,6 +5072,8 @@ def _restore_common_processed_cache(config: dict[str, Any], stage: str, target_d
     if stage == "candidates":
         payload = _with_profile_metadata(payload, config)
     write_json(target_path, payload)
+    if stage == "indicators":
+        _runtime_indicator_cache_set(target_path, payload)
     COMMON_CACHE_METRICS["cache_reused_from_common_count"] = COMMON_CACHE_METRICS.get("cache_reused_from_common_count", 0) + 1
     materialize_elapsed = time.perf_counter() - materialize_started
     _record_backtest_phase_time("cache_materialize_total", materialize_elapsed)
@@ -10374,6 +10378,37 @@ def _runtime_memory_cache_audit() -> dict[str, dict[str, Any]]:
     }
 
 
+def _is_processed_indicator_json_path(path: Path) -> bool:
+    if not path.name.startswith("indicators_") or path.suffix != ".json":
+        return False
+    try:
+        parts = path.relative_to(ROOT).parts
+    except ValueError:
+        return False
+    return len(parts) >= 3 and parts[0] == "data" and parts[1] == "processed"
+
+
+def _runtime_indicator_cache_get(path: Path) -> dict[str, Any] | None:
+    if not _is_processed_indicator_json_path(path):
+        return None
+    cache = RUNTIME_MEMORY_CACHE.setdefault("indicator_runtime_cache", {})
+    cache_key = _runtime_file_cache_key(path)
+    if isinstance(cache, dict) and cache_key in cache:
+        _record_runtime_memory_cache("indicator_runtime_cache", hit=True, size=len(cache))
+        return cache[cache_key]
+    _record_runtime_memory_cache("indicator_runtime_cache", hit=False, size=len(cache) if isinstance(cache, dict) else 0)
+    return None
+
+
+def _runtime_indicator_cache_set(path: Path, payload: Any) -> None:
+    if not isinstance(payload, dict) or not _is_processed_indicator_json_path(path) or not path.exists():
+        return
+    cache = RUNTIME_MEMORY_CACHE.setdefault("indicator_runtime_cache", {})
+    if isinstance(cache, dict):
+        cache[_runtime_file_cache_key(path)] = payload
+        RUNTIME_MEMORY_CACHE_AUDIT.setdefault("indicator_runtime_cache", {"hit_count": 0, "miss_count": 0, "size": 0, "note": "data/processed/**/indicators_YYYY-MM-DD.json"})["size"] = len(cache)
+
+
 def _aggregate_phase_elapsed(performance_report: dict[str, Any]) -> dict[str, float]:
     requested_keys = [
         "json_read",
@@ -11197,10 +11232,11 @@ def ensure_indicators(provider_name: str, target_date_text: str) -> None:
     indicator_mode = _backtest_indicator_mode(config) if BACKTEST_MODE_ACTIVE else "full"
     enable_relative_strength = _relative_strength_enabled_for_indicators(config)
     if BACKTEST_MODE_ACTIVE and _restore_common_processed_cache(config, "indicators", target_date_text, profile_path):
-        payload = read_json(profile_path)
+        payload = _runtime_indicator_cache_get(profile_path) or read_json(profile_path)
         if _indicator_cache_matches_current_scoring(payload, config, indicator_mode, enable_relative_strength):
             _ensure_relative_strength_benchmark_cache(config, date.fromisoformat(target_date_text), indicator_mode, enable_relative_strength)
             write_json(path, payload)
+            _runtime_indicator_cache_set(path, payload)
             _record_cache_source("indicators", "common")
             print(f"{BACKTEST_DAY_LOG_PREFIX} indicators cache hit source=common path={_common_processed_cache_path(config, 'indicators', target_date_text).relative_to(ROOT)}")
             return
@@ -15592,7 +15628,7 @@ def _invalidate_runtime_memory_cache_for_path(path: Path) -> None:
         resolved = str(path.resolve())
     except OSError:
         resolved = str(path)
-    for cache_name in ["listed_stocks_raw", "listed_stocks_master", "raw_prices_by_date"]:
+    for cache_name in ["listed_stocks_raw", "listed_stocks_master", "raw_prices_by_date", "indicator_runtime_cache"]:
         cache = RUNTIME_MEMORY_CACHE.get(cache_name)
         if isinstance(cache, dict):
             for key in list(cache.keys()):
@@ -15943,15 +15979,22 @@ def _format_jquants_date(value: str) -> str:
 
 
 def read_json(path: Path) -> dict[str, Any]:
+    cached_payload = _runtime_indicator_cache_get(path)
+    if cached_payload is not None:
+        return cached_payload
     started = time.perf_counter()
+    payload: dict[str, Any] | None = None
     try:
         with path.open("r", encoding="utf-8") as file:
-            return json.load(file)
+            payload = json.load(file)
+            return payload
     finally:
         elapsed = time.perf_counter() - started
         _record_json_read_audit(path, elapsed)
         _record_backtest_phase_time("json_file_io_sec", elapsed)
         _record_backtest_phase_time("json_read", elapsed)
+        if payload is not None:
+            _runtime_indicator_cache_set(path, payload)
 
 
 def _record_json_read_audit(path: Path, elapsed: float) -> None:
@@ -17796,12 +17839,16 @@ def build_daily_trade_log(paper_trade_log: dict[str, Any], reflection_log: dict[
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     started = time.perf_counter()
     path.parent.mkdir(parents=True, exist_ok=True)
+    wrote = False
     try:
         with path.open("w", encoding="utf-8") as file:
             json.dump(payload, file, ensure_ascii=False, indent=2)
             file.write("\n")
+            wrote = True
     finally:
         _invalidate_runtime_memory_cache_for_path(path)
+        if wrote:
+            _runtime_indicator_cache_set(path, payload)
         _record_backtest_phase_time("json_write", time.perf_counter() - started)
 
 
