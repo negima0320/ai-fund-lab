@@ -3,11 +3,11 @@
 ## 実行条件
 
 - 期間: 2026-01-01 〜 2026-03-06
-- profile: rookie_dealer_02_v2_9 新人ディーラー2号 v2.9
+- profile: rookie_dealer_02_v2_1 新人ディーラー2号 v2.1
 - provider: jquants
 - ChatGPT/OpenAI: disabled
 - broker: paper
-- config_version: cfg_cfe3949
+- config_version: cfg_ff384de
 
 ## Backtest Date Range Audit
 
@@ -59,10 +59,10 @@
 
 ### Processed Data Audit
 
-- indicators_last_date: 2026-05-29
+- indicators_last_date: 2026-03-06
 - candidates_last_date: 2026-05-29
 - scored_candidates_last_date: 2026-05-29
-- indicators_count: 1221
+- indicators_count: 42
 - candidates_file_count: 1221
 - scored_candidates_file_count: 1221
 - dates_with_indicators_but_no_candidates: 0
@@ -92,7 +92,7 @@
 - 利確回数: 0
 - 損切り回数: 0
 - 最大保有期間売却回数: 0
-- no trade日数: 42
+- no trade日数: 41
 - selected_count合計: 0
 
 ## 新人ディーラー1号コメント

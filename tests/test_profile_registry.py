@@ -254,6 +254,67 @@ def test_prepare_run_experiments_common_stages_reuses_indicator_and_candidate_ge
         assert (tmp_path / "data" / "processed" / profile_id / "candidates_2026-01-05.json").exists()
 
 
+def test_prepare_run_experiments_common_stages_can_skip_price_fetch(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "SKIP_PRICE_FETCH_ACTIVE", True)
+    monkeypatch.setattr(
+        main_module,
+        "ensure_price_history_for_backtest",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("price fetch should be skipped")),
+    )
+    monkeypatch.setattr(main_module, "available_cached_price_dates", lambda *_args: [date(2026, 1, 5)])
+    monkeypatch.setattr(main_module, "_preload_light_api_context", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main_module, "ensure_indicators", lambda *_args: None)
+    monkeypatch.setattr(main_module, "ensure_market_context", lambda *_args: {})
+    monkeypatch.setattr(main_module, "ensure_screen", lambda *_args: None)
+    monkeypatch.setattr(main_module, "_copy_common_indicator_stage", lambda *_args: True)
+    monkeypatch.setattr(main_module, "_copy_common_candidate_stage", lambda *_args: True)
+
+    report = main_module.prepare_run_experiments_common_stages(
+        ["rookie_dealer_02_v2_1"],
+        "2026-01-05",
+        "2026-01-05",
+    )
+
+    assert report["price_fetch_skipped"] is True
+    assert report["target_trading_days"] == 1
+
+
+def test_scored_candidates_cache_reuses_same_profile_date_and_hash(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "ACTIVE_PROFILE_ID", "rookie_dealer_02_v2_1")
+    monkeypatch.setattr(main_module, "save_scoring_results", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        main_module,
+        "run_score",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("score should use cached payload")),
+    )
+    config = main_module.load_config(main_module.CONFIG_PATH)
+    cache_bits = main_module._score_cache_payload(config, "2026-01-05")
+    path = main_module.processed_profile_path(config, "scored_candidates_2026-01-05.json")
+    main_module.write_json(
+        path,
+        {
+            "date": "2026-01-05",
+            "provider": "jquants",
+            "profile_id": "rookie_dealer_02_v2_1",
+            "profile_name": main_module.profile_name_from(config),
+            "config_version": main_module.config_version_from(config),
+            **cache_bits,
+            "candidate_count": 1,
+            "scored_count": 1,
+            "selected_count": 1,
+            "scores": [{"code": "1001", "selected": True, "total_score": 50}],
+            "selected": [{"code": "1001", "selected": True, "total_score": 50}],
+        },
+    )
+
+    payload = main_module.ensure_score("jquants", "2026-01-05")
+
+    assert payload["selected_count"] == 1
+    assert payload["scoring_cache_key"] == cache_bits["scoring_cache_key"]
+
+
 def test_experiment_verdict_no_practical_effect() -> None:
     base = {"net_cumulative_profit": 100, "profit_factor": 1.2, "max_drawdown": -0.1, "total_trades": 10}
     same = {"net_cumulative_profit": 100, "profit_factor": 1.2, "max_drawdown": -0.1, "total_trades": 10}

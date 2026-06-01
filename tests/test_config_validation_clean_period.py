@@ -344,6 +344,7 @@ def test_storage_audit_reports_processed_duplication(tmp_path, monkeypatch) -> N
 
     assert audit["cache_duplication"]["profile_indicator_files"] == 2
     assert audit["cache_duplication"]["duplicate_indicator_dates"] == 1
+    assert audit["profile_breakdown"][0]["indicators_count"] == 1
 
 
 def test_cleanup_storage_is_dry_run_by_default_and_keeps_raw_prices(tmp_path, monkeypatch) -> None:
@@ -367,6 +368,69 @@ def test_cleanup_storage_is_dry_run_by_default_and_keeps_raw_prices(tmp_path, mo
     assert result["deleted_count"] == 0
     assert log.exists()
     assert raw.exists()
+
+
+def test_cleanup_storage_reports_keep_reason_for_recent_files(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    log = tmp_path / "logs" / "backtests" / "recent.json"
+    processed = tmp_path / "data" / "processed" / "p1" / "indicators_2026-01-05.json"
+    log.parent.mkdir(parents=True)
+    processed.parent.mkdir(parents=True)
+    log.write_text("recent", encoding="utf-8")
+    processed.write_text("{}", encoding="utf-8")
+
+    plan = main_module.build_cleanup_storage_plan(include_logs=True, include_processed=True, keep_days=30)
+
+    assert plan["file_count"] == 0
+    assert plan["diagnostics"]["candidate_delete_count"] == 0
+    assert plan["diagnostics"]["keep_reason"]["newer_than_keep_days"] >= 2
+    assert any(item["path"].startswith("logs/backtests") for item in plan["diagnostics"]["scanned_directories"])
+
+
+def test_cleanup_storage_targets_profile_cache_when_common_duplicate_exists(tmp_path, monkeypatch, config_copy) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    config_copy["profile_id"] = "p1"
+    config_copy["profile_name"] = "P1"
+    monkeypatch.setattr(main_module, "load_profile", lambda profile_id: config_copy if profile_id == "p1" else {})
+    payload = {"indicators": [{"code": "1001"}]}
+    common = main_module._common_processed_cache_path(config_copy, "indicators", "2026-01-05")
+    profile = tmp_path / "data" / "processed" / "p1" / "indicators_2026-01-05.json"
+    common.parent.mkdir(parents=True)
+    profile.parent.mkdir(parents=True)
+    main_module.write_json(common, payload)
+    main_module.write_json(profile, payload)
+
+    plan = main_module.build_cleanup_storage_plan(include_processed=True, keep_days=30)
+
+    assert plan["file_count"] == 1
+    assert plan["targets"][0]["relative_path"] == "data/processed/p1/indicators_2026-01-05.json"
+    assert plan["targets"][0]["reason"] == "profile_processed_common_duplicate"
+
+
+def test_cleanup_storage_include_logs_uses_filename_date_and_screening(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    backtest_old = tmp_path / "logs" / "backtests" / "p1" / "2025-01-01_to_2025-02-01" / "scoring_2025-01-15.json"
+    backtest_latest = tmp_path / "logs" / "backtests" / "p2" / "2026-05-15_to_2026-05-30" / "scoring_2025-01-15.json"
+    scoring = tmp_path / "logs" / "scoring" / "p1" / "scoring_2025-01-15.json"
+    screening = tmp_path / "logs" / "screening" / "p1" / "screening_2025-01-15.json"
+    for path in [backtest_old, backtest_latest, scoring, screening]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+    import os
+
+    old_time = (main_module.datetime.now() - main_module.timedelta(days=10)).timestamp()
+    latest_time = main_module.datetime.now().timestamp()
+    os.utime(backtest_old.parent, (old_time, old_time))
+    os.utime(backtest_latest.parent, (latest_time, latest_time))
+
+    plan = main_module.build_cleanup_storage_plan(include_logs=True, keep_days=30, keep_latest_experiments=1)
+    targets = {item["relative_path"] for item in plan["targets"]}
+
+    assert "logs/backtests/p1/2025-01-01_to_2025-02-01/scoring_2025-01-15.json" in targets
+    assert "logs/scoring/p1/scoring_2025-01-15.json" in targets
+    assert "logs/screening/p1/screening_2025-01-15.json" in targets
+    assert "logs/backtests/p2/2026-05-15_to_2026-05-30/scoring_2025-01-15.json" not in targets
+    assert plan["diagnostics"]["keep_reason"]["latest_log_run_kept"] == 1
 
 
 def test_cleanup_storage_apply_deletes_only_allowed_targets(tmp_path, monkeypatch) -> None:
@@ -585,6 +649,33 @@ def test_summary_only_flag_is_parsed(monkeypatch) -> None:
     args = main_module.parse_args()
 
     assert args.summary_only is True
+
+
+def test_backtest_speed_flags_are_parsed(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main_module.sys,
+        "argv",
+        [
+            "main.py",
+            "--mode",
+            "run-experiments",
+            "--start-date",
+            "2026-01-01",
+            "--end-date",
+            "2026-03-06",
+            "--profiles",
+            "rookie_dealer_02_v2_6",
+            "rookie_dealer_02_v2_11",
+            "--no-daily-logs",
+            "--skip-price-fetch",
+        ],
+    )
+
+    args = main_module.parse_args()
+
+    assert args.profiles == ["rookie_dealer_02_v2_6", "rookie_dealer_02_v2_11"]
+    assert args.no_daily_logs is True
+    assert args.skip_price_fetch is True
 
 
 def test_experiment_judgement_candidate_needs_review_and_rejected() -> None:

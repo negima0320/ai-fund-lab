@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 try:
     import yaml
@@ -108,6 +108,8 @@ BACKTEST_MODE_ACTIVE = False
 BACKTEST_DAY_LOG_PREFIX = ""
 FAST_ANALYSIS_ACTIVE = False
 SUMMARY_ONLY_ACTIVE = False
+NO_DAILY_LOGS_ACTIVE = False
+SKIP_PRICE_FETCH_ACTIVE = False
 JQUANTS_PLAN_OVERRIDE: str | None = None
 FORCE_REFRESH_ACTIVE = False
 STORAGE_MODE_OVERRIDE: str | None = None
@@ -131,13 +133,16 @@ JQUANTS_API_SESSION: dict[str, Any] = {}
 
 
 def main() -> None:
-    global ACTIVE_PROFILE_ID, FAST_ANALYSIS_ACTIVE, SUMMARY_ONLY_ACTIVE, JQUANTS_PLAN_OVERRIDE, FORCE_REFRESH_ACTIVE, STORAGE_MODE_OVERRIDE, RUNTIME_SETTINGS
+    global ACTIVE_PROFILE_ID, FAST_ANALYSIS_ACTIVE, SUMMARY_ONLY_ACTIVE, NO_DAILY_LOGS_ACTIVE, SKIP_PRICE_FETCH_ACTIVE
+    global JQUANTS_PLAN_OVERRIDE, FORCE_REFRESH_ACTIVE, STORAGE_MODE_OVERRIDE, RUNTIME_SETTINGS
     _enable_line_buffered_output()
     args = parse_args()
     RUNTIME_SETTINGS = resolve_runtime_settings(args)
     ACTIVE_PROFILE_ID = RUNTIME_SETTINGS["profile_id"]
     FAST_ANALYSIS_ACTIVE = bool(args.fast_analysis)
     SUMMARY_ONLY_ACTIVE = bool(args.summary_only)
+    NO_DAILY_LOGS_ACTIVE = bool(args.summary_only or args.no_daily_logs)
+    SKIP_PRICE_FETCH_ACTIVE = bool(args.skip_price_fetch)
     JQUANTS_PLAN_OVERRIDE = args.jquants_plan
     FORCE_REFRESH_ACTIVE = bool(args.force_refresh)
     STORAGE_MODE_OVERRIDE = args.storage_mode
@@ -451,7 +456,7 @@ def parse_args() -> Any:
         "--profiles",
         nargs="+",
         default=None,
-        help="Profile ids for compare-profiles mode.",
+        help="Profile ids for compare-profiles/run-experiments mode.",
     )
     parser.add_argument(
         "--base",
@@ -529,6 +534,16 @@ def parse_args() -> Any:
         "--summary-only",
         action="store_true",
         help="Skip daily markdown/articles and heavy analyze steps for experiment/backtest summary generation.",
+    )
+    parser.add_argument(
+        "--no-daily-logs",
+        action="store_true",
+        help="Skip per-day backtest/scoring/screening JSON logs. Summary CSV/DB outputs are still written.",
+    )
+    parser.add_argument(
+        "--skip-price-fetch",
+        action="store_true",
+        help="Backtest/run-experiments only: use existing cached prices and skip J-Quants price fetching.",
     )
     parser.add_argument(
         "--storage-mode",
@@ -2074,6 +2089,20 @@ def run_storage_audit() -> None:
             value = _format_bytes(value)
         print(f"- {key}: {value}")
     print()
+    print("## Profile Processed Breakdown")
+    print(
+        "| profile | indicators_size | candidates_size | scored_candidates_size | "
+        "trade_size | report_size | indicators_count | candidates_count | scored_candidates_count |"
+    )
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    for row in audit.get("profile_breakdown", []):
+        print(
+            f"| {row['profile']} | {_format_bytes(row['indicators_size'])} | "
+            f"{_format_bytes(row['candidates_size'])} | {_format_bytes(row['scored_candidates_size'])} | "
+            f"{_format_bytes(row['trade_size'])} | {_format_bytes(row['report_size'])} | "
+            f"{row['indicators_count']} | {row['candidates_count']} | {row['scored_candidates_count']} |"
+        )
+    print()
     print("## Cleanup Recommendation")
     for item in audit["cleanup_recommendation"]:
         print(f"- {item}")
@@ -2103,6 +2132,7 @@ def build_storage_audit() -> dict[str, Any]:
         "file_types": _snapshot_file_type_ranking(snapshot),
         "experiments": _snapshot_experiment_artifact_sizes(snapshot),
         "cache_duplication": _snapshot_processed_cache_duplication(snapshot),
+        "profile_breakdown": _snapshot_profile_processed_breakdown(snapshot),
         "cleanup_recommendation": _storage_cleanup_recommendations(rows),
     }
 
@@ -2136,8 +2166,26 @@ def run_cleanup_storage(
     print(f"- keep_latest_experiments: {keep_latest_experiments}")
     print(f"- deleted_count: {result['deleted_count']}")
     if verbose:
-        for item in plan["targets"]:
+        diagnostics = plan.get("diagnostics", {})
+        print("scanned_directories:")
+        for item in diagnostics.get("scanned_directories", []):
+            print(
+                f"- {item['path']} files={item['scanned_files']} "
+                f"delete_candidates={item['delete_candidates']}"
+            )
+        print("keep_reason:")
+        for key, value in sorted(diagnostics.get("keep_reason", {}).items()):
+            print(f"- {key}: {value}")
+        print("skipped_reason:")
+        for key, value in sorted(diagnostics.get("skipped_reason", {}).items()):
+            print(f"- {key}: {value}")
+        print(f"candidate_delete_count: {diagnostics.get('candidate_delete_count', 0)}")
+        max_verbose_targets = 200
+        for item in plan["targets"][:max_verbose_targets]:
             print(f"- {item['relative_path']} ({_format_bytes(item['size'])}) reason={item['reason']}")
+        omitted = len(plan["targets"]) - max_verbose_targets
+        if omitted > 0:
+            print(f"- ... {omitted} more targets omitted")
     if not apply:
         print("- dry-run only; use --apply to delete")
 
@@ -2580,27 +2628,31 @@ def build_cleanup_storage_plan(
 ) -> dict[str, Any]:
     cutoff = (datetime.now() - timedelta(days=max(0, keep_days))).timestamp()
     targets: list[dict[str, Any]] = []
+    diagnostics = _cleanup_diagnostics()
     targets.extend(_cleanup_pycache_targets(cutoff))
     targets.extend(_cleanup_pytest_cache_targets(cutoff))
     if include_logs:
-        targets.extend(_cleanup_files_under(ROOT / "logs" / "backtests", cutoff, "old_backtest_logs"))
-        targets.extend(_cleanup_files_under(ROOT / "logs" / "scoring", cutoff, "old_scoring_logs"))
+        targets.extend(_cleanup_backtest_log_targets(cutoff, keep_latest_experiments, diagnostics))
+        targets.extend(_cleanup_dated_log_targets(ROOT / "logs" / "scoring", cutoff, "old_scoring_logs", diagnostics))
+        targets.extend(_cleanup_dated_log_targets(ROOT / "logs" / "screening", cutoff, "old_screening_logs", diagnostics))
     if include_reports:
-        targets.extend(_cleanup_files_under(ROOT / "reports" / "articles" / "backtests", cutoff, "old_backtest_articles"))
-        targets.extend(_cleanup_matching_files(ROOT / "reports" / "backtests", cutoff, "day_*.md", "old_backtest_day_reports"))
-        targets.extend(_cleanup_old_experiment_targets(cutoff, keep_latest_experiments))
+        targets.extend(_cleanup_files_under(ROOT / "reports" / "articles" / "backtests", cutoff, "old_backtest_articles", diagnostics))
+        targets.extend(_cleanup_matching_files(ROOT / "reports" / "backtests", cutoff, "day_*.md", "old_backtest_day_reports", diagnostics))
+        targets.extend(_cleanup_old_experiment_targets(cutoff, keep_latest_experiments, diagnostics))
     if include_processed:
-        targets.extend(_cleanup_processed_profile_targets(cutoff))
+        targets.extend(_cleanup_processed_profile_targets(cutoff, diagnostics))
     if not exclude_jquants_cache:
-        targets.extend(_cleanup_files_under(ROOT / "data" / "cache" / "jquants" / "unsupported_ranges.json", cutoff, "old_unsupported_cache"))
+        targets.extend(_cleanup_files_under(ROOT / "data" / "cache" / "jquants" / "unsupported_ranges.json", cutoff, "old_unsupported_cache", diagnostics))
     if not exclude_raw_prices:
-        targets.extend(_cleanup_files_under(ROOT / "data" / "raw", cutoff, "raw_prices_explicitly_included"))
-    deduped = {item["path"]: item for item in targets if _cleanup_storage_path_allowed(Path(item["path"]))}
+        targets.extend(_cleanup_files_under(ROOT / "data" / "raw", cutoff, "raw_prices_explicitly_included", diagnostics))
+    deduped = {item["path"]: item for item in targets if _cleanup_storage_path_allowed_fast(Path(item["path"]))}
+    diagnostics["candidate_delete_count"] = len(deduped)
     ordered = sorted(deduped.values(), key=lambda item: item["relative_path"])
     return {
         "targets": ordered,
         "file_count": len(ordered),
         "total_size": sum(int(item["size"]) for item in ordered),
+        "diagnostics": diagnostics,
     }
 
 
@@ -2609,7 +2661,7 @@ def execute_cleanup_storage_plan(plan: dict[str, Any], apply: bool = False) -> d
     if apply:
         for item in plan.get("targets", []):
             path = Path(item["path"])
-            if path.is_symlink() or not path.is_file() or not _cleanup_storage_path_allowed(path):
+            if path.is_symlink() or not path.is_file() or not _cleanup_storage_path_allowed_fast(path):
                 continue
             path.unlink()
             deleted.append(str(path))
@@ -2831,6 +2883,85 @@ def _snapshot_processed_cache_duplication(snapshot: list[dict[str, Any]]) -> dic
         "duplicate_candidate_dates": sum(1 for count in profile_candidate_dates.values() if count > 1),
         "potential_savings": potential_savings,
     }
+
+
+def _snapshot_profile_processed_breakdown(snapshot: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_profile: dict[str, dict[str, int | str]] = {}
+    seen_by_profile_category: dict[tuple[str, str], set[tuple[int, int]]] = {}
+    processed_prefix = ("data", "processed")
+    processed_profiles: set[str] = set()
+    for item in snapshot:
+        parts = item.get("parts", ())
+        if len(parts) >= 4 and parts[:2] == processed_prefix and parts[2] != "common":
+            profile = str(parts[2])
+            processed_profiles.add(profile)
+            filename = str(parts[-1])
+            row = by_profile.setdefault(
+                profile,
+                {
+                    "profile": profile,
+                    "indicators_size": 0,
+                    "candidates_size": 0,
+                    "scored_candidates_size": 0,
+                    "trade_size": 0,
+                    "report_size": 0,
+                    "indicators_count": 0,
+                    "candidates_count": 0,
+                    "scored_candidates_count": 0,
+                },
+            )
+            category = "other"
+            if filename.startswith("indicators_"):
+                category = "indicators"
+                row["indicators_count"] = int(row["indicators_count"]) + 1
+            elif filename.startswith("candidates_"):
+                category = "candidates"
+                row["candidates_count"] = int(row["candidates_count"]) + 1
+            elif filename.startswith("scored_candidates_"):
+                category = "scored_candidates"
+                row["scored_candidates_count"] = int(row["scored_candidates_count"]) + 1
+            elif filename.startswith(("trade_", "trades_")):
+                category = "trade"
+            if category == "other":
+                continue
+            seen = seen_by_profile_category.setdefault((profile, category), set())
+            inode = item["inode"]
+            if inode in seen:
+                continue
+            seen.add(inode)
+            size_key = f"{category}_size"
+            row[size_key] = int(row[size_key]) + int(item["size"])
+    for item in snapshot:
+        parts = item.get("parts", ())
+        if len(parts) >= 2 and parts[0] == "reports":
+            profile = str(parts[1])
+            if profile not in processed_profiles:
+                continue
+            row = by_profile.setdefault(
+                profile,
+                {
+                    "profile": profile,
+                    "indicators_size": 0,
+                    "candidates_size": 0,
+                    "scored_candidates_size": 0,
+                    "trade_size": 0,
+                    "report_size": 0,
+                    "indicators_count": 0,
+                    "candidates_count": 0,
+                    "scored_candidates_count": 0,
+                },
+            )
+            seen = seen_by_profile_category.setdefault((profile, "report"), set())
+            inode = item["inode"]
+            if inode in seen:
+                continue
+            seen.add(inode)
+            row["report_size"] = int(row["report_size"]) + int(item["size"])
+    return sorted(
+        [dict(row) for row in by_profile.values()],
+        key=lambda row: int(row["indicators_size"]) + int(row["candidates_size"]) + int(row["scored_candidates_size"]),
+        reverse=True,
+    )
 
 
 def _pycache_summary() -> dict[str, int]:
@@ -3137,40 +3268,407 @@ def _cleanup_pytest_cache_targets(cutoff: float) -> list[dict[str, Any]]:
     return _cleanup_files_under(ROOT / ".pytest_cache", cutoff, "pytest_cache")
 
 
-def _cleanup_files_under(root: Path, cutoff: float, reason: str) -> list[dict[str, Any]]:
+def _cleanup_backtest_log_targets(
+    cutoff: float,
+    keep_latest_runs: int,
+    diagnostics: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    root = ROOT / "logs" / "backtests"
     if not root.exists():
+        _cleanup_count_reason(diagnostics, "skipped_reason", "missing_directory")
         return []
-    paths = [root] if root.is_file() else list(root.rglob("*"))
-    targets = []
-    for path in paths:
-        if path.is_symlink() or not path.is_file():
+    run_paths = _discover_backtest_run_dirs_fast(root)
+    run_dirs = [rel for rel, _path, _mtime in sorted(run_paths, key=lambda item: item[2], reverse=True)]
+    run_path_by_rel = {rel: path for rel, path, _mtime in run_paths}
+    keep = set(run_dirs[: max(0, keep_latest_runs)])
+    targets: list[dict[str, Any]] = []
+    for run_dir in run_dirs:
+        delete_candidates = 0
+        run_path = run_path_by_rel[run_dir]
+        should_delete_dir, keep_reason = _cleanup_file_is_old_text(run_dir, run_path.stat().st_mtime, cutoff)
+        if run_dir in keep:
+            _cleanup_count_reason(diagnostics, "keep_reason", "latest_log_run_kept")
+            scanned_files = 0
+        elif not should_delete_dir:
+            _cleanup_count_reason(diagnostics, "keep_reason", keep_reason)
+            scanned_files = 0
+        else:
+            scanned_files = 0
+            for full_path, rel, stat in _iter_file_entries_fast(run_path, diagnostics):
+                scanned_files += 1
+                targets.append(_cleanup_target_from_values(full_path, rel, stat.st_size, "old_backtest_logs"))
+                delete_candidates += 1
+        if diagnostics is not None:
+            diagnostics.setdefault("scanned_directories", []).append(
+                {
+                    "path": run_dir,
+                    "scanned_files": scanned_files,
+                    "delete_candidates": delete_candidates,
+                }
+            )
+    loose_targets = []
+    loose_scanned = 0
+    for full_path, rel, stat in _iter_immediate_file_entries_fast(root, diagnostics):
+        loose_scanned += 1
+        should_delete, keep_reason = _cleanup_file_is_old_text(rel, stat.st_mtime, cutoff)
+        if should_delete:
+            target = _cleanup_target_from_values(full_path, rel, stat.st_size, "old_backtest_logs")
+            targets.append(target)
+            loose_targets.append(target)
+        else:
+            _cleanup_count_reason(diagnostics, "keep_reason", keep_reason)
+    if diagnostics is not None and loose_scanned:
+        diagnostics.setdefault("scanned_directories", []).append(
+            {
+                "path": "logs/backtests (loose files)",
+                "scanned_files": loose_scanned,
+                "delete_candidates": len(loose_targets),
+            }
+        )
+    return targets
+
+
+def _discover_backtest_run_dirs_fast(root: Path) -> list[tuple[str, Path, float]]:
+    root_prefix = str(ROOT)
+    if not root_prefix.endswith(os.sep):
+        root_prefix = f"{root_prefix}{os.sep}"
+    runs: list[tuple[str, Path, float]] = []
+    stack = [str(root)]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                            continue
+                        rel = entry.path[len(root_prefix) :] if entry.path.startswith(root_prefix) else os.path.relpath(entry.path, str(ROOT))
+                        if "_to_" in entry.name:
+                            stat = entry.stat(follow_symlinks=False)
+                            runs.append((rel, Path(entry.path), stat.st_mtime))
+                            continue
+                        stack.append(entry.path)
+                    except OSError:
+                        continue
+        except OSError:
             continue
+    return runs
+
+
+def _backtest_run_dir_for_relpath(rel_path: str) -> str | None:
+    rel_parts = Path(rel_path).parts
+    if len(rel_parts) < 3 or rel_parts[0] != "logs" or rel_parts[1] != "backtests":
+        return None
+    run_parts: list[str] = []
+    for part in rel_parts[:-1]:
+        run_parts.append(part)
+        if "_to_" in part:
+            return "/".join(run_parts)
+    return None
+
+
+def _cleanup_dated_log_targets(
+    root: Path,
+    cutoff: float,
+    reason: str,
+    diagnostics: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if not root.exists():
+        if diagnostics is not None:
+            diagnostics.setdefault("scanned_directories", []).append(
+                {"path": str(root.relative_to(ROOT)) if _is_relative_to(root, ROOT) else str(root), "scanned_files": 0, "delete_candidates": 0}
+            )
+        _cleanup_count_reason(diagnostics, "skipped_reason", "missing_directory")
+        return []
+    targets: list[dict[str, Any]] = []
+    scanned_files = 0
+    for full_path, rel, stat in _iter_file_entries_fast(root, diagnostics):
+        scanned_files += 1
+        should_delete, keep_reason = _cleanup_file_is_old_text(rel, stat.st_mtime, cutoff)
+        if should_delete:
+            targets.append(_cleanup_target_from_values(full_path, rel, stat.st_size, reason))
+        else:
+            _cleanup_count_reason(diagnostics, "keep_reason", keep_reason)
+    if diagnostics is not None:
+        diagnostics.setdefault("scanned_directories", []).append(
+            {
+                "path": str(root.relative_to(ROOT)) if _is_relative_to(root, ROOT) else str(root),
+                "scanned_files": scanned_files,
+                "delete_candidates": len(targets),
+            }
+        )
+    return targets
+
+
+def _iter_file_entries_fast(
+    root: Path,
+    diagnostics: dict[str, Any] | None = None,
+) -> Iterator[tuple[str, str, os.stat_result]]:
+    root_text = str(root)
+    root_prefix = str(ROOT)
+    if not root_prefix.endswith(os.sep):
+        root_prefix = f"{root_prefix}{os.sep}"
+    stack = [root_text]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_symlink():
+                            _cleanup_count_reason(diagnostics, "skipped_reason", "symlink")
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        stat = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        _cleanup_count_reason(diagnostics, "skipped_reason", "stat_error")
+                        continue
+                    rel = entry.path[len(root_prefix) :] if entry.path.startswith(root_prefix) else os.path.relpath(entry.path, str(ROOT))
+                    yield entry.path, rel, stat
+        except OSError:
+            _cleanup_count_reason(diagnostics, "skipped_reason", "scan_error")
+
+
+def _iter_immediate_file_entries_fast(
+    root: Path,
+    diagnostics: dict[str, Any] | None = None,
+) -> Iterator[tuple[str, str, os.stat_result]]:
+    root_prefix = str(ROOT)
+    if not root_prefix.endswith(os.sep):
+        root_prefix = f"{root_prefix}{os.sep}"
+    try:
+        with os.scandir(str(root)) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                        continue
+                    stat = entry.stat(follow_symlinks=False)
+                except OSError:
+                    _cleanup_count_reason(diagnostics, "skipped_reason", "stat_error")
+                    continue
+                rel = entry.path[len(root_prefix) :] if entry.path.startswith(root_prefix) else os.path.relpath(entry.path, str(ROOT))
+                yield entry.path, rel, stat
+    except OSError:
+        _cleanup_count_reason(diagnostics, "skipped_reason", "scan_error")
+
+
+def _cleanup_file_is_old_text(rel_text: str, mtime: float, cutoff: float) -> tuple[bool, str]:
+    logical_date = _date_from_text(rel_text)
+    cutoff_date = datetime.fromtimestamp(cutoff).date()
+    if logical_date is not None:
+        if logical_date <= cutoff_date:
+            return True, ""
+        return False, "newer_than_keep_days"
+    if mtime <= cutoff:
+        return True, ""
+    return False, "newer_than_keep_days"
+
+
+def _date_from_text(text: str) -> date | None:
+    matches = re.findall(r"(20\d{2})[-_](\d{2})[-_](\d{2})", text)
+    parsed: list[date] = []
+    for year, month, day in matches:
+        try:
+            parsed.append(date(int(year), int(month), int(day)))
+        except ValueError:
+            continue
+    if parsed:
+        return max(parsed)
+    return None
+
+
+def _cleanup_target_from_values(path: str, relative_path: str, size: int, reason: str) -> dict[str, Any]:
+    return {
+        "path": path,
+        "relative_path": relative_path,
+        "size": int(size),
+        "reason": reason,
+    }
+
+
+def _cleanup_dated_log_targets_old(
+    root: Path,
+    cutoff: float,
+    reason: str,
+    diagnostics: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if not root.exists():
+        if diagnostics is not None:
+            diagnostics.setdefault("scanned_directories", []).append(
+                {"path": str(root.relative_to(ROOT)) if _is_relative_to(root, ROOT) else str(root), "scanned_files": 0, "delete_candidates": 0}
+            )
+        _cleanup_count_reason(diagnostics, "skipped_reason", "missing_directory")
+        return []
+    targets: list[dict[str, Any]] = []
+    scanned_files = 0
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            _cleanup_count_reason(diagnostics, "skipped_reason", "symlink")
+            continue
+        if not path.is_file():
+            continue
+        scanned_files += 1
         try:
             stat = path.stat()
         except OSError:
+            _cleanup_count_reason(diagnostics, "skipped_reason", "stat_error")
+            continue
+        should_delete, keep_reason = _cleanup_file_is_old(path, stat.st_mtime, cutoff)
+        if should_delete:
+            targets.append(_cleanup_target(path, stat.st_size, reason))
+        else:
+            _cleanup_count_reason(diagnostics, "keep_reason", keep_reason)
+    if diagnostics is not None:
+        diagnostics.setdefault("scanned_directories", []).append(
+            {
+                "path": str(root.relative_to(ROOT)) if _is_relative_to(root, ROOT) else str(root),
+                "scanned_files": scanned_files,
+                "delete_candidates": len(targets),
+            }
+        )
+    return targets
+
+
+def _cleanup_file_is_old(path: Path, mtime: float, cutoff: float) -> tuple[bool, str]:
+    logical_date = _date_from_path_text(path)
+    cutoff_date = datetime.fromtimestamp(cutoff).date()
+    if logical_date is not None:
+        if logical_date <= cutoff_date:
+            return True, ""
+        return False, "newer_than_keep_days"
+    if mtime <= cutoff:
+        return True, ""
+    return False, "newer_than_keep_days"
+
+
+def _date_from_path_text(path: Path) -> date | None:
+    text = str(path.relative_to(ROOT)) if _is_relative_to(path, ROOT) else str(path)
+    matches = re.findall(r"(20\d{2})[-_](\d{2})[-_](\d{2})", text)
+    parsed: list[date] = []
+    for year, month, day in matches:
+        try:
+            parsed.append(date(int(year), int(month), int(day)))
+        except ValueError:
+            continue
+    if parsed:
+        return max(parsed)
+    return None
+
+
+def _cleanup_diagnostics() -> dict[str, Any]:
+    return {
+        "scanned_directories": [],
+        "skipped_reason": {},
+        "keep_reason": {},
+        "candidate_delete_count": 0,
+    }
+
+
+def _cleanup_count_reason(diagnostics: dict[str, Any] | None, section: str, reason: str, count: int = 1) -> None:
+    if diagnostics is None:
+        return
+    bucket = diagnostics.setdefault(section, {})
+    bucket[reason] = int(bucket.get(reason, 0)) + count
+
+
+def _cleanup_files_under(
+    root: Path,
+    cutoff: float,
+    reason: str,
+    diagnostics: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if not root.exists():
+        if diagnostics is not None:
+            diagnostics.setdefault("scanned_directories", []).append(
+                {"path": str(root.relative_to(ROOT)) if _is_relative_to(root, ROOT) else str(root), "scanned_files": 0, "delete_candidates": 0}
+            )
+        _cleanup_count_reason(diagnostics, "skipped_reason", "missing_directory")
+        return []
+    paths = [root] if root.is_file() else list(root.rglob("*"))
+    targets = []
+    scanned_files = 0
+    for path in paths:
+        if path.is_symlink():
+            _cleanup_count_reason(diagnostics, "skipped_reason", "symlink")
+            continue
+        if not path.is_file():
+            continue
+        scanned_files += 1
+        try:
+            stat = path.stat()
+        except OSError:
+            _cleanup_count_reason(diagnostics, "skipped_reason", "stat_error")
             continue
         if stat.st_mtime > cutoff:
+            _cleanup_count_reason(diagnostics, "keep_reason", "newer_than_keep_days")
             continue
         targets.append(_cleanup_target(path, stat.st_size, reason))
+    if diagnostics is not None:
+        diagnostics.setdefault("scanned_directories", []).append(
+            {
+                "path": str(root.relative_to(ROOT)) if _is_relative_to(root, ROOT) else str(root),
+                "scanned_files": scanned_files,
+                "delete_candidates": len(targets),
+            }
+        )
     return targets
 
 
-def _cleanup_matching_files(root: Path, cutoff: float, pattern: str, reason: str) -> list[dict[str, Any]]:
+def _cleanup_matching_files(
+    root: Path,
+    cutoff: float,
+    pattern: str,
+    reason: str,
+    diagnostics: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     if not root.exists():
+        if diagnostics is not None:
+            diagnostics.setdefault("scanned_directories", []).append(
+                {"path": str(root.relative_to(ROOT)) if _is_relative_to(root, ROOT) else str(root), "scanned_files": 0, "delete_candidates": 0}
+            )
+        _cleanup_count_reason(diagnostics, "skipped_reason", "missing_directory")
         return []
     targets = []
+    scanned_files = 0
     for path in root.rglob(pattern):
-        if path.is_symlink() or not path.is_file():
+        if path.is_symlink():
+            _cleanup_count_reason(diagnostics, "skipped_reason", "symlink")
             continue
-        stat = path.stat()
+        if not path.is_file():
+            continue
+        scanned_files += 1
+        try:
+            stat = path.stat()
+        except OSError:
+            _cleanup_count_reason(diagnostics, "skipped_reason", "stat_error")
+            continue
         if stat.st_mtime <= cutoff:
             targets.append(_cleanup_target(path, stat.st_size, reason))
+        else:
+            _cleanup_count_reason(diagnostics, "keep_reason", "newer_than_keep_days")
+    if diagnostics is not None:
+        diagnostics.setdefault("scanned_directories", []).append(
+            {
+                "path": f"{str(root.relative_to(ROOT)) if _is_relative_to(root, ROOT) else str(root)} ({pattern})",
+                "scanned_files": scanned_files,
+                "delete_candidates": len(targets),
+            }
+        )
     return targets
 
 
-def _cleanup_old_experiment_targets(cutoff: float, keep_latest: int) -> list[dict[str, Any]]:
+def _cleanup_old_experiment_targets(
+    cutoff: float,
+    keep_latest: int,
+    diagnostics: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     root = ROOT / "reports" / "experiments"
     if not root.exists():
+        _cleanup_count_reason(diagnostics, "skipped_reason", "missing_directory")
         return []
     dirs = sorted(
         [path for path in root.rglob("*") if path.is_dir()],
@@ -3181,22 +3679,86 @@ def _cleanup_old_experiment_targets(cutoff: float, keep_latest: int) -> list[dic
     targets = []
     for directory in dirs:
         if directory in keep:
+            _cleanup_count_reason(diagnostics, "keep_reason", "latest_experiment_kept")
             continue
-        targets.extend(_cleanup_files_under(directory, cutoff, "old_experiment_artifact"))
+        targets.extend(_cleanup_files_under(directory, cutoff, "old_experiment_artifact", diagnostics))
     return targets
 
 
-def _cleanup_processed_profile_targets(cutoff: float) -> list[dict[str, Any]]:
+def _cleanup_processed_profile_targets(cutoff: float, diagnostics: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     root = ROOT / "data" / "processed"
     if not root.exists():
+        _cleanup_count_reason(diagnostics, "skipped_reason", "missing_directory")
         return []
     targets = []
+    common_files = 0
     for profile_dir in root.iterdir():
-        if not profile_dir.is_dir() or profile_dir.name == "common":
+        if not profile_dir.is_dir():
             continue
-        for pattern in ["indicators_*.json", "candidates_*.json"]:
-            targets.extend(_cleanup_matching_files(profile_dir, cutoff, pattern, "profile_processed_cache_rebuildable"))
+        if profile_dir.name == "common":
+            common_files += sum(1 for item in profile_dir.rglob("*.json") if item.is_file())
+            _cleanup_count_reason(diagnostics, "keep_reason", "common_processed_cache")
+            continue
+        try:
+            config = load_profile(profile_dir.name)
+        except Exception:
+            config = None
+            _cleanup_count_reason(diagnostics, "skipped_reason", "profile_config_unavailable")
+        for stage in ["indicators", "candidates"]:
+            scanned_files = 0
+            delete_candidates = 0
+            for path in profile_dir.glob(f"{stage}_*.json"):
+                if path.is_symlink() or not path.is_file():
+                    _cleanup_count_reason(diagnostics, "skipped_reason", "symlink_or_not_file")
+                    continue
+                scanned_files += 1
+                try:
+                    stat = path.stat()
+                except OSError:
+                    _cleanup_count_reason(diagnostics, "skipped_reason", "stat_error")
+                    continue
+                common_reason = ""
+                if config is not None:
+                    target_date = path.stem.removeprefix(f"{stage}_")
+                    common_path = _common_processed_cache_path(config, stage, target_date)
+                    common_reason = _profile_cache_common_cleanup_reason(path, common_path)
+                if common_reason:
+                    targets.append(_cleanup_target(path, stat.st_size, common_reason))
+                    delete_candidates += 1
+                    continue
+                if stat.st_mtime <= cutoff:
+                    targets.append(_cleanup_target(path, stat.st_size, "profile_processed_cache_rebuildable"))
+                    delete_candidates += 1
+                else:
+                    _cleanup_count_reason(diagnostics, "keep_reason", "newer_than_keep_days")
+            if diagnostics is not None:
+                diagnostics.setdefault("scanned_directories", []).append(
+                    {
+                        "path": f"{str(profile_dir.relative_to(ROOT))} ({stage}_*.json)",
+                        "scanned_files": scanned_files,
+                        "delete_candidates": delete_candidates,
+                    }
+                )
+    if common_files and diagnostics is not None:
+        diagnostics.setdefault("scanned_directories", []).append(
+            {"path": "data/processed/common", "scanned_files": common_files, "delete_candidates": 0}
+        )
     return targets
+
+
+def _profile_cache_common_cleanup_reason(profile_path: Path, common_path: Path) -> str:
+    if not common_path.exists() or not common_path.is_file():
+        return ""
+    try:
+        if _same_inode(profile_path, common_path):
+            return "profile_processed_common_hardlink"
+        if profile_path.stat().st_size != common_path.stat().st_size:
+            return ""
+        if _file_sha1(profile_path) != _file_sha1(common_path):
+            return ""
+    except OSError:
+        return ""
+    return "profile_processed_common_duplicate"
 
 
 def _cleanup_target(path: Path, size: int, reason: str) -> dict[str, Any]:
@@ -3218,6 +3780,7 @@ def _cleanup_storage_path_allowed(path: Path) -> bool:
         ROOT / ".pytest_cache",
         ROOT / "logs" / "backtests",
         ROOT / "logs" / "scoring",
+        ROOT / "logs" / "screening",
         ROOT / "reports" / "articles" / "backtests",
         ROOT / "reports" / "backtests",
         ROOT / "reports" / "experiments",
@@ -3227,6 +3790,35 @@ def _cleanup_storage_path_allowed(path: Path) -> bool:
     if path.name.endswith((".pyc", ".pyo")) and "__pycache__" in path.parts and ".venv" not in path.parts:
         return True
     return any(_is_relative_to(path.resolve(), item.resolve()) for item in allowed if item.exists())
+
+
+def _cleanup_storage_path_allowed_fast(path: Path) -> bool:
+    if path.is_symlink():
+        return False
+    try:
+        rel = path.relative_to(ROOT)
+    except ValueError:
+        return False
+    parts = rel.parts
+    if not parts:
+        return False
+    if parts[0] in {"src", "config", "docs", ".git", ".venv"}:
+        return False
+    allowed_prefixes = [
+        (".pytest_cache",),
+        ("logs", "backtests"),
+        ("logs", "scoring"),
+        ("logs", "screening"),
+        ("reports", "articles", "backtests"),
+        ("reports", "backtests"),
+        ("reports", "experiments"),
+        ("data", "processed"),
+    ]
+    if path.name.endswith((".pyc", ".pyo")) and "__pycache__" in parts and ".venv" not in parts:
+        return True
+    if parts == ("data", "cache", "jquants", "unsupported_ranges.json"):
+        return True
+    return any(len(parts) >= len(prefix) and parts[: len(prefix)] == prefix for prefix in allowed_prefixes)
 
 
 def _is_relative_to(path: Path, base: Path) -> bool:
@@ -3854,6 +4446,8 @@ def prepare_run_experiments_common_stages(profile_ids: list[str], start_date_tex
         "cleanup_hint": "",
         "skipped_profiles": [],
         "stage_groups": [],
+        "price_fetch_skipped": False,
+        "daily_logs_enabled": not NO_DAILY_LOGS_ACTIVE and not SUMMARY_ONLY_ACTIVE,
     }
     if not profile_ids:
         return report
@@ -3878,7 +4472,14 @@ def prepare_run_experiments_common_stages(profile_ids: list[str], start_date_tex
         fetch_start = min(indicator_fetch_start_dates) if indicator_fetch_start_dates else date.fromisoformat(start_date_text)
         trade_start = min(trade_start_dates) if trade_start_dates else date.fromisoformat(start_date_text)
         ACTIVE_PROFILE_ID = groups[0]["representative"]
-        ensure_price_history_for_backtest("jquants", fetch_start, end_date, trade_start)
+        if SKIP_PRICE_FETCH_ACTIVE:
+            report["price_fetch_skipped"] = True
+            print(
+                "run-experiments price fetch skipped; "
+                f"using cached prices from {trade_start.isoformat()} to {end_date.isoformat()}"
+            )
+        else:
+            ensure_price_history_for_backtest("jquants", fetch_start, end_date, trade_start)
         trading_dates = available_cached_price_dates(trade_start, end_date)
         report["price_fetch_time"] = round(time.perf_counter() - price_start, 4)
         report["shared_price_fetch_time"] = report["price_fetch_time"]
@@ -4127,6 +4728,9 @@ def print_run_experiments_performance_report(report: dict[str, Any]) -> None:
         "trade_time",
         "profile_scoring_time_by_profile",
         "profile_trade_time_by_profile",
+        "profile_total_time_by_profile",
+        "price_fetch_skipped",
+        "daily_logs_enabled",
         "reused_scoring_count",
         "reused_indicator_count",
         "reused_candidate_count",
@@ -4534,6 +5138,9 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             f"- trade_time: {performance.get('trade_time', 0)}",
             f"- profile_scoring_time_by_profile: {_compact_json(performance.get('profile_scoring_time_by_profile', {}))}",
             f"- profile_trade_time_by_profile: {_compact_json(performance.get('profile_trade_time_by_profile', {}))}",
+            f"- profile_total_time_by_profile: {_compact_json(performance.get('profile_total_time_by_profile', {}))}",
+            f"- price_fetch_skipped: {str(bool(performance.get('price_fetch_skipped', False))).lower()}",
+            f"- daily_logs_enabled: {str(bool(performance.get('daily_logs_enabled', True))).lower()}",
             f"- reused_indicator_count: {performance.get('reused_indicator_count', 0)}",
             f"- reused_candidate_count: {performance.get('reused_candidate_count', 0)}",
             f"- reused_scoring_count: {performance.get('reused_scoring_count', 0)}",
@@ -7187,7 +7794,8 @@ def run_screen(provider_name: str, target_date_text: str) -> None:
     screening_log.setdefault("profile_name", profile_name_from(config))
     screening_path = ROOT / "logs" / "screening" / profile_id_from(config) / f"screening_{target_date_text}.json"
     candidates_path = processed_profile_path(config, f"candidates_{target_date_text}.json")
-    write_json(screening_path, screening_log)
+    if _daily_detail_logs_enabled(config):
+        write_json(screening_path, screening_log)
     candidate_payload = {
         "date": target_date_text,
         "provider": provider_name,
@@ -7211,7 +7819,10 @@ def run_screen(provider_name: str, target_date_text: str) -> None:
     print(f"candidates: {len(candidates)}")
     if not indicators:
         print("screen warning: indicator payload is empty; saved empty candidates.")
-    print(f"screening saved: {screening_path.relative_to(ROOT)}")
+    if _daily_detail_logs_enabled(config):
+        print(f"screening saved: {screening_path.relative_to(ROOT)}")
+    else:
+        print("screening daily log: skipped")
     print(f"candidates saved: {candidates_path.relative_to(ROOT)}")
 
 
@@ -7340,7 +7951,9 @@ def run_score(provider_name: str, target_date_text: str) -> None:
     scoring_path = ROOT / "logs" / "scoring" / profile_id_from(config) / f"scoring_{target_date_text}.json"
     scored_candidates_path = processed_profile_path(config, f"scored_candidates_{target_date_text}.json")
     storage_scoring_log = _scoring_log_for_storage(scoring_log, config)
-    write_json(scoring_path, storage_scoring_log)
+    cache_payload = _score_cache_payload(config, target_date_text)
+    if _daily_detail_logs_enabled(config):
+        write_json(scoring_path, storage_scoring_log)
     write_json(
         scored_candidates_path,
         {
@@ -7349,6 +7962,7 @@ def run_score(provider_name: str, target_date_text: str) -> None:
             "profile_id": profile_id_from(config),
             "profile_name": profile_name_from(config),
             "config_version": config_version_from(config),
+            **cache_payload,
             "candidate_count": len(candidates),
             "scored_count": len(scores),
             "selected_count": len(selected),
@@ -7364,12 +7978,14 @@ def run_score(provider_name: str, target_date_text: str) -> None:
             },
             "ai_decision": scoring_log.get("ai_decision", {}),
             "scores": _scores_for_storage(scores, config),
+            "selected": _scores_for_storage(selected, config),
         },
     )
     save_scoring_results(config, ROOT, storage_scoring_log)
-    if ai_decision_log:
+    if ai_decision_log and _daily_detail_logs_enabled(config):
         save_ai_decision(config, ROOT, ai_decision_log)
-    write_daily_ai_dataset(config, target_date_text)
+    if _daily_detail_logs_enabled(config):
+        write_daily_ai_dataset(config, target_date_text)
 
     print(f"candidates: {len(candidates)}")
     print(f"scored: {len(scores)}")
@@ -7380,7 +7996,10 @@ def run_score(provider_name: str, target_date_text: str) -> None:
         print(f"scoring storage: saved {len(storage_scoring_log.get('scores', []))}/{len(scores)} scores (rejected candidate detail disabled)")
     if ai_decision_log:
         print(f"ai_decision: {ai_decision_log['provider']} fallback={ai_decision_log['fallback_used']}")
-    print(f"scoring saved: {scoring_path.relative_to(ROOT)}")
+    if _daily_detail_logs_enabled(config):
+        print(f"scoring saved: {scoring_path.relative_to(ROOT)}")
+    else:
+        print("scoring daily log: skipped")
     print(f"scored candidates saved: {scored_candidates_path.relative_to(ROOT)}")
 
 
@@ -7421,8 +8040,9 @@ def run_ai_decision_if_enabled(scoring_log: dict[str, Any], config: dict[str, An
     )
     ai_log["profile_id"] = profile_id_from(config)
     ai_log["profile_name"] = profile_name_from(config)
-    ai_log_path = ROOT / "logs" / "ai_decision" / profile_id_from(config) / f"ai_decision_{target_date_text}.json"
-    write_json(ai_log_path, ai_log)
+    if _daily_detail_logs_enabled(config):
+        ai_log_path = ROOT / "logs" / "ai_decision" / profile_id_from(config) / f"ai_decision_{target_date_text}.json"
+        write_json(ai_log_path, ai_log)
     return ai_log
 
 
@@ -8397,17 +9017,31 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
         print(f"- indicator_fetch_start_date: {indicator_fetch_start_date.isoformat()}")
         print(f"- indicator_fetch_lookback_days: {_backtest_indicator_fetch_lookback_days(config)}")
         print(f"- indicator_min_history_days: {_backtest_indicator_min_history_days(config)}")
-        price_fetch_audit = _run_daily_step(
-            1,
-            3,
-            "fetch-period-prices",
-                lambda: ensure_price_history_for_backtest(
-                    provider_name,
-                    indicator_fetch_start_date,
-                    end_date,
-                    start_date,
-                ),
-        )
+        if SKIP_PRICE_FETCH_ACTIVE:
+            price_fetch_audit = {
+                "price_fetch_requested_start": indicator_fetch_start_date.isoformat(),
+                "price_fetch_clamped_start": indicator_fetch_start_date.isoformat(),
+                "first_fetch_attempt_date": None,
+                "price_fetch_end": end_date.isoformat(),
+                "skipped": True,
+                "skip_reason": "--skip-price-fetch",
+            }
+            print(
+                "backtest price fetch skipped; "
+                f"using cached prices from {indicator_fetch_start_date.isoformat()} to {end_date.isoformat()}"
+            )
+        else:
+            price_fetch_audit = _run_daily_step(
+                1,
+                3,
+                "fetch-period-prices",
+                    lambda: ensure_price_history_for_backtest(
+                        provider_name,
+                        indicator_fetch_start_date,
+                        end_date,
+                        start_date,
+                    ),
+            )
         trading_dates = _run_daily_step(2, 3, "detect-trading-days", lambda: available_cached_price_dates(start_date, end_date))
         if not trading_dates:
             raise SystemExit("No cached trading days found for the backtest period. The period may be weekend, holiday, or unavailable.")
@@ -8541,27 +9175,29 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
             def run_db_save_step() -> None:
                 storage_trades = _trades_for_storage(trades, config)
                 storage_scoring_log = _scoring_log_for_storage(scoring_log, config)
-                write_json(
-                    backtest_dir / f"trades_{target_date_text}.json",
-                    {
-                        "date": target_date_text,
-                        "signal_date": target_date_text,
-                        "entry_date": entry_date_text,
-                        "provider": provider_name,
-                        "config_version": config_version_from(config),
-                        "storage_mode": _storage_save_mode(config),
-                        "trades": storage_trades,
-                    },
-                )
-                write_json(backtest_dir / f"portfolio_{target_date_text}.json", portfolio_summary)
-                write_json(backtest_dir / f"safety_{target_date_text}.json", {"date": target_date_text, "config_version": config_version_from(config), "safety_events": trade_result.get("safety_events", [])})
-                write_json(backtest_dir / f"scoring_{target_date_text}.json", storage_scoring_log)
+                if _daily_detail_logs_enabled(config):
+                    write_json(
+                        backtest_dir / f"trades_{target_date_text}.json",
+                        {
+                            "date": target_date_text,
+                            "signal_date": target_date_text,
+                            "entry_date": entry_date_text,
+                            "provider": provider_name,
+                            "config_version": config_version_from(config),
+                            "storage_mode": _storage_save_mode(config),
+                            "trades": storage_trades,
+                        },
+                    )
+                    write_json(backtest_dir / f"portfolio_{target_date_text}.json", portfolio_summary)
+                    write_json(backtest_dir / f"safety_{target_date_text}.json", {"date": target_date_text, "config_version": config_version_from(config), "safety_events": trade_result.get("safety_events", [])})
+                    write_json(backtest_dir / f"scoring_{target_date_text}.json", storage_scoring_log)
                 save_portfolio_snapshot(config, ROOT, portfolio_summary)
                 save_trades(config, ROOT, entry_date_text, storage_trades)
                 save_pending_orders(config, ROOT, state.get("pending_orders", []))
                 save_safety_events(config, ROOT, target_date_text, trade_result.get("safety_events", []))
 
             _run_backtest_day_step(index, len(trading_dates), target_date_text, "db-save", run_db_save_step, lambda: _backtest_db_save_metrics(trades, trade_result))
+            portfolio_summary["selected_count"] = trade_result.get("selected_count", 0)
             daily_summaries.append(portfolio_summary)
             all_trades.extend(trades)
             processed_dates.append(target_date_text)
@@ -8885,6 +9521,63 @@ def _fast_analysis_enabled(config: dict[str, Any]) -> bool:
     return SUMMARY_ONLY_ACTIVE or FAST_ANALYSIS_ACTIVE or bool(config.get("backtest", {}).get("fast_analysis")) or bool(config.get("analysis", {}).get("fast_analysis"))
 
 
+def _daily_detail_logs_enabled(config: dict[str, Any] | None = None) -> bool:
+    if SUMMARY_ONLY_ACTIVE or NO_DAILY_LOGS_ACTIVE:
+        return False
+    if config and bool(config.get("backtest", {}).get("no_daily_logs", False)):
+        return False
+    return True
+
+
+def _score_cache_payload(config: dict[str, Any], target_date_text: str) -> dict[str, str]:
+    signature = _experiment_scoring_signature(config)
+    settings_hash = hashlib.sha1(signature.encode("utf-8")).hexdigest()[:16]
+    cache_key = hashlib.sha1(
+        json.dumps(
+            {
+                "profile_id": profile_id_from(config),
+                "config_version": config_version_from(config),
+                "date": target_date_text,
+                "settings_hash": settings_hash,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:20]
+    return {"scoring_settings_hash": settings_hash, "scoring_cache_key": cache_key}
+
+
+def _scored_candidates_cache_valid(payload: dict[str, Any], config: dict[str, Any], target_date_text: str) -> bool:
+    if str(payload.get("date") or "") != target_date_text:
+        return False
+    if str(payload.get("profile_id") or profile_id_from(config)) != profile_id_from(config):
+        return False
+    expected = _score_cache_payload(config, target_date_text)
+    if payload.get("scoring_cache_key") == expected["scoring_cache_key"]:
+        return True
+    # Older caches did not include a scoring hash. Accept matching config_version
+    # so existing long backtest caches are not invalidated all at once.
+    return not payload.get("scoring_cache_key") and payload.get("config_version") == config_version_from(config)
+
+
+def _scored_payload_as_scoring_log(payload: dict[str, Any], provider_name: str, target_date_text: str) -> dict[str, Any]:
+    scores = payload.get("scores", [])
+    selected = payload.get("selected")
+    if selected is None:
+        selected = [item for item in scores if item.get("selected")]
+    return {
+        **payload,
+        "date": payload.get("date", target_date_text),
+        "source_provider": provider_name,
+        "scores": scores,
+        "selected": selected,
+        "candidate_count": payload.get("candidate_count", len(scores)),
+        "scored_count": payload.get("scored_count", len(scores)),
+        "selected_count": payload.get("selected_count", len(selected)),
+    }
+
+
 def _backtest_indicator_mode(config: dict[str, Any]) -> str:
     mode = str(config.get("backtest", {}).get("indicator_mode", "fast"))
     return mode if mode in {"full", "fast", "minimal"} else "fast"
@@ -9166,7 +9859,12 @@ def ensure_score(provider_name: str, target_date_text: str) -> dict[str, Any]:
     if not path.exists():
         run_score(provider_name, target_date_text)
     payload = read_json(path)
+    if not _scored_candidates_cache_valid(payload, config, target_date_text):
+        print(f"{BACKTEST_DAY_LOG_PREFIX} scoring cache stale: {path.relative_to(ROOT)}")
+        run_score(provider_name, target_date_text)
+        payload = read_json(path)
     payload.setdefault("config_version", config_version_from(config))
+    payload.setdefault("selected", [item for item in payload.get("scores", []) if item.get("selected")])
     save_scoring_results(
         config,
         ROOT,
@@ -9177,25 +9875,14 @@ def ensure_score(provider_name: str, target_date_text: str) -> dict[str, Any]:
             "scores": payload.get("scores", []),
         },
     )
-    return payload
+    return _scored_payload_as_scoring_log(payload, provider_name, target_date_text)
 
 
 def score_for_date(provider_name: str, target_date_text: str) -> dict[str, Any]:
     copied = _copy_reusable_scoring_for_active_profile(target_date_text)
     if copied is not None:
         return copied
-    run_score(provider_name, target_date_text)
-    config = load_config(CONFIG_PATH)
-    scoring_path = ROOT / "logs" / "scoring" / profile_id_from(config) / f"scoring_{target_date_text}.json"
-    processed_path = processed_profile_path(config, f"scored_candidates_{target_date_text}.json")
-    scoring_log = read_json(scoring_path)
-    processed = read_json(processed_path)
-    return {
-        **scoring_log,
-        "candidate_count": processed.get("candidate_count", len(scoring_log.get("scores", []))),
-        "scored_count": processed.get("scored_count", len(scoring_log.get("scores", []))),
-        "selected_count": processed.get("selected_count", len(scoring_log.get("selected", []))),
-    }
+    return ensure_score(provider_name, target_date_text)
 
 
 def _copy_reusable_scoring_for_active_profile(target_date_text: str) -> dict[str, Any] | None:
@@ -9209,14 +9896,19 @@ def _copy_reusable_scoring_for_active_profile(target_date_text: str) -> dict[str
     source_config = load_profile(source_profile_id)
     source_processed = processed_profile_path(source_config, f"scored_candidates_{target_date_text}.json")
     source_log = ROOT / "logs" / "scoring" / source_profile_id / f"scoring_{target_date_text}.json"
-    if not source_processed.exists() or not source_log.exists():
+    if not source_processed.exists():
         return None
     target_processed = processed_profile_path(target_config, f"scored_candidates_{target_date_text}.json")
     target_log = ROOT / "logs" / "scoring" / target_profile_id / f"scoring_{target_date_text}.json"
     processed_payload = _with_profile_metadata(read_json(source_processed), target_config)
-    scoring_payload = _with_profile_metadata(read_json(source_log), target_config)
+    processed_payload.update(_score_cache_payload(target_config, target_date_text))
+    if source_log.exists():
+        scoring_payload = _with_profile_metadata(read_json(source_log), target_config)
+    else:
+        scoring_payload = _scored_payload_as_scoring_log(processed_payload, "jquants", target_date_text)
     write_json(target_processed, processed_payload)
-    write_json(target_log, scoring_payload)
+    if _daily_detail_logs_enabled(target_config):
+        write_json(target_log, scoring_payload)
     save_scoring_results(
         target_config,
         ROOT,
@@ -10715,12 +11407,20 @@ def write_backtest_summary(
     ]
     selected_count_total = 0
     no_trade_days = 0
-    for scoring_file in sorted(backtest_dir.glob("scoring_*.json")):
-        scoring = read_json(scoring_file)
-        selected_count = len(scoring.get("selected", []))
-        selected_count_total += selected_count
-        if selected_count == 0:
-            no_trade_days += 1
+    scoring_files = sorted(backtest_dir.glob("scoring_*.json"))
+    if scoring_files:
+        for scoring_file in scoring_files:
+            scoring = read_json(scoring_file)
+            selected_count = len(scoring.get("selected", []))
+            selected_count_total += selected_count
+            if selected_count == 0:
+                no_trade_days += 1
+    else:
+        for summary in daily_summaries:
+            selected_count = int(summary.get("selected_count") or 0)
+            selected_count_total += selected_count
+            if selected_count == 0:
+                no_trade_days += 1
     net_cumulative_profit_rate = round(net_cumulative_profit / initial_capital, 4) if initial_capital else None
     execution_model = _backtest_execution_model(config)
     execution_model.update(_backtest_execution_model_stats(all_trades, execution_model))
