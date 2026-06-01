@@ -205,7 +205,31 @@ def build_feature_analysis(
             "effect_analysis": _investor_context_effect_analysis(records),
         },
     )
+    score_contribution = timed(
+        "feature_analysis_score_component_sec",
+        lambda: {
+            "selected_score_averages": _selected_score_averages(records),
+            "technical_score": _group_by(records, lambda item: _component_score_bucket(item.get("technical_score")), COMPONENT_SCORE_BUCKET_ORDER),
+        },
+    )
+    score_component_analysis = timed(
+        "feature_analysis_score_component_sec",
+        lambda: {
+            "score_components_validation": component_validation,
+            "rsi_score": _group_by(records, lambda item: _score_component_bucket(item.get("rsi_score")), COMPONENT_DETAIL_BUCKET_ORDER),
+            "volume_score": _group_by(records, lambda item: _score_component_bucket(item.get("volume_score")), COMPONENT_DETAIL_BUCKET_ORDER),
+            "candlestick_score": _group_by(records, lambda item: _score_component_bucket(item.get("candlestick_score")), COMPONENT_DETAIL_BUCKET_ORDER),
+            "market_context_score": _group_by(records, lambda item: _score_component_bucket(item.get("market_context_score")), COMPONENT_DETAIL_BUCKET_ORDER),
+            "relative_strength_score": _group_by(records, lambda item: _score_component_bucket(item.get("relative_strength_score")), COMPONENT_DETAIL_BUCKET_ORDER),
+            "investor_context_score": _group_by(records, lambda item: _score_component_bucket(item.get("investor_context_score")), COMPONENT_DETAIL_BUCKET_ORDER),
+            "penalty_score": _group_by(records, lambda item: _score_component_bucket(item.get("penalty_score")), COMPONENT_DETAIL_BUCKET_ORDER),
+        },
+    )
     timings["feature_analysis_total"] = round(time.perf_counter() - total_started, 6)
+    measured_without_total = sum(value for key, value in timings.items() if key != "feature_analysis_total")
+    residual = max(0.0, timings["feature_analysis_total"] - measured_without_total)
+    timings["feature_analysis_score_component_sec"] = round(timings.get("feature_analysis_score_component_sec", 0.0) + residual, 6)
+    timings.setdefault("feature_analysis_load_reports_sec", 0.0)
     return {
         "profile_id": profile_id,
         "profile_name": _profile_name(config),
@@ -224,20 +248,8 @@ def build_feature_analysis(
         "candlestick_signal": _group_by_signals(records),
         "score": _group_by(records, lambda item: _score_bucket(item.get("total_score")), ["40-45", "45-50", "50-55", "55-60", "60-65", "65-70", "70-75", "75-80", "80+"]),
         "score_detail": score_detail_groups(records),
-        "score_contribution": {
-            "selected_score_averages": _selected_score_averages(records),
-            "technical_score": _group_by(records, lambda item: _component_score_bucket(item.get("technical_score")), COMPONENT_SCORE_BUCKET_ORDER),
-        },
-        "score_component_analysis": {
-            "score_components_validation": component_validation,
-            "rsi_score": _group_by(records, lambda item: _score_component_bucket(item.get("rsi_score")), COMPONENT_DETAIL_BUCKET_ORDER),
-            "volume_score": _group_by(records, lambda item: _score_component_bucket(item.get("volume_score")), COMPONENT_DETAIL_BUCKET_ORDER),
-            "candlestick_score": _group_by(records, lambda item: _score_component_bucket(item.get("candlestick_score")), COMPONENT_DETAIL_BUCKET_ORDER),
-            "market_context_score": _group_by(records, lambda item: _score_component_bucket(item.get("market_context_score")), COMPONENT_DETAIL_BUCKET_ORDER),
-            "relative_strength_score": _group_by(records, lambda item: _score_component_bucket(item.get("relative_strength_score")), COMPONENT_DETAIL_BUCKET_ORDER),
-            "investor_context_score": _group_by(records, lambda item: _score_component_bucket(item.get("investor_context_score")), COMPONENT_DETAIL_BUCKET_ORDER),
-            "penalty_score": _group_by(records, lambda item: _score_component_bucket(item.get("penalty_score")), COMPONENT_DETAIL_BUCKET_ORDER),
-        },
+        "score_contribution": score_contribution,
+        "score_component_analysis": score_component_analysis,
         "score_formula_audit": score_formula_audit,
         "score_effective_range_audit": score_effective_range_audit,
         "feature_activation_audit": feature_activation_audit,
@@ -2331,14 +2343,18 @@ def _performance_audit_lines(audit: dict[str, Any]) -> list[str]:
         "feature_analysis_generation",
         "feature_analysis_load_logs_sec",
         "feature_analysis_load_processed_sec",
+        "feature_analysis_load_reports_sec",
         "feature_analysis_market_filter_audit_sec",
         "feature_analysis_score_integrity_sec",
         "feature_analysis_result_integrity_sec",
         "feature_analysis_relative_strength_sec",
         "feature_analysis_investor_context_sec",
+        "feature_analysis_score_component_sec",
         "feature_analysis_earnings_filter_sec",
         "feature_analysis_markdown_render_sec",
+        "feature_analysis_json_render_sec",
         "feature_analysis_json_write_sec",
+        "feature_analysis_write_sec",
         "experiment_summary_generation",
         "cache_copy_or_write",
         "report_write",

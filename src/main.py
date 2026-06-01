@@ -4223,7 +4223,16 @@ def run_demo_auto_order(config: dict[str, Any]) -> None:
     print(f"log: {log_path.relative_to(ROOT)}")
 
 
-def run_analyze(config: dict[str, Any], start_date: str | None = None, end_date: str | None = None) -> None:
+def run_analyze(config: dict[str, Any], start_date: str | None = None, end_date: str | None = None) -> dict[str, Any]:
+    analyze_performance: dict[str, float] = {}
+
+    def timed_analyze(key: str, action: Any) -> Any:
+        started = time.perf_counter()
+        try:
+            return action()
+        finally:
+            analyze_performance[key] = round(analyze_performance.get(key, 0.0) + time.perf_counter() - started, 6)
+
     try:
         analysis = analyze_operation_data(config, ROOT)
     except FileNotFoundError as exc:
@@ -4243,21 +4252,19 @@ def run_analyze(config: dict[str, Any], start_date: str | None = None, end_date:
     feature_markdown_path = output_dir / "feature_analysis.md"
     selection_quality_json_path = output_dir / "selection_quality.json"
     selection_quality_markdown_path = output_dir / "selection_quality.md"
-    feature_analysis = _run_timed_backtest_phase(
-        "feature_analysis_generation",
-        lambda: build_feature_analysis(config, ROOT, start_date, end_date),
-    )
+    feature_analysis = timed_analyze("feature_analysis_generation", lambda: build_feature_analysis(config, ROOT, start_date, end_date))
     _record_feature_analysis_performance(feature_analysis)
     selection_quality_analysis = build_selection_quality_analysis(config, ROOT)
     analysis["selection_quality_analysis"] = selection_quality_analysis
     _run_timed_backtest_phase("report_write", lambda: write_json(json_path, analysis))
     analysis_markdown = _run_timed_backtest_phase("markdown_render_total", lambda: render_analysis_markdown(analysis))
     _run_timed_backtest_phase("report_write", lambda: write_text(markdown_path, analysis_markdown))
-    _run_timed_backtest_phase("feature_analysis_json_write_sec", lambda: write_json(feature_json_path, feature_analysis))
-    feature_markdown = _run_timed_backtest_phase("feature_analysis_markdown_render_sec", lambda: render_feature_analysis_markdown(feature_analysis))
+    timed_analyze("feature_analysis_json_render_sec", lambda: json.dumps(feature_analysis, ensure_ascii=False, indent=2))
+    timed_analyze("feature_analysis_write_sec", lambda: write_json(feature_json_path, feature_analysis))
+    feature_markdown = timed_analyze("feature_analysis_markdown_render_sec", lambda: render_feature_analysis_markdown(feature_analysis))
     _record_backtest_phase_time("markdown_render_total", float(BACKTEST_PROFILE_TIMINGS.get("feature_analysis_markdown_render_sec", 0.0)) - float(BACKTEST_PROFILE_TIMINGS.get("_feature_analysis_markdown_render_sec_seen", 0.0)))
     BACKTEST_PROFILE_TIMINGS["_feature_analysis_markdown_render_sec_seen"] = float(BACKTEST_PROFILE_TIMINGS.get("feature_analysis_markdown_render_sec", 0.0))
-    _run_timed_backtest_phase("report_write", lambda: write_text(feature_markdown_path, feature_markdown))
+    timed_analyze("feature_analysis_write_sec", lambda: write_text(feature_markdown_path, feature_markdown))
     _run_timed_backtest_phase("report_write", lambda: write_json(selection_quality_json_path, selection_quality_analysis))
     selection_markdown = _run_timed_backtest_phase("markdown_render_total", lambda: render_selection_quality_markdown(selection_quality_analysis))
     _run_timed_backtest_phase("report_write", lambda: write_text(selection_quality_markdown_path, selection_markdown))
@@ -4301,6 +4308,22 @@ def run_analyze(config: dict[str, Any], start_date: str | None = None, end_date:
     print(f"feature_analysis_json: {feature_json_path.relative_to(ROOT)}")
     print(f"selection_quality_markdown: {selection_quality_markdown_path.relative_to(ROOT)}")
     print(f"selection_quality_json: {selection_quality_json_path.relative_to(ROOT)}")
+    inner = feature_analysis.get("feature_analysis_performance", {}) if isinstance(feature_analysis, dict) else {}
+    if isinstance(inner, dict):
+        for key, value in inner.items():
+            try:
+                analyze_performance[key] = round(analyze_performance.get(key, 0.0) + float(value or 0.0), 6)
+            except (TypeError, ValueError):
+                continue
+    analyze_performance["feature_analysis_generation"] = round(
+        sum(
+            float(analyze_performance.get(key, 0.0) or 0.0)
+            for key in _feature_analysis_breakdown_keys()
+            if key != "feature_analysis_generation"
+        ),
+        6,
+    )
+    return analyze_performance
 
 
 def _record_feature_analysis_performance(feature_analysis: dict[str, Any]) -> None:
@@ -4311,12 +4334,17 @@ def _record_feature_analysis_performance(feature_analysis: dict[str, Any]) -> No
         "feature_analysis_total",
         "feature_analysis_load_logs_sec",
         "feature_analysis_load_processed_sec",
+        "feature_analysis_load_reports_sec",
         "feature_analysis_market_filter_audit_sec",
         "feature_analysis_score_integrity_sec",
         "feature_analysis_result_integrity_sec",
         "feature_analysis_relative_strength_sec",
         "feature_analysis_investor_context_sec",
+        "feature_analysis_score_component_sec",
         "feature_analysis_earnings_filter_sec",
+        "feature_analysis_json_render_sec",
+        "feature_analysis_write_sec",
+        "feature_analysis_markdown_render_sec",
     ]:
         try:
             _record_backtest_phase_time(key, float(timings.get(key, 0.0) or 0.0))
@@ -4324,6 +4352,62 @@ def _record_feature_analysis_performance(feature_analysis: dict[str, Any]) -> No
             continue
     _record_backtest_phase_time("relative_strength_analysis_total", float(timings.get("feature_analysis_relative_strength_sec", 0.0) or 0.0))
     _record_backtest_phase_time("investor_context_analysis_total", float(timings.get("feature_analysis_investor_context_sec", 0.0) or 0.0))
+
+
+def _merge_feature_analysis_performance_report(
+    performance_report: dict[str, Any],
+    profile_id: str,
+    analyze_performance: dict[str, Any],
+) -> None:
+    if not isinstance(analyze_performance, dict):
+        return
+    performance_report.setdefault("feature_analysis_phase_time_by_profile", {})[profile_id] = {
+        key: round(float(analyze_performance.get(key, 0.0) or 0.0), 6)
+        for key in _feature_analysis_breakdown_keys()
+    }
+    phases = performance_report.setdefault("profile_phase_time_by_profile", {}).setdefault(profile_id, {})
+    if not isinstance(phases, dict):
+        return
+    for key in _feature_analysis_breakdown_keys():
+        phases[key] = round(float(phases.get(key, 0.0) or 0.0) + float(analyze_performance.get(key, 0.0) or 0.0), 6)
+    phases["feature_analysis_total"] = round(
+        float(phases.get("feature_analysis_total", 0.0) or 0.0)
+        + float(analyze_performance.get("feature_analysis_generation", 0.0) or 0.0),
+        6,
+    )
+    phases["relative_strength_analysis_total"] = round(
+        float(phases.get("relative_strength_analysis_total", 0.0) or 0.0)
+        + float(analyze_performance.get("feature_analysis_relative_strength_sec", 0.0) or 0.0),
+        6,
+    )
+    phases["investor_context_analysis_total"] = round(
+        float(phases.get("investor_context_analysis_total", 0.0) or 0.0)
+        + float(analyze_performance.get("feature_analysis_investor_context_sec", 0.0) or 0.0),
+        6,
+    )
+    phases["markdown_render_total"] = round(
+        float(phases.get("markdown_render_total", 0.0) or 0.0)
+        + float(analyze_performance.get("feature_analysis_markdown_render_sec", 0.0) or 0.0),
+        6,
+    )
+
+
+def _feature_analysis_breakdown_keys() -> list[str]:
+    return [
+        "feature_analysis_generation",
+        "feature_analysis_load_logs_sec",
+        "feature_analysis_load_processed_sec",
+        "feature_analysis_load_reports_sec",
+        "feature_analysis_market_filter_audit_sec",
+        "feature_analysis_score_integrity_sec",
+        "feature_analysis_result_integrity_sec",
+        "feature_analysis_relative_strength_sec",
+        "feature_analysis_investor_context_sec",
+        "feature_analysis_score_component_sec",
+        "feature_analysis_markdown_render_sec",
+        "feature_analysis_json_render_sec",
+        "feature_analysis_write_sec",
+    ]
 
 
 def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_text: str) -> tuple[Path, Path]:
@@ -4594,11 +4678,12 @@ def run_experiments(
                 if not skip_analyze:
                     print(f"run-experiments analyze start: {profile_id}")
                     analyze_started = time.perf_counter()
-                    run_analyze(load_config(CONFIG_PATH), start_date_text, end_date_text)
+                    analyze_performance = run_analyze(load_config(CONFIG_PATH), start_date_text, end_date_text)
                     analyze_seconds = round(time.perf_counter() - analyze_started, 4)
+                    _merge_feature_analysis_performance_report(performance_report, profile_id, analyze_performance)
                     performance_report.setdefault("feature_analysis_time_by_profile", {})[profile_id] = analyze_seconds
                     performance_report["feature_analysis_generation_time"] = round(
-                        float(performance_report.get("feature_analysis_generation_time", 0.0)) + analyze_seconds,
+                        float(performance_report.get("feature_analysis_generation_time", 0.0)) + float(analyze_performance.get("feature_analysis_generation", analyze_seconds) or 0.0),
                         4,
                     )
         elif not skip_analyze:
@@ -10327,14 +10412,18 @@ def _aggregate_phase_elapsed(performance_report: dict[str, Any]) -> dict[str, fl
         "feature_analysis_generation",
         "feature_analysis_load_logs_sec",
         "feature_analysis_load_processed_sec",
+        "feature_analysis_load_reports_sec",
         "feature_analysis_market_filter_audit_sec",
         "feature_analysis_score_integrity_sec",
         "feature_analysis_result_integrity_sec",
         "feature_analysis_relative_strength_sec",
         "feature_analysis_investor_context_sec",
+        "feature_analysis_score_component_sec",
         "feature_analysis_earnings_filter_sec",
         "feature_analysis_markdown_render_sec",
+        "feature_analysis_json_render_sec",
         "feature_analysis_json_write_sec",
+        "feature_analysis_write_sec",
         "experiment_summary_generation",
         "cache_copy_or_write",
         "report_write",
@@ -10352,7 +10441,8 @@ def _aggregate_phase_elapsed(performance_report: dict[str, Any]) -> dict[str, fl
                 totals[key] += float(phases.get(key, 0.0) or 0.0)
             if not phases.get("other_misc") and phases.get("misc"):
                 totals["other_misc"] += float(phases.get("misc", 0.0) or 0.0)
-    totals["feature_analysis_generation"] += float(performance_report.get("feature_analysis_generation_time", 0.0) or 0.0)
+    if not totals.get("feature_analysis_generation"):
+        totals["feature_analysis_generation"] += float(performance_report.get("feature_analysis_generation_time", 0.0) or 0.0)
     totals["experiment_summary_generation"] += float(performance_report.get("experiment_summary_generation_time", 0.0) or 0.0)
     totals["comparison_analysis"] += float(performance_report.get("comparison_analysis_time", performance_report.get("compare_profiles_time", 0.0)) or 0.0)
     return {key: round(value, 4) for key, value in totals.items()}
