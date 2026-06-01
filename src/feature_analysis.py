@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,16 @@ def build_feature_analysis(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> dict[str, Any]:
+    total_started = time.perf_counter()
+    timings: dict[str, float] = {}
+
+    def timed(key: str, action: Any) -> Any:
+        started = time.perf_counter()
+        try:
+            return action()
+        finally:
+            timings[key] = round(timings.get(key, 0.0) + time.perf_counter() - started, 6)
+
     db_path = get_database_path(config, root)
     if not db_path.exists():
         raise FileNotFoundError(f"SQLite DB not found: {db_path}")
@@ -77,7 +88,7 @@ def build_feature_analysis(
         if start_date and end_date:
             trade_where += " AND entry_date BETWEEN ? AND ?"
             trade_params.extend([start_date, end_date])
-        trade_rows = _rows(
+        trade_rows = timed("feature_analysis_load_logs_sec", lambda: _rows(
             connection,
             f"""
             SELECT *
@@ -86,7 +97,7 @@ def build_feature_analysis(
             ORDER BY entry_date, exit_date, id
             """,
             tuple(trade_params),
-        )
+        ))
         baseline_trade_rows: list[dict[str, Any]] = []
         if baseline_profile_id and baseline_profile_id != profile_id:
             baseline_where = "profile_id = ?"
@@ -94,7 +105,7 @@ def build_feature_analysis(
             if start_date and end_date:
                 baseline_where += " AND entry_date BETWEEN ? AND ?"
                 baseline_params.extend([start_date, end_date])
-            baseline_trade_rows = _rows(
+            baseline_trade_rows = timed("feature_analysis_load_logs_sec", lambda: _rows(
                 connection,
                 f"""
                 SELECT *
@@ -103,13 +114,13 @@ def build_feature_analysis(
                 ORDER BY entry_date, exit_date, id
                 """,
                 tuple(baseline_params),
-            )
+            ))
         market_where = "profile_id = ?"
         market_params: list[Any] = [profile_id]
         if start_date and end_date:
             market_where += " AND date BETWEEN ? AND ?"
             market_params.extend([start_date, end_date])
-        market_rows = _rows(
+        market_rows = timed("feature_analysis_load_logs_sec", lambda: _rows(
             connection,
             f"""
             SELECT date, market_regime, advance_ratio
@@ -118,13 +129,13 @@ def build_feature_analysis(
             ORDER BY date, id
             """,
             tuple(market_params),
-        )
+        ))
         scoring_where = "profile_id = ?"
         scoring_params: list[Any] = [profile_id]
         if start_date and end_date:
             scoring_where += " AND date BETWEEN ? AND ?"
             scoring_params.extend([start_date, end_date])
-        scoring_rows = _rows(
+        scoring_rows = timed("feature_analysis_load_processed_sec", lambda: _rows(
             connection,
             f"""
             SELECT *
@@ -133,25 +144,68 @@ def build_feature_analysis(
             ORDER BY date, rank, id
             """,
             tuple(scoring_params),
-        )
-    closed = [row for row in trade_rows if is_closed_trade_for_metrics(row)]
-    baseline_closed = [row for row in baseline_trade_rows if is_closed_trade_for_metrics(row)]
-    market_by_date = {row.get("date"): row for row in market_rows}
-    records = [_feature_record(trade, market_by_date.get(trade.get("entry_date"), {})) for trade in closed]
-    baseline_records = [_feature_record(trade, {}) for trade in baseline_closed]
+        ))
+    closed = timed("feature_analysis_result_integrity_sec", lambda: [row for row in trade_rows if is_closed_trade_for_metrics(row)])
+    baseline_closed = timed("feature_analysis_result_integrity_sec", lambda: [row for row in baseline_trade_rows if is_closed_trade_for_metrics(row)])
+    market_by_date = timed("feature_analysis_load_processed_sec", lambda: {row.get("date"): row for row in market_rows})
+    records = timed("feature_analysis_result_integrity_sec", lambda: [_feature_record(trade, market_by_date.get(trade.get("entry_date"), {})) for trade in closed])
+    baseline_records = timed("feature_analysis_result_integrity_sec", lambda: [_feature_record(trade, {}) for trade in baseline_closed])
     rsi_filter = _rsi_filter_rejection_summary(scoring_rows, config)
-    component_validation = _score_component_validation(records, scoring_rows)
-    score_formula_audit = _score_formula_audit(config, records, scoring_rows, component_validation)
-    score_effective_range_audit = _score_effective_range_audit(config, records, scoring_rows)
-    earnings_exposure = _earnings_calendar_exposure(records, scoring_rows)
-    earnings_filter_debug = _earnings_filter_debug(config, scoring_rows)
-    earnings_pipeline = _earnings_pipeline(scoring_rows, earnings_filter_debug)
+    component_validation = timed("feature_analysis_score_integrity_sec", lambda: _score_component_validation(records, scoring_rows))
+    score_formula_audit = timed("feature_analysis_score_integrity_sec", lambda: _score_formula_audit(config, records, scoring_rows, component_validation))
+    score_effective_range_audit = timed("feature_analysis_score_integrity_sec", lambda: _score_effective_range_audit(config, records, scoring_rows))
+    earnings_exposure = timed("feature_analysis_earnings_filter_sec", lambda: _earnings_calendar_exposure(records, scoring_rows))
+    earnings_filter_debug = timed("feature_analysis_earnings_filter_sec", lambda: _earnings_filter_debug(config, scoring_rows))
+    earnings_pipeline = timed("feature_analysis_earnings_filter_sec", lambda: _earnings_pipeline(scoring_rows, earnings_filter_debug))
     feature_activation_audit = build_feature_activation_audit(config, records, scoring_rows, _registry_features(root, profile_id))
-    relative_strength_debug = _relative_strength_debug(scoring_rows)
-    relative_strength_pipeline = _relative_strength_pipeline(config, scoring_rows)
-    investor_context_filter = _investor_context_filter_analysis(scoring_rows, records)
-    integrity_audits = _backtest_integrity_audits(root, profile_id, start_date, end_date)
+    relative_strength_debug = timed("feature_analysis_relative_strength_sec", lambda: _relative_strength_debug(scoring_rows))
+    relative_strength_pipeline = timed("feature_analysis_relative_strength_sec", lambda: _relative_strength_pipeline(config, scoring_rows))
+    investor_context_filter = timed("feature_analysis_investor_context_sec", lambda: _investor_context_filter_analysis(scoring_rows, records))
+    integrity_audits = timed("feature_analysis_market_filter_audit_sec", lambda: _backtest_integrity_audits(root, profile_id, start_date, end_date))
 
+    relative_strength_analysis = timed(
+        "feature_analysis_relative_strength_sec",
+        lambda: {
+            "benchmark_source": _group_by(records, lambda item: item.get("benchmark_source") or "unknown"),
+            "relative_strength_score": _group_by(
+                records,
+                lambda item: _relative_strength_score_bucket(item.get("relative_strength_score")),
+                RELATIVE_STRENGTH_SCORE_BUCKET_ORDER,
+            ),
+            "relative_strength_5d": _group_by(
+                records,
+                lambda item: _relative_strength_bucket(item.get("relative_strength_5d")),
+                RELATIVE_STRENGTH_BUCKET_ORDER,
+            ),
+            "relative_strength_10d": _group_by(
+                records,
+                lambda item: _relative_strength_bucket(item.get("relative_strength_10d")),
+                RELATIVE_STRENGTH_BUCKET_ORDER,
+            ),
+            "relative_strength_20d": _group_by(
+                records,
+                lambda item: _relative_strength_bucket(item.get("relative_strength_20d")),
+                RELATIVE_STRENGTH_BUCKET_ORDER,
+            ),
+        },
+    )
+    relative_strength_effect_analysis = timed("feature_analysis_relative_strength_sec", lambda: _relative_strength_effect_analysis(records, baseline_records, baseline_profile_id))
+    investor_context_analysis = timed(
+        "feature_analysis_investor_context_sec",
+        lambda: {
+            "investor_context_score": _group_by(
+                records,
+                lambda item: _investor_context_score_bucket(item.get("investor_context_score")),
+                ["<0", "0", "1-2", "3-5"],
+            ),
+            "overseas_net_buy_4w_sum": _group_by(records, lambda item: _positive_negative_bucket(item.get("overseas_net_buy_4w_sum")), ["positive", "negative", "zero", "unknown"]),
+            "overseas_net_buy_4w_trend": _group_by(records, lambda item: item.get("overseas_net_buy_4w_trend") or "unknown", ["improving", "worsening", "flat", "unknown"]),
+            "investor_context_source": _group_by(records, lambda item: item.get("investor_context_source") or "unknown"),
+            "top_candidates": _top_investor_context_candidates(records),
+            "effect_analysis": _investor_context_effect_analysis(records),
+        },
+    )
+    timings["feature_analysis_total"] = round(time.perf_counter() - total_started, 6)
     return {
         "profile_id": profile_id,
         "profile_name": _profile_name(config),
@@ -192,46 +246,14 @@ def build_feature_analysis(
         "earnings_calendar_exposure": earnings_exposure,
         "earnings_filter_debug": earnings_filter_debug,
         "earnings_pipeline": earnings_pipeline,
-        "relative_strength_analysis": {
-            "benchmark_source": _group_by(records, lambda item: item.get("benchmark_source") or "unknown"),
-            "relative_strength_score": _group_by(
-                records,
-                lambda item: _relative_strength_score_bucket(item.get("relative_strength_score")),
-                RELATIVE_STRENGTH_SCORE_BUCKET_ORDER,
-            ),
-            "relative_strength_5d": _group_by(
-                records,
-                lambda item: _relative_strength_bucket(item.get("relative_strength_5d")),
-                RELATIVE_STRENGTH_BUCKET_ORDER,
-            ),
-            "relative_strength_10d": _group_by(
-                records,
-                lambda item: _relative_strength_bucket(item.get("relative_strength_10d")),
-                RELATIVE_STRENGTH_BUCKET_ORDER,
-            ),
-            "relative_strength_20d": _group_by(
-                records,
-                lambda item: _relative_strength_bucket(item.get("relative_strength_20d")),
-                RELATIVE_STRENGTH_BUCKET_ORDER,
-            ),
-        },
-        "relative_strength_effect_analysis": _relative_strength_effect_analysis(records, baseline_records, baseline_profile_id),
-        "investor_context_analysis": {
-            "investor_context_score": _group_by(
-                records,
-                lambda item: _investor_context_score_bucket(item.get("investor_context_score")),
-                ["<0", "0", "1-2", "3-5"],
-            ),
-            "overseas_net_buy_4w_sum": _group_by(records, lambda item: _positive_negative_bucket(item.get("overseas_net_buy_4w_sum")), ["positive", "negative", "zero", "unknown"]),
-            "overseas_net_buy_4w_trend": _group_by(records, lambda item: item.get("overseas_net_buy_4w_trend") or "unknown", ["improving", "worsening", "flat", "unknown"]),
-            "investor_context_source": _group_by(records, lambda item: item.get("investor_context_source") or "unknown"),
-            "top_candidates": _top_investor_context_candidates(records),
-            "effect_analysis": _investor_context_effect_analysis(records),
-        },
+        "relative_strength_analysis": relative_strength_analysis,
+        "relative_strength_effect_analysis": relative_strength_effect_analysis,
+        "investor_context_analysis": investor_context_analysis,
         "investor_context_filter": investor_context_filter,
         "market_filter_audit": integrity_audits.get("market_filter_audit", {}),
         "backtest_result_integrity_audit": integrity_audits.get("backtest_result_integrity_audit", {}),
         "score_integrity_audit": integrity_audits.get("score_integrity_audit", {}),
+        "feature_analysis_performance": timings,
         "records_used": records,
     }
 
@@ -294,6 +316,26 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "## Score Integrity Audit",
         "",
         *_generic_audit_lines(analysis.get("score_integrity_audit", {})),
+        "",
+        "## Performance Audit",
+        "",
+        *_performance_audit_lines(analysis.get("performance_audit", {})),
+        "",
+        "## JSON Read Ranking",
+        "",
+        *_json_read_ranking_lines(analysis.get("json_read_ranking") or (analysis.get("performance_audit", {}) or {}).get("json_read_ranking") or (analysis.get("performance_audit", {}) or {}).get("top_json_read_files") or []),
+        "",
+        "## Profile Read Reason",
+        "",
+        *_profile_read_reason_lines(analysis.get("profile_read_reason", {})),
+        "",
+        "## Indicator Field Audit",
+        "",
+        *_indicator_field_audit_lines(analysis.get("indicator_field_audit") or (analysis.get("performance_audit", {}) or {}).get("indicator_field_audit") or {}),
+        "",
+        "## Runtime Memory Cache Audit",
+        "",
+        *_runtime_memory_cache_audit_lines((analysis.get("performance_audit", {}) or {}).get("runtime_memory_cache_audit", {})),
         "",
         "## Relative Strength Analysis",
         "",
@@ -2249,6 +2291,183 @@ def _generic_audit_lines(audit: dict[str, Any]) -> list[str]:
                 f"reason={item.get('reason')}"
             )
     return lines
+
+
+def _performance_audit_lines(audit: dict[str, Any]) -> list[str]:
+    phase_keys = [
+        "json_read",
+        "json_file_io_sec",
+        "json_postprocess_sec",
+        "indicator_parse_or_transform_sec",
+        "analysis_json_scan_sec",
+        "misc",
+        "daily_loop_total",
+        "per_day_pipeline_total",
+        "candidate_generation_total",
+        "indicator_generation_total",
+        "scoring_total",
+        "cache_lookup_total",
+        "cache_materialize_total",
+        "file_copy_or_link_total",
+        "backtest_day_iteration_total",
+        "feature_analysis_total",
+        "relative_strength_analysis_total",
+        "investor_context_analysis_total",
+        "markdown_render_total",
+        "csv_read_write_total",
+        "db_read_write_total",
+        "candidate_load",
+        "indicator_load",
+        "score_load",
+        "indicator_file_io_sec",
+        "indicator_json_parse_sec",
+        "indicator_record_normalize_sec",
+        "indicator_filter_by_date_or_code_sec",
+        "indicator_copy_from_common_sec",
+        "indicator_unused_or_unknown_sec",
+        "market_filter",
+        "score_integrity_audit",
+        "result_integrity_audit",
+        "feature_analysis_generation",
+        "feature_analysis_load_logs_sec",
+        "feature_analysis_load_processed_sec",
+        "feature_analysis_market_filter_audit_sec",
+        "feature_analysis_score_integrity_sec",
+        "feature_analysis_result_integrity_sec",
+        "feature_analysis_relative_strength_sec",
+        "feature_analysis_investor_context_sec",
+        "feature_analysis_earnings_filter_sec",
+        "feature_analysis_markdown_render_sec",
+        "feature_analysis_json_write_sec",
+        "experiment_summary_generation",
+        "cache_copy_or_write",
+        "report_write",
+        "trade_simulation",
+        "comparison_analysis",
+        "other_misc",
+    ]
+    scope_keys = ["common", "profile", "logs", "reports", "data_other", "outside_root", "other"]
+    if not isinstance(audit, dict) or not audit:
+        audit = {}
+    phase_elapsed = audit.get("phase_elapsed_sec", {}) if isinstance(audit.get("phase_elapsed_sec"), dict) else {}
+    json_scope = audit.get("json_read_scope", {}) if isinstance(audit.get("json_read_scope"), dict) else {}
+    lines = [
+        f"- total_elapsed_sec: {audit.get('total_elapsed_sec', 0)}",
+        "",
+        "### phase_elapsed_sec",
+        "",
+        "| phase | elapsed_sec |",
+        "| --- | ---: |",
+    ]
+    for key in phase_keys:
+        lines.append(f"| {key} | {phase_elapsed.get(key, 0)} |")
+    lines.extend(["", "### json_read_scope", "", "| scope | count | bytes | elapsed_sec |", "| --- | ---: | ---: | ---: |"])
+    for scope in scope_keys:
+        item = json_scope.get(scope, {}) if isinstance(json_scope, dict) else {}
+        if not isinstance(item, dict):
+            item = {}
+        lines.append(f"| {scope} | {item.get('count', 0)} | {item.get('bytes', 0)} | {item.get('elapsed_sec', 0)} |")
+    by_profile = audit.get("json_read_by_profile", [])
+    lines.extend(["", "### JSON Read by Profile", "", "| profile_id | scope | count | bytes | elapsed_sec |", "| --- | --- | ---: | ---: | ---: |"])
+    if isinstance(by_profile, list) and by_profile:
+        for row in by_profile:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                f"| {row.get('profile_id', '')} | {row.get('scope', '')} | {row.get('count', 0)} | "
+                f"{row.get('bytes', 0)} | {row.get('elapsed_sec', 0)} |"
+            )
+    else:
+        lines.append("| unavailable | - | 0 | 0 | 0 |")
+    targets = audit.get("optimization_targets_top3", [])
+    lines.extend(["", f"- optimization_targets_top3: {_compact_json(targets)}"])
+    return lines
+
+
+def _json_read_ranking_lines(rows: Any) -> list[str]:
+    if not isinstance(rows, list) or not rows:
+        return ["- ranking: unavailable"]
+    lines = [
+        "| rank | path | scope | read_count | total_bytes | total_elapsed_sec | avg_elapsed_ms | suspected_reason |",
+        "| ---: | --- | --- | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for index, row in enumerate(rows[:20], start=1):
+        if not isinstance(row, dict):
+            continue
+        lines.append(
+            f"| {row.get('rank', index)} | {row.get('path', '')} | {row.get('scope', '')} | "
+            f"{row.get('read_count', row.get('count', 0))} | {row.get('total_bytes', row.get('bytes', 0))} | "
+            f"{row.get('total_elapsed_sec', row.get('elapsed_sec', 0))} | {row.get('avg_elapsed_ms', 0)} | "
+            f"{row.get('suspected_reason', '')} |"
+        )
+    return lines
+
+
+def _profile_read_reason_lines(audit: dict[str, Any]) -> list[str]:
+    if not isinstance(audit, dict) or not audit:
+        audit = {}
+    breakdown = audit.get("breakdown", {}) if isinstance(audit.get("breakdown"), dict) else {}
+    lines = [
+        f"- profile_read_total_bytes: {audit.get('profile_read_total_bytes', 0)}",
+        f"- profile_read_total_count: {audit.get('profile_read_total_count', 0)}",
+        f"- profile_read_total_elapsed_sec: {audit.get('profile_read_total_elapsed_sec', 0)}",
+        f"- profile_cache_used_count: {audit.get('profile_cache_used_count', 0)}",
+        f"- common_cache_used_count: {audit.get('common_cache_used_count', 0)}",
+    ]
+    if audit.get("note"):
+        lines.append(f"- note: {audit.get('note')}")
+    lines.extend(["", "### Breakdown", "", "| reason | count | bytes | elapsed_sec | note |", "| --- | ---: | ---: | ---: | --- |"])
+    for reason in [
+        "runtime_indicators_read",
+        "runtime_candidates_read",
+        "scored_candidates_read",
+        "runtime_market_context_read",
+        "report_or_analysis_read",
+        "unknown",
+    ]:
+        item = breakdown.get(reason, {}) if isinstance(breakdown, dict) else {}
+        if not isinstance(item, dict):
+            item = {}
+        lines.append(
+            f"| {reason} | {item.get('count', 0)} | {item.get('bytes', 0)} | "
+            f"{item.get('elapsed_sec', 0)} | {item.get('note', '')} |"
+        )
+    return lines
+
+
+def _indicator_field_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not isinstance(audit, dict) or not audit:
+        audit = {}
+    return [
+        f"- total_fields: {audit.get('total_fields', 0)}",
+        f"- used_fields: {_compact_json(audit.get('used_fields', []))}",
+        f"- maybe_unused_fields: {_compact_json(audit.get('maybe_unused_fields', []))}",
+        f"- sample_record_size_bytes: {audit.get('sample_record_size_bytes', 0)}",
+        f"- estimated_reducible_fields_count: {audit.get('estimated_reducible_fields_count', 0)}",
+        f"- confidence: {audit.get('confidence', 'unknown')}",
+        f"- note: {audit.get('note', 'No indicator fields are removed by this audit.')}",
+    ]
+
+
+def _runtime_memory_cache_audit_lines(audit: dict[str, Any]) -> list[str]:
+    rows = audit if isinstance(audit, dict) else {}
+    lines = [
+        "| cache_name | hit_count | miss_count | size | note |",
+        "| --- | ---: | ---: | ---: | --- |",
+    ]
+    for name in ["listed_stocks_raw", "listed_stocks_lookup", "raw_prices_by_date"]:
+        item = rows.get(name, {}) if isinstance(rows, dict) else {}
+        if not isinstance(item, dict):
+            item = {}
+        lines.append(
+            f"| {name} | {item.get('hit_count', 0)} | {item.get('miss_count', 0)} | "
+            f"{item.get('size', 0)} | {item.get('note', '')} |"
+        )
+    return lines
+
+
+def _compact_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _number(value: Any) -> float | None:
