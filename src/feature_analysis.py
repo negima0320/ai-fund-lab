@@ -4657,11 +4657,239 @@ def _backtest_integrity_audits(root: Path, profile_id: str, start_date: str | No
             payload = json.load(file)
     except Exception:
         return {}
+    result_audit = _repair_backtest_result_integrity_audit(root, profile_id, start_date, end_date, payload)
     return {
         "market_filter_audit": payload.get("market_filter_audit", {}),
-        "backtest_result_integrity_audit": payload.get("backtest_result_integrity_audit", {}),
+        "backtest_result_integrity_audit": result_audit,
         "score_integrity_audit": payload.get("score_integrity_audit", {}),
     }
+
+
+def _repair_backtest_result_integrity_audit(
+    root: Path,
+    profile_id: str,
+    start_date: str,
+    end_date: str,
+    backtest_summary: dict[str, Any],
+) -> dict[str, Any]:
+    audit = dict(backtest_summary.get("backtest_result_integrity_audit", {}) or {})
+    all_trades = backtest_summary.get("all_trades", [])
+    if not isinstance(all_trades, list):
+        all_trades = []
+    scored_by_key, selected_by_key, key_source = _processed_scored_candidate_keys(root, profile_id, start_date, end_date)
+    buy_trades = [
+        trade
+        for trade in all_trades
+        if isinstance(trade, dict)
+        and str(trade.get("action") or "").upper() == "BUY"
+        and str(trade.get("order_status") or trade.get("status") or "FILLED").upper() == "FILLED"
+    ]
+    run_dates = sorted({key.split("|", 1)[0] for key in set(scored_by_key) | set(selected_by_key) if "|" in key})
+    buy_keys = {_feature_trade_selection_key(trade) for trade in buy_trades if _feature_trade_selection_key(trade)}
+    missing_keys = sorted(buy_keys - set(selected_by_key))
+    debug_sample = _feature_trade_without_selected_debug_sample(
+        missing_keys,
+        buy_trades,
+        scored_by_key,
+        selected_by_key,
+        key_source,
+        run_dates,
+        root,
+        profile_id,
+        start_date,
+        end_date,
+    )
+    audit["trade_without_selected_count"] = len(missing_keys)
+    audit["trade_without_selected_sample"] = missing_keys[:20]
+    audit["trade_without_selected_debug_sample"] = debug_sample
+    audit["market_trade_samples"] = _feature_market_trade_samples(all_trades, selected_by_key, set(missing_keys))
+    if buy_trades:
+        audit["trade_selected_match_rate"] = round((len(buy_trades) - len(missing_keys)) / len(buy_trades), 4)
+    warnings = [
+        item
+        for item in audit.get("warnings", []) or []
+        if "buy trade exists without selected candidate" not in str(item)
+    ]
+    errors = list(audit.get("errors", []) or [])
+    if missing_keys:
+        warnings.append("buy trade exists without selected candidate in the run period")
+    audit["warnings"] = warnings
+    audit["errors"] = errors
+    audit["integrity_warning_count"] = len(warnings)
+    audit["integrity_error_count"] = len(errors)
+    audit["result_integrity_status"] = "WARNING" if warnings or errors else "OK"
+    return audit
+
+
+def _feature_market_trade_samples(
+    all_trades: list[Any],
+    selected_by_key: dict[str, dict[str, Any]],
+    missing_keys: set[str],
+) -> list[dict[str, Any]]:
+    samples = []
+    selected_keys = set(selected_by_key)
+    buy_trades = [
+        trade
+        for trade in all_trades
+        if isinstance(trade, dict) and str(trade.get("action") or "").upper() == "BUY"
+    ]
+    sell_trades = [
+        trade
+        for trade in all_trades
+        if isinstance(trade, dict) and str(trade.get("action") or "").upper() == "SELL"
+    ]
+    for trade in [*buy_trades, *sell_trades]:
+        if not isinstance(trade, dict):
+            continue
+        status = str(trade.get("order_status") or trade.get("status") or "FILLED").upper()
+        if status != "FILLED":
+            continue
+        key = _feature_trade_selection_key(trade)
+        selected_found = bool(key and key in selected_keys)
+        reasons = []
+        if key in missing_keys:
+            reasons.append("trade_without_selected")
+        section = (
+            trade.get("market_section")
+            or trade.get("listing_market")
+            or trade.get("section")
+            or (selected_by_key.get(key or "") or {}).get("market_section")
+            or "Unknown"
+        )
+        samples.append(
+            {
+                "trade_date": trade.get("entry_date") or trade.get("exit_date") or trade.get("date"),
+                "code": trade.get("code"),
+                "name": trade.get("name"),
+                "market_section": section,
+                "selected_found": selected_found,
+                "reason": ",".join(reasons) or "ok",
+            }
+        )
+        if len(samples) >= 20:
+            break
+    return samples
+
+
+def _processed_scored_candidate_keys(
+    root: Path,
+    profile_id: str,
+    start_date: str,
+    end_date: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, str]]:
+    scored_by_key: dict[str, dict[str, Any]] = {}
+    selected_by_key: dict[str, dict[str, Any]] = {}
+    key_source: dict[str, str] = {}
+    processed_dir = root / "data" / "processed" / profile_id
+    for path in sorted(processed_dir.glob("scored_candidates_*.json")):
+        day = path.stem.replace("scored_candidates_", "")
+        if day < start_date or day > end_date:
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        scores = payload.get("scores", [])
+        if not isinstance(scores, list):
+            scores = []
+        selected = payload.get("selected", [])
+        if not selected:
+            selected = [row for row in scores if isinstance(row, dict) and row.get("selected")]
+        if not isinstance(selected, list):
+            selected = []
+        source = str(path.relative_to(root))
+        for row in scores:
+            if not isinstance(row, dict):
+                continue
+            key = _feature_selection_key(row, day)
+            if key:
+                scored_by_key[key] = row
+                key_source.setdefault(key, source)
+        for row in selected:
+            if not isinstance(row, dict):
+                continue
+            key = _feature_selection_key(row, day)
+            if key:
+                selected_by_key[key] = row
+                key_source[key] = source
+    return scored_by_key, selected_by_key, key_source
+
+
+def _feature_selection_key(row: dict[str, Any], fallback_day: str = "") -> str:
+    code = str(row.get("code") or "")
+    day = str(row.get("signal_date") or row.get("date") or fallback_day or "")
+    return f"{day}|{code}" if day and code else ""
+
+
+def _feature_trade_selection_key(trade: dict[str, Any]) -> str:
+    code = str(trade.get("code") or "")
+    day = str(trade.get("signal_date") or trade.get("date") or "")
+    return f"{day}|{code}" if day and code else ""
+
+
+def _feature_trade_lookup_keys(trade: dict[str, Any], run_dates: list[str]) -> list[str]:
+    code = str(trade.get("code") or "")
+    if not code:
+        return []
+    days = [
+        str(trade.get("signal_date") or ""),
+        str(trade.get("date") or ""),
+        str(trade.get("trade_date") or ""),
+        str(trade.get("entry_date") or ""),
+    ]
+    entry_date = str(trade.get("entry_date") or trade.get("trade_date") or "")
+    previous = [day for day in run_dates if day < entry_date]
+    if previous:
+        days.append(previous[-1])
+    keys = []
+    seen = set()
+    for day in days:
+        if not day:
+            continue
+        key = f"{day}|{code}"
+        if key not in seen:
+            keys.append(key)
+            seen.add(key)
+    return keys
+
+
+def _feature_trade_without_selected_debug_sample(
+    missing_keys: list[str],
+    buy_trades: list[dict[str, Any]],
+    scored_by_key: dict[str, dict[str, Any]],
+    selected_by_key: dict[str, dict[str, Any]],
+    key_source: dict[str, str],
+    run_dates: list[str],
+    root: Path,
+    profile_id: str,
+    start_date: str,
+    end_date: str,
+) -> list[dict[str, Any]]:
+    by_key = {_feature_trade_selection_key(trade): trade for trade in buy_trades if _feature_trade_selection_key(trade)}
+    samples = []
+    for key in missing_keys[:20]:
+        trade = by_key.get(key, {})
+        lookup_keys = _feature_trade_lookup_keys(trade, run_dates)
+        scored_key = next((item for item in lookup_keys if item in scored_by_key), "")
+        selected_key = next((item for item in lookup_keys if item in selected_by_key), "")
+        samples.append(
+            {
+                "code": trade.get("code"),
+                "signal_date": trade.get("signal_date"),
+                "trade_date": trade.get("trade_date") or trade.get("entry_date") or trade.get("date"),
+                "entry_date": trade.get("entry_date"),
+                "selected_lookup_keys_checked": lookup_keys,
+                "found_in_scored_candidates": bool(scored_key),
+                "found_in_selected_candidates": bool(selected_key),
+                "matched_scored_key": scored_key,
+                "matched_selected_key": selected_key,
+                "source_log_file": str((root / "logs" / "backtests" / profile_id / f"{start_date}_to_{end_date}" / "backtest_summary.json").relative_to(root)),
+                "scored_candidate_file_checked": key_source.get(scored_key or selected_key, ""),
+            }
+        )
+    return samples
 
 
 def _capital_utilization_audit(

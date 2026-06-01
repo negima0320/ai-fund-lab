@@ -13930,6 +13930,15 @@ def build_backtest_result_integrity_audit(
     selected_without_trade = selected_keys - buy_keys
     trade_without_selected = buy_keys - selected_keys
     trade_without_selected_count = len(trade_without_selected) + buy_missing_key_count
+    trade_without_selected_debug_sample = _trade_without_selected_debug_sample(
+        trade_without_selected,
+        buy_trades,
+        selected_by_key,
+        score_rows,
+        config,
+        backtest_dir,
+        run_dates,
+    )
     selected_without_trade_reason_breakdown = _selected_without_trade_reason_breakdown(
         selected_without_trade,
         selected_by_key,
@@ -14040,6 +14049,7 @@ def build_backtest_result_integrity_audit(
         "warnings": warnings,
         "errors": errors,
         "trade_without_selected_sample": sorted(trade_without_selected)[:20],
+        "trade_without_selected_debug_sample": trade_without_selected_debug_sample,
         "selected_without_trade_sample": sorted(selected_without_trade)[:20],
         "market_filter_violation_sample": market_filter_violations[:20],
         "out_of_period_trade_sample": [
@@ -14215,6 +14225,94 @@ def _market_trade_samples(
             }
         )
     return samples
+
+
+def _trade_without_selected_debug_sample(
+    trade_without_selected: set[str],
+    buy_trades: list[dict[str, Any]],
+    selected_by_key: dict[str, dict[str, Any]],
+    score_rows: list[dict[str, Any]],
+    config: dict[str, Any],
+    backtest_dir: Path,
+    run_dates: list[str],
+) -> list[dict[str, Any]]:
+    scored_keys = {_selection_trade_key(row) for row in score_rows if _selection_trade_key(row)}
+    selected_keys = set(selected_by_key)
+    samples = []
+    for trade in buy_trades:
+        key = _trade_selection_key(trade)
+        if key not in trade_without_selected:
+            continue
+        lookup_keys = _trade_selected_lookup_keys(trade, run_dates)
+        found_selected_key = next((item for item in lookup_keys if item in selected_keys), "")
+        found_scored_key = next((item for item in lookup_keys if item in scored_keys), "")
+        samples.append(
+            {
+                "code": trade.get("code"),
+                "signal_date": trade.get("signal_date"),
+                "trade_date": trade.get("trade_date") or trade.get("entry_date") or trade.get("date"),
+                "entry_date": trade.get("entry_date"),
+                "selected_lookup_keys_checked": lookup_keys,
+                "found_in_scored_candidates": bool(found_scored_key),
+                "found_in_selected_candidates": bool(found_selected_key),
+                "matched_scored_key": found_scored_key,
+                "matched_selected_key": found_selected_key,
+                "source_log_file": str((backtest_dir / "backtest_summary.json").relative_to(ROOT)) if (backtest_dir / "backtest_summary.json").exists() else "",
+                "scored_candidate_file_checked": _debug_scored_candidate_files(config, lookup_keys),
+            }
+        )
+    return samples[:20]
+
+
+def _trade_selected_lookup_keys(trade: dict[str, Any], run_dates: list[str]) -> list[str]:
+    code = str(trade.get("code") or "")
+    if not code:
+        return []
+    days = [
+        str(trade.get("signal_date") or ""),
+        str(trade.get("date") or ""),
+        str(trade.get("trade_date") or ""),
+        str(trade.get("entry_date") or ""),
+    ]
+    entry_date = str(trade.get("entry_date") or trade.get("trade_date") or "")
+    previous_day = _previous_run_date(entry_date, run_dates)
+    if previous_day:
+        days.append(previous_day)
+    keys = []
+    seen = set()
+    for day in days:
+        if not day:
+            continue
+        key = f"{day}|{code}"
+        if key not in seen:
+            keys.append(key)
+            seen.add(key)
+    return keys
+
+
+def _previous_run_date(day: str, run_dates: list[str]) -> str:
+    if not day:
+        return ""
+    previous = [item for item in run_dates if item and item < day]
+    return previous[-1] if previous else ""
+
+
+def _debug_scored_candidate_files(config: dict[str, Any], lookup_keys: list[str]) -> list[str]:
+    files = []
+    seen = set()
+    for key in lookup_keys:
+        day = key.split("|", 1)[0]
+        if not day:
+            continue
+        path = processed_profile_path(config, f"scored_candidates_{day}.json")
+        try:
+            text = str(path.relative_to(ROOT))
+        except ValueError:
+            text = str(path)
+        if text not in seen:
+            files.append(text)
+            seen.add(text)
+    return files
 
 
 def _selection_trade_key(row: dict[str, Any]) -> str:

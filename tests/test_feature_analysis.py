@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 
 from db import initialize_database, save_market_context, save_scoring_results, save_trades
-from feature_analysis import _capital_utilization_audit, render_feature_analysis_markdown, build_feature_analysis
+from feature_analysis import _backtest_integrity_audits, _capital_utilization_audit, render_feature_analysis_markdown, build_feature_analysis
 from paper_trade import execute_real_data_paper_trade, initial_live_paper_state
 from profile_loader import load_profile
 
@@ -54,6 +55,59 @@ def test_capital_utilization_audit_reports_target_exposure_blockers(config_copy:
     assert audit["min_cash_buffer_hit_count"] == 1
     assert audit["no_candidate_days"] == 1
     assert audit["no_affordable_candidate_days"] == 1
+
+
+def test_feature_analysis_repairs_stale_trade_without_selected_audit(config_copy: dict, tmp_path) -> None:
+    profile_id = config_copy["profile_id"]
+    log_dir = tmp_path / "logs" / "backtests" / profile_id / "2026-01-01_to_2026-03-06"
+    log_dir.mkdir(parents=True)
+    processed_dir = tmp_path / "data" / "processed" / profile_id
+    processed_dir.mkdir(parents=True)
+    (log_dir / "backtest_summary.json").write_text(
+        json.dumps(
+            {
+                "all_trades": [
+                    {
+                        "action": "BUY",
+                        "order_status": "FILLED",
+                        "signal_date": "2026-01-05",
+                        "entry_date": "2026-01-06",
+                        "code": "67230",
+                    }
+                ],
+                "backtest_result_integrity_audit": {
+                    "result_integrity_status": "WARNING",
+                    "trade_without_selected_count": 1,
+                    "trade_without_selected_sample": ["2026-01-05|67230"],
+                    "warnings": ["buy trade exists without selected candidate in the run period"],
+                    "errors": [],
+                    "integrity_warning_count": 1,
+                    "integrity_error_count": 0,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (processed_dir / "scored_candidates_2026-01-05.json").write_text(
+        json.dumps(
+            {
+                "scores": [{"date": "2026-01-05", "code": "67230", "selected": True}],
+                "selected": [{"date": "2026-01-05", "code": "67230", "selected": True}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    audits = _backtest_integrity_audits(tmp_path, profile_id, "2026-01-01", "2026-03-06")
+    result = audits["backtest_result_integrity_audit"]
+
+    assert result["trade_without_selected_count"] == 0
+    assert result["trade_without_selected_sample"] == []
+    assert result["trade_without_selected_debug_sample"] == []
+    assert result["result_integrity_status"] == "OK"
+    assert result["warnings"] == []
 
 
 def test_feature_analysis_groups_closed_trade_results(config_copy: dict, tmp_path) -> None:

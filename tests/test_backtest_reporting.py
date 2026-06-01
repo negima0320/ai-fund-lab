@@ -701,6 +701,12 @@ def test_backtest_result_integrity_audit_detects_trade_without_selected(config_c
     assert audit["selected_count"] == 1
     assert audit["buy_trade_count"] == 1
     assert audit["trade_without_selected_count"] == 1
+    assert audit["trade_without_selected_debug_sample"][0]["code"] == "9999"
+    assert audit["trade_without_selected_debug_sample"][0]["signal_date"] == "2026-01-05"
+    assert audit["trade_without_selected_debug_sample"][0]["trade_date"] == "2026-01-06"
+    assert "2026-01-05|9999" in audit["trade_without_selected_debug_sample"][0]["selected_lookup_keys_checked"]
+    assert audit["trade_without_selected_debug_sample"][0]["found_in_scored_candidates"] is False
+    assert audit["trade_without_selected_debug_sample"][0]["found_in_selected_candidates"] is False
     assert audit["selected_without_trade_count"] == 1
     assert audit["profile_cache_used_count"] == 1
     assert audit["common_cache_used_count"] == 0
