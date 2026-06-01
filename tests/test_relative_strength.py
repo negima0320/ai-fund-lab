@@ -648,16 +648,17 @@ def test_total_score_stays_within_expected_range_for_v2_6() -> None:
 
 def test_backtest_does_not_run_analyze_only_processing(monkeypatch, config_copy, tmp_path) -> None:
     config_copy["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
-    portfolio = {"total_assets": 1_000_000, "safety_events": [], "date": "2026-01-02"}
+    portfolio = {"total_assets": 1_000_000, "safety_events": [], "date": "2026-01-05"}
     state = main_module.initial_live_paper_state(config_copy)
 
     monkeypatch.setattr(main_module, "ROOT", tmp_path)
     monkeypatch.setattr(main_module, "load_config", lambda _path: config_copy)
     monkeypatch.setattr(main_module, "ensure_price_history_for_backtest", lambda *_args: None)
-    monkeypatch.setattr(main_module, "available_cached_price_dates", lambda *_args: [date(2026, 1, 2)])
+    monkeypatch.setattr(main_module, "available_cached_price_dates", lambda *_args: [date(2026, 1, 2), date(2026, 1, 5)])
     monkeypatch.setattr(main_module, "ensure_indicators", lambda *_args: None)
     monkeypatch.setattr(main_module, "ensure_market_context", lambda *_args: None)
     monkeypatch.setattr(main_module, "run_screen", lambda *_args: None)
+    monkeypatch.setattr(main_module, "load_cached_prime_prices", lambda *_args: [])
     monkeypatch.setattr(
         main_module,
         "score_for_date",
@@ -693,22 +694,23 @@ def test_backtest_does_not_run_analyze_only_processing(monkeypatch, config_copy,
 
     monkeypatch.setattr(main_module, "analyze_operation_data", fail_analyze)
 
-    main_module.run_backtest("jquants", "2026-01-02", "2026-01-02")
+    main_module.run_backtest("jquants", "2026-01-02", "2026-01-05")
 
 
 def test_fast_analysis_skips_heavy_daily_report_generation(monkeypatch, config_copy, tmp_path) -> None:
     config_copy["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
     config_copy.setdefault("analysis", {})["save_backtest_daily_reports"] = False
-    portfolio = {"total_assets": 1_000_000, "safety_events": [], "date": "2026-01-02"}
+    portfolio = {"total_assets": 1_000_000, "safety_events": [], "date": "2026-01-05"}
     state = main_module.initial_live_paper_state(config_copy)
 
     monkeypatch.setattr(main_module, "ROOT", tmp_path)
     monkeypatch.setattr(main_module, "load_config", lambda _path: config_copy)
     monkeypatch.setattr(main_module, "ensure_price_history_for_backtest", lambda *_args: None)
-    monkeypatch.setattr(main_module, "available_cached_price_dates", lambda *_args: [date(2026, 1, 2)])
+    monkeypatch.setattr(main_module, "available_cached_price_dates", lambda *_args: [date(2026, 1, 2), date(2026, 1, 5)])
     monkeypatch.setattr(main_module, "ensure_indicators", lambda *_args: None)
     monkeypatch.setattr(main_module, "ensure_market_context", lambda *_args: None)
     monkeypatch.setattr(main_module, "run_screen", lambda *_args: None)
+    monkeypatch.setattr(main_module, "load_cached_prime_prices", lambda *_args: [])
     monkeypatch.setattr(
         main_module,
         "score_for_date",
@@ -738,7 +740,86 @@ def test_fast_analysis_skips_heavy_daily_report_generation(monkeypatch, config_c
 
     monkeypatch.setattr(main_module, "write_backtest_daily_markdown", fail_daily_report)
 
-    main_module.run_backtest("jquants", "2026-01-02", "2026-01-02")
+    main_module.run_backtest("jquants", "2026-01-02", "2026-01-05")
+
+
+def test_summary_only_skips_backtest_daily_reports_articles_and_reflections(monkeypatch, config_copy, tmp_path, capsys) -> None:
+    config_copy["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    config_copy.setdefault("reporting", {})["generate_daily_markdown_in_backtest"] = True
+    config_copy.setdefault("reporting", {})["generate_articles_in_backtest"] = True
+    config_copy.setdefault("backtest", {})["indicator_min_history_days"] = 1
+    portfolio = {"total_assets": 1_000_000, "safety_events": [], "date": "2026-01-05"}
+    state = main_module.initial_live_paper_state(config_copy)
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "SUMMARY_ONLY_ACTIVE", True)
+    monkeypatch.setattr(main_module, "load_config", lambda _path: config_copy)
+    monkeypatch.setattr(main_module, "ensure_price_history_for_backtest", lambda *_args: None)
+    monkeypatch.setattr(main_module, "available_cached_price_dates", lambda *_args: [date(2026, 1, 2), date(2026, 1, 5)])
+    monkeypatch.setattr(main_module, "ensure_indicators", lambda *_args: None)
+    monkeypatch.setattr(main_module, "ensure_market_context", lambda *_args: None)
+    monkeypatch.setattr(main_module, "run_screen", lambda *_args: None)
+    monkeypatch.setattr(main_module, "load_cached_prime_prices", lambda *_args: [])
+    monkeypatch.setattr(
+        main_module,
+        "score_for_date",
+        lambda *_args: {"scores": [], "selected": [], "candidate_count": 0, "selected_count": 0},
+    )
+    monkeypatch.setattr(main_module, "execute_real_data_paper_trade", lambda *_args: (state, portfolio, []))
+    monkeypatch.setattr(main_module, "attach_commentary", lambda *_args: None)
+    monkeypatch.setattr(main_module, "write_json", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main_module, "save_portfolio_snapshot", lambda *_args: None)
+    monkeypatch.setattr(main_module, "save_trades", lambda *_args: None)
+    monkeypatch.setattr(main_module, "save_pending_orders", lambda *_args: None)
+    monkeypatch.setattr(main_module, "save_safety_events", lambda *_args: None)
+    monkeypatch.setattr(
+        main_module,
+        "write_backtest_summary",
+        lambda *_args: {
+            "final_assets": 1_000_000,
+            "cumulative_profit": 0,
+            "report_markdown_path": str(tmp_path / "summary.md"),
+            "report_json_path": str(tmp_path / "summary.json"),
+            "rule_based_90d_report_path": str(tmp_path / "rule.md"),
+        },
+    )
+
+    def fail_generation(*_args, **_kwargs):
+        raise AssertionError("summary-only should skip daily report/article/reflection generation")
+
+    monkeypatch.setattr(main_module, "write_backtest_reflections", fail_generation)
+    monkeypatch.setattr(main_module, "write_backtest_daily_markdown", fail_generation)
+    monkeypatch.setattr(main_module, "write_backtest_report_markdown", fail_generation)
+    monkeypatch.setattr(main_module, "write_backtest_article_markdown", fail_generation)
+
+    main_module.run_backtest("jquants", "2026-01-02", "2026-01-05")
+
+    output = capsys.readouterr().out
+    assert "reports/articles skipped: summary_only=true" in output
+    assert "daily_reports_skipped_count: 1" in output
+    assert "articles_skipped_count: 1" in output
+    assert "reflections_skipped_count: 1" in output
+
+
+def test_quiet_backtest_suppresses_day_step_detail(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(main_module, "QUIET_ACTIVE", True)
+    monkeypatch.setattr(main_module, "PROGRESS_INTERVAL", 50)
+    monkeypatch.setattr(main_module, "BACKTEST_MODE_ACTIVE", True)
+
+    result = main_module._run_backtest_day_step(
+        2,
+        100,
+        "2026-01-06",
+        "score",
+        lambda: print("noisy scoring internals") or {"ok": True},
+        lambda: ["scoring candidates: 10"],
+    )
+
+    output = capsys.readouterr().out
+    assert result == {"ok": True}
+    assert "noisy scoring internals" not in output
+    assert "scoring candidates" not in output
+    assert "2026-01-06 score start" not in output
 
 
 def _relative_strength_price_rows() -> list[dict]:

@@ -369,6 +369,23 @@ def test_processed_data_audit_reports_stage_gaps(monkeypatch, config_copy, tmp_p
     assert audit["dates_with_indicators_but_no_candidates"] == ["2026-05-29"]
 
 
+def test_processed_data_audit_keeps_period_specific_last_dates(monkeypatch, config_copy, tmp_path) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    profile_dir = tmp_path / "data" / "processed" / main_module.profile_id_from(config_copy)
+    profile_dir.mkdir(parents=True)
+    for day in ["2026-03-06", "2026-05-29"]:
+        main_module.write_json(profile_dir / f"indicators_{day}.json", {"indicators": []})
+        main_module.write_json(profile_dir / f"candidates_{day}.json", {"candidates": []})
+        main_module.write_json(profile_dir / f"scored_candidates_{day}.json", {"scores": []})
+
+    audit = main_module.build_processed_data_audit(config_copy, [date(2026, 3, 6)])
+
+    assert audit["candidates_last_date"] == "2026-05-29"
+    assert audit["scored_candidates_last_date"] == "2026-05-29"
+    assert audit["candidates_last_date_in_range"] == "2026-03-06"
+    assert audit["scored_candidates_last_date_in_range"] == "2026-03-06"
+
+
 def test_backtest_execution_audit_is_ok_when_last_business_day_is_processed() -> None:
     audit = main_module.build_backtest_execution_audit(
         processed_dates=["2026-05-29"],
@@ -609,6 +626,547 @@ def test_backtest_integrity_audit_lines_include_required_items(config_copy: dict
     assert any(line.startswith("- investor_context_pubdate_safe:") for line in lines)
     assert any(line.startswith("- survivorship_bias_risk:") for line in lines)
     assert any("experimental" in line for line in lines)
+
+
+def test_backtest_result_integrity_audit_detects_trade_without_selected(config_copy: dict, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        main_module,
+        "BACKTEST_JSON_READ_AUDIT",
+        {"file_count": 0, "out_of_range_count": 0, "out_of_range_sample": []},
+    )
+    monkeypatch.setattr(
+        main_module,
+        "COMMON_CACHE_METRICS",
+        {
+            "cache_reused_from_common_count": 0,
+            "profile_specific_cache_count": 1,
+            "generated_cache_size": 0,
+            "indicator_cache_source": {"profile": 1},
+            "candidate_cache_source": {},
+        },
+    )
+    backtest_dir = tmp_path / "logs" / "backtests" / main_module.profile_id_from(config_copy) / "2026-01-01_to_2026-03-06"
+    backtest_dir.mkdir(parents=True)
+    main_module.write_json(
+        main_module.processed_profile_path(config_copy, "scored_candidates_2026-01-05.json"),
+        {
+            "selected": [
+                {
+                    "date": "2026-01-05",
+                    "code": "1001",
+                    "selected": True,
+                    "market_section": "Prime",
+                }
+            ]
+        },
+    )
+
+    audit = main_module.build_backtest_result_integrity_audit(
+        config_copy,
+        [
+            {
+                "action": "BUY",
+                "order_status": "FILLED",
+                "signal_date": "2026-01-05",
+                "entry_date": "2026-01-06",
+                "code": "9999",
+                "market_section": "Prime",
+            }
+        ],
+        backtest_dir,
+        "2026-01-01",
+        "2026-03-06",
+        [{"date": "2026-01-05"}],
+    )
+
+    assert audit["selected_count"] == 1
+    assert audit["buy_trade_count"] == 1
+    assert audit["trade_without_selected_count"] == 1
+    assert audit["selected_without_trade_count"] == 1
+    assert audit["profile_cache_used_count"] == 1
+    assert audit["common_cache_used_count"] == 0
+    assert audit["result_integrity_status"] == "ERROR"
+
+
+def test_backtest_result_integrity_audit_ok_for_selected_buy_match(config_copy: dict, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "BACKTEST_JSON_READ_AUDIT", {"out_of_range_count": 0})
+    monkeypatch.setattr(
+        main_module,
+        "COMMON_CACHE_METRICS",
+        {
+            "cache_reused_from_common_count": 2,
+            "profile_specific_cache_count": 0,
+            "generated_cache_size": 0,
+            "indicator_cache_source": {"common": 1},
+            "candidate_cache_source": {"common": 1},
+        },
+    )
+    backtest_dir = tmp_path / "logs" / "backtests" / main_module.profile_id_from(config_copy) / "2026-01-01_to_2026-03-06"
+    backtest_dir.mkdir(parents=True)
+    main_module.write_json(
+        main_module.processed_profile_path(config_copy, "scored_candidates_2026-01-05.json"),
+        {"selected": [{"date": "2026-01-05", "code": "1001", "selected": True, "market_section": "Prime"}]},
+    )
+
+    audit = main_module.build_backtest_result_integrity_audit(
+        config_copy,
+        [{"action": "BUY", "order_status": "FILLED", "signal_date": "2026-01-05", "entry_date": "2026-01-06", "code": "1001"}],
+        backtest_dir,
+        "2026-01-01",
+        "2026-03-06",
+        [{"date": "2026-01-05"}],
+    )
+
+    assert audit["trade_without_selected_count"] == 0
+    assert audit["market_filter_violation_count"] == 0
+    assert audit["market_candidate_count"]["Prime"] == 1
+    assert audit["market_trade_count"]["Prime"] == 1
+    assert audit["result_integrity_status"] == "OK"
+
+
+def test_backtest_result_integrity_audit_errors_when_market_count_zero_but_trade_exists(config_copy: dict, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "BACKTEST_JSON_READ_AUDIT", {"out_of_range_count": 0})
+    monkeypatch.setattr(main_module, "COMMON_CACHE_METRICS", {"indicator_cache_source": {}, "candidate_cache_source": {}})
+    backtest_dir = tmp_path / "logs" / "backtests" / main_module.profile_id_from(config_copy) / "2026-01-01_to_2026-03-06"
+    backtest_dir.mkdir(parents=True)
+    main_module.write_json(backtest_dir / "scoring_2026-01-05.json", {"scores": [], "selected": []})
+
+    audit = main_module.build_backtest_result_integrity_audit(
+        config_copy,
+        [{"action": "BUY", "order_status": "FILLED", "signal_date": "2026-01-05", "entry_date": "2026-01-06", "code": "1001"}],
+        backtest_dir,
+        "2026-01-01",
+        "2026-03-06",
+        [{"date": "2026-01-05"}],
+    )
+
+    assert audit["market_candidate_count"] == {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0}
+    assert "market_candidate_count is zero but trades exist" in audit["errors"]
+    assert audit["result_integrity_status"] == "ERROR"
+
+
+def test_backtest_result_integrity_audit_reports_unknown_market_trade(config_copy: dict, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "BACKTEST_JSON_READ_AUDIT", {"out_of_range_count": 0})
+    monkeypatch.setattr(main_module, "COMMON_CACHE_METRICS", {"indicator_cache_source": {}, "candidate_cache_source": {}})
+    config_copy["market_filter"] = {"allowed_sections": ["TSEPrime"], "allow_unknown_market": False}
+    backtest_dir = tmp_path / "logs" / "backtests" / main_module.profile_id_from(config_copy) / "2026-01-01_to_2026-03-06"
+    backtest_dir.mkdir(parents=True)
+
+    audit = main_module.build_backtest_result_integrity_audit(
+        config_copy,
+        [{"action": "SELL", "order_status": "FILLED", "entry_date": "2026-01-06", "exit_date": "2026-01-08", "code": "9999"}],
+        backtest_dir,
+        "2026-01-01",
+        "2026-03-06",
+        [{"date": "2026-01-05"}],
+    )
+
+    assert audit["unknown_market_trade_count"] == 1
+    assert audit["market_trade_count"]["Unknown"] == 1
+    assert "trade has unknown market_section while allow_unknown_market=false" in audit["errors"]
+    assert audit["market_trade_samples"][0]["reason"] == "unknown_market_section,market_filter_violation"
+
+
+def test_market_coverage_ignores_excluded_only_and_falls_back_to_scoring_rows() -> None:
+    coverage = {
+        "candidate_count": {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0},
+        "selected_count": {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0},
+        "market_filter_excluded_count": 1848,
+    }
+
+    assert not main_module._market_coverage_has_counts(coverage)
+
+
+def test_market_filter_audit_reads_candidate_breakdowns(config_copy: dict, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    path = main_module.processed_profile_path(config_copy, "candidates_2026-01-05.json")
+    main_module.write_json(
+        path,
+        {
+            "date": "2026-01-05",
+            "candidates": [{"date": "2026-01-05", "code": "1001", "market_section": "TSEPrime"}],
+            "market_coverage": {
+                "input_counts": {"Prime": 2, "Standard": 1, "Growth": 0, "Unknown": 1},
+                "allowed_counts": {"Prime": 2, "Standard": 0, "Growth": 0, "Unknown": 0},
+                "excluded_counts": {"Prime": 0, "Standard": 1, "Growth": 0, "Unknown": 1},
+                "market_section_lookup_source": {"row": 3, "unknown": 1},
+                "sample": [
+                    {
+                        "date": "2026-01-05",
+                        "code": "1001",
+                        "market_section": "TSEPrime",
+                        "allowed": True,
+                        "excluded_reason": "",
+                    }
+                ],
+            },
+        },
+    )
+
+    audit = main_module.build_market_filter_audit(config_copy, ["2026-01-05"])
+
+    assert audit["raw_candidate_count"] == 4
+    assert audit["candidate_market_breakdown_before_filter"]["Prime"] == 2
+    assert audit["candidate_market_breakdown_after_filter"]["Prime"] == 1
+    assert audit["excluded_market_breakdown"]["Standard"] == 1
+    assert audit["unknown_market_count"] == 1
+    assert audit["post_filter_validation"]["status"] == "OK"
+
+
+def test_market_filter_audit_restores_missing_market_sections_from_master(config_copy: dict, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    raw_dir = tmp_path / "data" / "raw"
+    raw_dir.mkdir(parents=True)
+    main_module.write_json(
+        raw_dir / "listed_stocks_jquants.json",
+        {
+            "stocks": [
+                {"code": "1001", "name": "A", "section": "TSEPrime"},
+                {"code": "1002", "name": "B", "section": "TSEStandard"},
+            ]
+        },
+    )
+    path = main_module.processed_profile_path(config_copy, "candidates_2026-01-05.json")
+    main_module.write_json(
+        path,
+        {
+            "date": "2026-01-05",
+            "candidates": [
+                {"date": "2026-01-05", "code": "1001"},
+                {"date": "2026-01-05", "code": "9999"},
+            ],
+            "market_coverage": {
+                "allowed_counts": {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0},
+                "sample": [{"date": "2026-01-05", "code": "1001", "market_section": "Unknown", "allowed": True}],
+            },
+        },
+    )
+
+    audit = main_module.build_market_filter_audit(config_copy, ["2026-01-05"])
+
+    assert audit["raw_candidate_count"] == 2
+    assert audit["candidate_market_breakdown_before_filter"]["Prime"] == 1
+    assert audit["candidate_market_breakdown_after_filter"]["Prime"] == 1
+    assert audit["candidate_market_breakdown_after_filter"]["Unknown"] == 0
+    assert audit["excluded_market_breakdown"]["Unknown"] == 1
+    assert audit["listed_info_total_count"] == 2
+    assert audit["listed_info_loaded_count"] == 2
+    assert audit["listed_info_match_count"] == 1
+    assert audit["listed_info_missing_count"] == 1
+    assert audit["market_section_filled_from_master_count"] == 1
+    assert audit["samples"][0]["market_section"] == "TSEPrime"
+    assert audit["post_filter_validation"]["status"] == "OK"
+
+
+def test_candidate_payload_with_market_sections_updates_candidates_and_coverage(config_copy: dict, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    raw_dir = tmp_path / "data" / "raw"
+    raw_dir.mkdir(parents=True)
+    main_module.write_json(
+        raw_dir / "listed_stocks_jquants.json",
+        {
+            "stocks": [
+                {"code": "10010", "name": "A", "section": "TSEPrime"},
+                {"code": "10020", "name": "B", "section": "TSEGrowth"},
+            ]
+        },
+    )
+    payload = {
+        "date": "2026-01-05",
+        "candidates": [
+            {"date": "2026-01-05", "code": "10010", "section": None, "market_section": None},
+            {"date": "2026-01-05", "code": "99990", "section": None, "market_section": None},
+        ],
+        "market_coverage": {
+            "allowed_counts": {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 2},
+        },
+    }
+
+    repaired = main_module._candidate_payload_with_market_sections(payload, config_copy)
+
+    assert repaired["candidate_count"] == 1
+    assert repaired["candidates"][0]["section"] == "TSEPrime"
+    assert repaired["candidates"][0]["market_section"] == "TSEPrime"
+    assert repaired["market_coverage"]["candidate_counts"]["Prime"] == 1
+    assert repaired["market_coverage"]["candidate_counts"]["Unknown"] == 0
+    assert repaired["market_coverage"]["allowed_counts"]["Prime"] == 1
+    assert repaired["market_coverage"]["excluded_counts"]["Unknown"] == 1
+    assert repaired["market_coverage"]["market_filter_excluded_count"] == 1
+    assert repaired["market_coverage"]["listed_info_match_count"] == 1
+    assert repaired["market_coverage"]["listed_info_missing_count"] == 1
+    assert repaired["market_coverage"]["market_section_filled_from_master_count"] == 1
+    assert repaired["market_coverage"]["post_filter_validation"]["status"] == "OK"
+
+
+def test_listed_stock_master_supports_list_and_dict_payloads(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    raw_dir = tmp_path / "data" / "raw"
+    raw_dir.mkdir(parents=True)
+    path = raw_dir / "listed_stocks_jquants.json"
+    main_module.write_json(
+        path,
+        {
+            "provider": "jquants",
+            "total_count": 2,
+            "stocks": [
+                {"code": "10010", "name": "A", "market": "プライム"},
+                {"code": "10020", "name": "B", "MarketCodeName": "グロース"},
+            ],
+        },
+    )
+
+    dict_stocks = main_module._listed_stock_master()
+    dict_stats = main_module._listed_stock_master_stats()
+
+    assert dict_stats == {"total_count": 2, "loaded_count": 2}
+    assert dict_stocks[0]["section"] == "TSEPrime"
+    assert dict_stocks[1]["section"] == "TSEGrowth"
+
+    main_module.write_json(
+        path,
+        [
+            {"code": "10030", "name": "C", "market": "スタンダード"},
+        ],
+    )
+
+    list_stocks = main_module._listed_stock_master()
+    list_stats = main_module._listed_stock_master_stats()
+
+    assert list_stats == {"total_count": 1, "loaded_count": 1}
+    assert list_stocks[0]["section"] == "TSEStandard"
+
+
+def test_backtest_result_integrity_audit_detects_out_of_period_trade(config_copy: dict, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "BACKTEST_JSON_READ_AUDIT", {"out_of_range_count": 0})
+    monkeypatch.setattr(main_module, "COMMON_CACHE_METRICS", {"indicator_cache_source": {}, "candidate_cache_source": {}})
+    backtest_dir = tmp_path / "logs" / "backtests" / main_module.profile_id_from(config_copy) / "2026-01-01_to_2026-03-06"
+    backtest_dir.mkdir(parents=True)
+
+    audit = main_module.build_backtest_result_integrity_audit(
+        config_copy,
+        [{"action": "BUY", "order_status": "FILLED", "signal_date": "2026-05-22", "entry_date": "2026-05-25", "code": "1001"}],
+        backtest_dir,
+        "2026-01-01",
+        "2026-03-06",
+        [{"date": "2026-01-05"}],
+    )
+
+    assert audit["out_of_period_trade_count"] == 1
+    assert audit["result_integrity_status"] == "ERROR"
+
+
+def test_backtest_result_integrity_audit_detects_market_filter_violation(config_copy: dict, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "BACKTEST_JSON_READ_AUDIT", {"out_of_range_count": 0})
+    monkeypatch.setattr(main_module, "COMMON_CACHE_METRICS", {"indicator_cache_source": {"common": 1}, "candidate_cache_source": {"common": 1}})
+    config_copy["market_filter"] = {"allowed_sections": ["TSEPrime"], "allow_unknown_market": False}
+    backtest_dir = tmp_path / "logs" / "backtests" / main_module.profile_id_from(config_copy) / "2026-01-01_to_2026-03-06"
+    backtest_dir.mkdir(parents=True)
+    main_module.write_json(
+        main_module.processed_profile_path(config_copy, "scored_candidates_2026-01-05.json"),
+        {"selected": [{"date": "2026-01-05", "code": "1001", "selected": True, "market_section": "Growth"}]},
+    )
+
+    audit = main_module.build_backtest_result_integrity_audit(
+        config_copy,
+        [{"action": "BUY", "order_status": "FILLED", "signal_date": "2026-01-05", "entry_date": "2026-01-06", "code": "1001"}],
+        backtest_dir,
+        "2026-01-01",
+        "2026-03-06",
+        [{"date": "2026-01-05"}],
+    )
+
+    assert audit["market_filter_violation_count"] >= 1
+    assert audit["result_integrity_status"] == "ERROR"
+
+
+def test_experiment_integrity_failures_reports_non_ok_profiles() -> None:
+    failures = main_module._experiment_integrity_failures(
+        {
+            "base": {"profile_id": "base", "result_integrity_status": "OK", "score_integrity_status": "OK"},
+            "experiments": [
+                {"profile_id": "p1", "result_integrity_status": "WARNING", "score_integrity_status": "OK"},
+                {"profile_id": "p2", "result_integrity_status": "ERROR", "score_integrity_status": "WARNING"},
+            ],
+        }
+    )
+
+    assert failures == ["p1=WARNING", "p2=ERROR", "p2.score=WARNING"]
+
+
+def test_score_integrity_audit_detects_score_mismatch(config_copy: dict, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    config_version = main_module.config_version_from(config_copy)
+    backtest_dir = tmp_path / "logs" / "backtests" / main_module.profile_id_from(config_copy) / "2026-01-01_to_2026-03-06"
+    backtest_dir.mkdir(parents=True)
+    cache = main_module._score_cache_payload(config_copy, "2026-01-05")
+    main_module.write_json(
+        main_module.processed_profile_path(config_copy, "scored_candidates_2026-01-05.json"),
+            {
+                "date": "2026-01-05",
+                "profile_id": main_module.profile_id_from(config_copy),
+                "config_version": config_version,
+            **cache,
+            "scores": [
+                {
+                    "date": "2026-01-05",
+                    "code": "1001",
+                    "selected": True,
+                    "total_score": 99,
+                    "technical_score": 40,
+                    "relative_strength_score": 0,
+                    "investor_context_score": 0,
+                    "market_context_score": 0,
+                    "penalty_score": 0,
+                    "score_components_total": 40,
+                    "market_section": "Prime",
+                }
+            ],
+        },
+    )
+
+    audit = main_module.build_score_integrity_audit(
+        config_copy,
+        [{"action": "BUY", "order_status": "FILLED", "signal_date": "2026-01-05", "entry_date": "2026-01-06", "code": "1001"}],
+        backtest_dir,
+        "2026-01-01",
+        "2026-03-06",
+        [{"date": "2026-01-05"}],
+    )
+
+    assert audit["total_score_mismatch_count"] == 1
+    assert audit["component_total_mismatch_count"] == 1
+    assert audit["score_integrity_status"] == "ERROR"
+
+
+def test_score_integrity_audit_reports_stale_score_cache_files(config_copy: dict, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    backtest_dir = tmp_path / "logs" / "backtests" / main_module.profile_id_from(config_copy) / "2026-01-01_to_2026-03-06"
+    backtest_dir.mkdir(parents=True)
+    stale_path = main_module.processed_profile_path(config_copy, "scored_candidates_2026-01-05.json")
+    main_module.write_json(
+        stale_path,
+        {
+            "date": "2026-01-05",
+            "profile_id": main_module.profile_id_from(config_copy),
+            "config_version": main_module.config_version_from(config_copy),
+            "scores": [],
+            "selected": [],
+        },
+    )
+
+    audit = main_module.build_score_integrity_audit(
+        config_copy,
+        [],
+        backtest_dir,
+        "2026-01-01",
+        "2026-03-06",
+        [{"date": "2026-01-05"}],
+    )
+
+    assert audit["score_integrity_status"] == "ERROR"
+    assert audit["stale_score_cache_count"] == 1
+    assert audit["score_integrity_errors"] == ["stale_score_cache_count=1"]
+    assert audit["stale_score_cache_files"][0]["path"] == str(stale_path.relative_to(tmp_path))
+    assert audit["stale_score_cache_files"][0]["reason"] == "scoring_settings_hash_mismatch"
+
+
+def test_score_integrity_prefers_current_processed_cache_over_stale_scoring_log(config_copy: dict, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    backtest_dir = tmp_path / "logs" / "backtests" / main_module.profile_id_from(config_copy) / "2026-01-01_to_2026-03-06"
+    backtest_dir.mkdir(parents=True)
+    cache = main_module._score_cache_payload(config_copy, "2026-01-05")
+    main_module.write_json(
+        backtest_dir / "scoring_2026-01-05.json",
+        {
+            "date": "2026-01-05",
+            "profile_id": main_module.profile_id_from(config_copy),
+            "config_version": "old",
+            "scores": [],
+            "selected": [],
+        },
+    )
+    main_module.write_json(
+        main_module.processed_profile_path(config_copy, "scored_candidates_2026-01-05.json"),
+        {
+            "date": "2026-01-05",
+            "profile_id": main_module.profile_id_from(config_copy),
+            "config_version": main_module.config_version_from(config_copy),
+            **cache,
+            "scores": [],
+            "selected": [],
+        },
+    )
+
+    audit = main_module.build_score_integrity_audit(
+        config_copy,
+        [],
+        backtest_dir,
+        "2026-01-01",
+        "2026-03-06",
+        [{"date": "2026-01-05"}],
+    )
+
+    assert audit["stale_score_cache_count"] == 0
+    assert audit["score_integrity_status"] == "OK"
+
+
+def test_scored_candidates_cache_missing_hash_is_stale(config_copy: dict) -> None:
+    payload = {
+        "date": "2026-01-05",
+        "profile_id": main_module.profile_id_from(config_copy),
+        "config_version": main_module.config_version_from(config_copy),
+    }
+
+    assert not main_module._scored_candidates_cache_valid(payload, config_copy, "2026-01-05")
+
+
+def test_score_integrity_audit_ok_for_valid_score(config_copy: dict, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    config_version = main_module.config_version_from(config_copy)
+    backtest_dir = tmp_path / "logs" / "backtests" / main_module.profile_id_from(config_copy) / "2026-01-01_to_2026-03-06"
+    backtest_dir.mkdir(parents=True)
+    cache = main_module._score_cache_payload(config_copy, "2026-01-05")
+    main_module.write_json(
+        main_module.processed_profile_path(config_copy, "scored_candidates_2026-01-05.json"),
+            {
+                "date": "2026-01-05",
+                "profile_id": main_module.profile_id_from(config_copy),
+                "config_version": config_version,
+            **cache,
+            "scores": [
+                {
+                    "date": "2026-01-05",
+                    "code": "1001",
+                    "selected": True,
+                    "total_score": 45,
+                    "technical_score": 45,
+                    "relative_strength_score": 0,
+                    "investor_context_score": 0,
+                    "market_context_score": 0,
+                    "penalty_score": 0,
+                    "score_components_total": 45,
+                    "market_section": "Prime",
+                }
+            ],
+        },
+    )
+
+    audit = main_module.build_score_integrity_audit(
+        config_copy,
+        [{"action": "BUY", "order_status": "FILLED", "signal_date": "2026-01-05", "entry_date": "2026-01-06", "code": "1001"}],
+        backtest_dir,
+        "2026-01-01",
+        "2026-03-06",
+        [{"date": "2026-01-05"}],
+    )
+
+    assert audit["score_integrity_status"] == "OK"
 
 
 def test_execution_model_stats_are_rendered() -> None:

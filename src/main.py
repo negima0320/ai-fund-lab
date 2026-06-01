@@ -14,6 +14,7 @@ import sqlite3
 import sys
 import time
 from argparse import ArgumentParser
+from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -110,18 +111,25 @@ FAST_ANALYSIS_ACTIVE = False
 SUMMARY_ONLY_ACTIVE = False
 NO_DAILY_LOGS_ACTIVE = False
 SKIP_PRICE_FETCH_ACTIVE = False
+QUIET_ACTIVE = False
+PROGRESS_INTERVAL = 10
 JQUANTS_PLAN_OVERRIDE: str | None = None
 FORCE_REFRESH_ACTIVE = False
 STORAGE_MODE_OVERRIDE: str | None = None
 BACKTEST_PROFILE_TIMINGS: dict[str, float] = {}
+BACKTEST_PROFILE_TOTAL_SECONDS = 0.0
+BACKTEST_JSON_READ_AUDIT: dict[str, Any] = {}
+BACKTEST_JSON_READ_PERIOD: tuple[str, str] | None = None
 RUNTIME_SETTINGS: dict[str, Any] = {}
 RUN_EXPERIMENTS_SHARED_STAGE_ACTIVE = False
 RUN_EXPERIMENTS_SCORING_REUSE_SOURCE_BY_PROFILE: dict[str, str] = {}
 RUN_EXPERIMENTS_PERFORMANCE_REPORT: dict[str, Any] = {}
-COMMON_CACHE_METRICS: dict[str, int] = {
+COMMON_CACHE_METRICS: dict[str, Any] = {
     "cache_reused_from_common_count": 0,
     "profile_specific_cache_count": 0,
     "generated_cache_size": 0,
+    "indicator_cache_source": {},
+    "candidate_cache_source": {},
 }
 LIGHT_API_CALL_LIMITS = {
     "topix_prices": 4,
@@ -134,6 +142,7 @@ JQUANTS_API_SESSION: dict[str, Any] = {}
 
 def main() -> None:
     global ACTIVE_PROFILE_ID, FAST_ANALYSIS_ACTIVE, SUMMARY_ONLY_ACTIVE, NO_DAILY_LOGS_ACTIVE, SKIP_PRICE_FETCH_ACTIVE
+    global QUIET_ACTIVE, PROGRESS_INTERVAL
     global JQUANTS_PLAN_OVERRIDE, FORCE_REFRESH_ACTIVE, STORAGE_MODE_OVERRIDE, RUNTIME_SETTINGS
     _enable_line_buffered_output()
     args = parse_args()
@@ -143,6 +152,8 @@ def main() -> None:
     SUMMARY_ONLY_ACTIVE = bool(args.summary_only)
     NO_DAILY_LOGS_ACTIVE = bool(args.summary_only or args.no_daily_logs)
     SKIP_PRICE_FETCH_ACTIVE = bool(args.skip_price_fetch)
+    QUIET_ACTIVE = bool(args.quiet)
+    PROGRESS_INTERVAL = max(1, int(args.progress_interval or (10 if args.quiet else 1)))
     JQUANTS_PLAN_OVERRIDE = args.jquants_plan
     FORCE_REFRESH_ACTIVE = bool(args.force_refresh)
     STORAGE_MODE_OVERRIDE = args.storage_mode
@@ -169,7 +180,7 @@ def main() -> None:
         run_compare_experiments(args.base_profile, args.start_date, args.end_date)
         return
     if args.mode == "run-experiments":
-        run_experiments(args.base_profile, args.start_date, args.end_date, args.profiles, args.skip_backtest, args.skip_analyze)
+        run_experiments(args.base_profile, args.start_date, args.end_date, args.profiles, args.skip_backtest, args.skip_analyze, args.strict_integrity)
         return
     if args.mode == "jquants-api-summary":
         run_jquants_api_summary()
@@ -546,6 +557,22 @@ def parse_args() -> Any:
         help="Backtest/run-experiments only: use existing cached prices and skip J-Quants price fetching.",
     )
     parser.add_argument(
+        "--strict-integrity",
+        action="store_true",
+        help="Fail run-experiments when Backtest Result Integrity Audit is not OK.",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Reduce terminal output during long backtests/run-experiments. Shows periodic progress only.",
+    )
+    parser.add_argument(
+        "--progress-interval",
+        type=int,
+        default=None,
+        help="Progress print interval in trading days when --quiet is enabled. Example: --progress-interval 50.",
+    )
+    parser.add_argument(
         "--storage-mode",
         choices=["full_debug", "analysis", "compact"],
         default=None,
@@ -680,6 +707,8 @@ def parse_args() -> Any:
     _apply_jquants_supported_date_limits(args)
     if args.days < 1:
         parser.error("--days must be 1 or greater.")
+    if args.progress_interval is not None and args.progress_interval < 1:
+        parser.error("--progress-interval must be 1 or greater.")
     if args.mode in {"fetch-prices", "calculate-indicators", "screen", "score", "trade", "preview-orders", "publish-article", "run-daily", "inspect-cache"} and not args.date:
         parser.error(f"--date YYYY-MM-DD is required for {args.mode} mode.")
     if args.mode == "publish-article" and not args.note_url:
@@ -4085,7 +4114,7 @@ def run_analyze(config: dict[str, Any], start_date: str | None = None, end_date:
 
     portfolio = analysis["portfolio_analysis"]
     trades = analysis["trade_analysis"]
-    trades_csv, db_trade_count, csv_trade_count = write_trades_csv_from_db(config)
+    trades_csv, db_trade_count, csv_trade_count = write_trades_csv_from_db(config, ROOT, start_date, end_date)
     print("analysis completed")
     print(f"profile_id: {analysis.get('current_profile_id')}")
     print(f"profile_name: {analysis.get('current_profile_name')}")
@@ -4292,6 +4321,7 @@ def run_experiments(
     requested_profiles: list[str] | None = None,
     skip_backtest: bool = False,
     skip_analyze: bool = False,
+    strict_integrity: bool = False,
 ) -> None:
     global ACTIVE_PROFILE_ID, RUN_EXPERIMENTS_SHARED_STAGE_ACTIVE, RUN_EXPERIMENTS_SCORING_REUSE_SOURCE_BY_PROFILE, RUN_EXPERIMENTS_PERFORMANCE_REPORT
     registry = load_profile_registry()
@@ -4348,6 +4378,7 @@ def run_experiments(
                 profile_started = time.perf_counter()
                 run_backtest("jquants", start_date_text, end_date_text)
                 profile_total = round(time.perf_counter() - profile_started, 4)
+                phase_snapshot = _profile_phase_time_snapshot(profile_total)
                 scoring_seconds = round(float(BACKTEST_PROFILE_TIMINGS.get("scoring", 0.0)), 4)
                 trade_seconds = round(float(BACKTEST_PROFILE_TIMINGS.get("trading", 0.0)), 4)
                 performance_report["scoring_time"] = round(float(performance_report.get("scoring_time", 0.0)) + scoring_seconds, 4)
@@ -4355,20 +4386,55 @@ def run_experiments(
                 performance_report.setdefault("profile_scoring_time_by_profile", {})[profile_id] = scoring_seconds
                 performance_report.setdefault("profile_trade_time_by_profile", {})[profile_id] = trade_seconds
                 performance_report.setdefault("profile_total_time_by_profile", {})[profile_id] = profile_total
+                performance_report.setdefault("profile_phase_time_by_profile", {})[profile_id] = phase_snapshot["phases"]
+                performance_report.setdefault("profile_phase_accounting_delta_by_profile", {})[profile_id] = phase_snapshot["accounting_delta"]
+                performance_report.setdefault("json_read_file_count_by_profile", {})[profile_id] = int(BACKTEST_JSON_READ_AUDIT.get("file_count", 0) or 0)
+                performance_report.setdefault("json_read_date_range_by_profile", {})[profile_id] = {
+                    "min": BACKTEST_JSON_READ_AUDIT.get("date_min"),
+                    "max": BACKTEST_JSON_READ_AUDIT.get("date_max"),
+                }
+                performance_report.setdefault("json_read_date_min_by_profile", {})[profile_id] = BACKTEST_JSON_READ_AUDIT.get("date_min")
+                performance_report.setdefault("json_read_date_max_by_profile", {})[profile_id] = BACKTEST_JSON_READ_AUDIT.get("date_max")
+                performance_report.setdefault("json_read_bytes_by_profile", {})[profile_id] = int(BACKTEST_JSON_READ_AUDIT.get("bytes", 0) or 0)
+                performance_report.setdefault("json_read_breakdown_by_profile", {})[profile_id] = _json_read_breakdown(BACKTEST_JSON_READ_AUDIT)
+                performance_report.setdefault("top_json_read_files_by_profile", {})[profile_id] = _top_json_read_files(BACKTEST_JSON_READ_AUDIT, limit=50)
+                performance_report.setdefault("json_read_scope_by_profile", {})[profile_id] = _json_read_scope_breakdown(BACKTEST_JSON_READ_AUDIT)
+                performance_report.setdefault("json_read_out_of_range_count_by_profile", {})[profile_id] = int(BACKTEST_JSON_READ_AUDIT.get("out_of_range_count", 0) or 0)
+                if BACKTEST_JSON_READ_AUDIT.get("out_of_range_count"):
+                    performance_report.setdefault("json_read_warnings", []).append(
+                        {
+                            "profile": profile_id,
+                            "warning": "json_read_outside_requested_period",
+                            "count": BACKTEST_JSON_READ_AUDIT.get("out_of_range_count"),
+                            "sample": BACKTEST_JSON_READ_AUDIT.get("out_of_range_sample", [])[:10],
+                        }
+                    )
+                performance_report["report_time"] = round(
+                    float(performance_report.get("report_time", 0.0)) + float(BACKTEST_PROFILE_TIMINGS.get("report", 0.0)),
+                    4,
+                )
+                performance_report.setdefault("profile_report_time_by_profile", {})[profile_id] = round(float(BACKTEST_PROFILE_TIMINGS.get("report", 0.0)), 4)
+                for key in ("daily_reports_skipped_count", "articles_skipped_count", "reflections_skipped_count"):
+                    performance_report[key] = int(performance_report.get(key, 0) or 0) + int(BACKTEST_PROFILE_TIMINGS.get(key, 0) or 0)
                 _merge_jquants_api_session_summary(experiment_api_summary)
-                if not skip_analyze and not SUMMARY_ONLY_ACTIVE:
+                if not skip_analyze:
                     print(f"run-experiments analyze start: {profile_id}")
                     run_analyze(load_config(CONFIG_PATH), start_date_text, end_date_text)
-        elif not skip_analyze and not SUMMARY_ONLY_ACTIVE:
+        elif not skip_analyze:
             for profile_id in profile_ids:
                 ACTIVE_PROFILE_ID = profile_id
                 print(f"run-experiments analyze start: {profile_id}")
                 run_analyze(load_config(CONFIG_PATH), start_date_text, end_date_text)
         try:
             _print_date_resolution("Compare Profiles Date Resolution", date_resolution)
+            compare_started = time.perf_counter()
             compare_paths = run_compare_profiles(profile_ids, start_date_text, end_date_text)
+            if not skip_backtest:
+                performance_report["compare_profiles_time"] = round(time.perf_counter() - compare_started, 4)
         except SystemExit as exc:
             print(f"run-experiments compare warning: {exc}")
+        if not skip_backtest:
+            performance_report["top_bottlenecks"] = _top_experiment_bottlenecks(performance_report)
         summary = build_experiment_batch_summary(
             base,
             runnable_experiment_ids,
@@ -4382,6 +4448,11 @@ def run_experiments(
         if not skip_backtest:
             summary["performance_report"] = performance_report
         write_experiment_batch_outputs(summary, start_date_text, end_date_text, base, compare_paths)
+        if strict_integrity:
+            failures = _experiment_integrity_failures(summary)
+            if failures:
+                print("strict integrity failed: " + ", ".join(failures), file=sys.stderr)
+                raise SystemExit(1)
     finally:
         RUN_EXPERIMENTS_SHARED_STAGE_ACTIVE = False
         RUN_EXPERIMENTS_SCORING_REUSE_SOURCE_BY_PROFILE = {}
@@ -4432,22 +4503,35 @@ def prepare_run_experiments_common_stages(profile_ids: list[str], start_date_tex
         "candidate_time": 0.0,
         "shared_candidate_time": 0.0,
         "market_context_time": 0.0,
+        "report_time": 0.0,
         "scoring_time": 0.0,
         "trade_time": 0.0,
         "profile_scoring_time_by_profile": {},
         "profile_trade_time_by_profile": {},
+        "profile_report_time_by_profile": {},
         "profile_total_time_by_profile": {},
+        "profile_phase_time_by_profile": {},
+        "profile_phase_accounting_delta_by_profile": {},
+        "top_bottlenecks": [],
+        "compare_profiles_time": 0.0,
+        "daily_reports_skipped_count": 0,
+        "articles_skipped_count": 0,
+        "reflections_skipped_count": 0,
         "reused_indicator_count": 0,
         "reused_candidate_count": 0,
         "reused_scoring_count": 0,
         "cache_reused_from_common_count": 0,
         "profile_specific_cache_count": 0,
+        "indicator_cache_source": {},
+        "candidate_cache_source": {},
         "generated_cache_size": 0,
         "cleanup_hint": "",
         "skipped_profiles": [],
         "stage_groups": [],
         "price_fetch_skipped": False,
         "daily_logs_enabled": not NO_DAILY_LOGS_ACTIVE and not SUMMARY_ONLY_ACTIVE,
+        "quiet": QUIET_ACTIVE,
+        "progress_interval": PROGRESS_INTERVAL,
     }
     if not profile_ids:
         return report
@@ -4458,6 +4542,8 @@ def prepare_run_experiments_common_stages(profile_ids: list[str], start_date_tex
             "cache_reused_from_common_count": 0,
             "profile_specific_cache_count": 0,
             "generated_cache_size": 0,
+            "indicator_cache_source": {},
+            "candidate_cache_source": {},
         }
         BACKTEST_MODE_ACTIVE = True
         price_start = time.perf_counter()
@@ -4507,15 +4593,18 @@ def prepare_run_experiments_common_stages(profile_ids: list[str], start_date_tex
             for index, trading_date in enumerate(group_dates, start=1):
                 target_date_text = trading_date.isoformat()
                 BACKTEST_DAY_LOG_PREFIX = f"[common {representative} {index}/{len(group_dates)}] {target_date_text}"
+                show_progress = _backtest_progress_due(index, len(group_dates))
+                if QUIET_ACTIVE and show_progress:
+                    print(f"{BACKTEST_DAY_LOG_PREFIX} common stages progress")
                 indicator_start = time.perf_counter()
-                ensure_indicators("jquants", target_date_text)
+                _run_quietable_action(lambda: ensure_indicators("jquants", target_date_text), suppress=QUIET_ACTIVE)
                 report["indicator_time"] += time.perf_counter() - indicator_start
                 group_report["indicator_generated_or_reused"] += 1
                 market_start = time.perf_counter()
-                ensure_market_context("jquants", target_date_text)
+                _run_quietable_action(lambda: ensure_market_context("jquants", target_date_text), suppress=QUIET_ACTIVE)
                 report["market_context_time"] += time.perf_counter() - market_start
                 candidate_start = time.perf_counter()
-                ensure_screen("jquants", target_date_text)
+                _run_quietable_action(lambda: ensure_screen("jquants", target_date_text), suppress=QUIET_ACTIVE)
                 report["candidate_time"] += time.perf_counter() - candidate_start
                 group_report["candidate_generated_or_reused"] += 1
                 for profile_id in group_profiles:
@@ -4689,6 +4778,15 @@ def _restore_common_processed_cache(config: dict[str, Any], stage: str, target_d
     return True
 
 
+def _record_cache_source(stage: str, source: str) -> None:
+    if not BACKTEST_MODE_ACTIVE:
+        return
+    metric_key = "indicator_cache_source" if stage == "indicators" else "candidate_cache_source" if stage == "candidates" else f"{stage}_cache_source"
+    counts = COMMON_CACHE_METRICS.setdefault(metric_key, {})
+    if isinstance(counts, dict):
+        counts[source] = int(counts.get(source, 0) or 0) + 1
+
+
 def _save_common_processed_cache(config: dict[str, Any], stage: str, target_date_text: str, payload: dict[str, Any]) -> None:
     common_path = _common_processed_cache_path(config, stage, target_date_text)
     if not common_path.exists():
@@ -4697,6 +4795,12 @@ def _save_common_processed_cache(config: dict[str, Any], stage: str, target_date
             COMMON_CACHE_METRICS["generated_cache_size"] = COMMON_CACHE_METRICS.get("generated_cache_size", 0) + common_path.stat().st_size
         except OSError:
             pass
+
+
+def _update_common_processed_cache(config: dict[str, Any], stage: str, target_date_text: str, payload: dict[str, Any]) -> None:
+    common_path = _common_processed_cache_path(config, stage, target_date_text)
+    if common_path.exists():
+        write_json(common_path, payload)
 
 
 def _link_profile_processed_cache_to_common(config: dict[str, Any], stage: str, target_date_text: str, profile_path: Path) -> None:
@@ -4726,16 +4830,39 @@ def print_run_experiments_performance_report(report: dict[str, Any]) -> None:
         "market_context_time",
         "scoring_time",
         "trade_time",
+        "report_time",
         "profile_scoring_time_by_profile",
         "profile_trade_time_by_profile",
+        "profile_report_time_by_profile",
         "profile_total_time_by_profile",
+        "profile_phase_time_by_profile",
+        "profile_phase_accounting_delta_by_profile",
+        "top_bottlenecks",
+        "compare_profiles_time",
+        "json_read_file_count_by_profile",
+        "json_read_date_range_by_profile",
+        "json_read_date_min_by_profile",
+        "json_read_date_max_by_profile",
+        "json_read_bytes_by_profile",
+        "json_read_breakdown_by_profile",
+        "top_json_read_files_by_profile",
+        "json_read_scope_by_profile",
+        "json_read_out_of_range_count_by_profile",
+        "json_read_warnings",
         "price_fetch_skipped",
         "daily_logs_enabled",
+        "quiet",
+        "progress_interval",
+        "daily_reports_skipped_count",
+        "articles_skipped_count",
+        "reflections_skipped_count",
         "reused_scoring_count",
         "reused_indicator_count",
         "reused_candidate_count",
         "cache_reused_from_common_count",
         "profile_specific_cache_count",
+        "indicator_cache_source",
+        "candidate_cache_source",
         "generated_cache_size",
         "cleanup_hint",
         "skipped_profiles",
@@ -4810,12 +4937,22 @@ def build_experiment_batch_summary(
         for profile_id in [base_profile_id, *experiment_ids]:
             rows_by_profile[profile_id] = _profile_compare_row(load_profile(profile_id), db_path, start_date_text, end_date_text)
     base_row = rows_by_profile.get(base_profile_id, {})
+    base_result_integrity = _backtest_summary_result_integrity(base_profile_id, start_date_text, end_date_text)
+    base_score_integrity = _backtest_summary_score_integrity(base_profile_id, start_date_text, end_date_text)
     base_date_audit = _experiment_date_range_audit(base_profile_id, start_date_text, end_date_text)
     experiment_rows = []
     for profile_id in experiment_ids:
         registry_item = profiles[profile_id]
         row = rows_by_profile.get(profile_id, {"profile_id": profile_id})
         row_market_coverage = row.get("market_coverage", {}) if isinstance(row.get("market_coverage"), dict) else {}
+        result_integrity = _backtest_summary_result_integrity(profile_id, start_date_text, end_date_text)
+        score_integrity = _backtest_summary_score_integrity(profile_id, start_date_text, end_date_text)
+        market_filter_audit = _backtest_summary_market_filter_audit(profile_id, start_date_text, end_date_text)
+        market_filter_excluded_count = (
+            market_filter_audit.get("excluded_count")
+            if market_filter_audit
+            else row_market_coverage.get("market_filter_excluded_count", 0)
+        )
         diff = _experiment_diff(base_profile_id, profile_id, db_path, start_date_text, end_date_text) if db_path.exists() else {}
         feature_analysis = _experiment_feature_analysis(load_profile(profile_id), start_date_text, end_date_text) if db_path.exists() else {}
         activation = feature_analysis.get("feature_activation_audit", {})
@@ -4830,6 +4967,7 @@ def build_experiment_batch_summary(
         outcome_diff_count = int(diff.get("outcome_diff_count") or 0)
         practical_effect = diff.get("practical_effect") or _profile_practical_effect(selection_diff_count, outcome_diff_count)
         judgement = _experiment_judgement(base_row, row, diff)
+        market_trade_consistency_warning = _market_trade_consistency_warning(row_market_coverage, row.get("total_trades"))
         experiment_rows.append(
             {
                 "profile_id": profile_id,
@@ -4850,7 +4988,21 @@ def build_experiment_batch_summary(
                 "market_filter": row.get("market_filter", {}),
                 "market_candidate_count": row_market_coverage.get("candidate_count", {}),
                 "market_selected_count": row_market_coverage.get("selected_count", {}),
-                "market_filter_excluded_count": row_market_coverage.get("market_filter_excluded_count", 0),
+                "market_filter_excluded_count": market_filter_excluded_count,
+                "market_trade_consistency_warning": market_trade_consistency_warning,
+                "result_integrity_status": result_integrity.get("result_integrity_status", ""),
+                "integrity_error_count": len(result_integrity.get("errors", []) or []),
+                "market_filter_violation_count": result_integrity.get("market_filter_violation_count", 0),
+                "trade_without_selected_count": result_integrity.get("trade_without_selected_count", 0),
+                "out_of_period_trade_count": result_integrity.get("out_of_period_trade_count", 0),
+                "stale_cache_read_count": result_integrity.get("stale_cache_read_count", 0),
+                "score_integrity_status": score_integrity.get("score_integrity_status", ""),
+                "score_integrity_errors": score_integrity.get("score_integrity_errors", []),
+                "total_score_mismatch_count": score_integrity.get("total_score_mismatch_count", 0),
+                "stale_score_cache_count": score_integrity.get("stale_score_cache_count", 0),
+                "future_data_leak_count": score_integrity.get("future_data_leak_count", 0),
+                "signal_entry_date_violation_count": score_integrity.get("signal_entry_date_violation_count", 0),
+                "no_trade_fallback_selected_count": score_integrity.get("no_trade_fallback_selected_count", 0),
                 "selection_diff_count": selection_diff_count,
                 "outcome_diff_count": outcome_diff_count,
                 "feature_data_enabled": activation.get("feature_data_enabled", {}),
@@ -4871,9 +5023,9 @@ def build_experiment_batch_summary(
                 "trade_days": coverage_audit.get("trade_days"),
                 "coverage_ratio": coverage_audit.get("coverage_ratio"),
                 "coverage_warning": coverage_audit.get("coverage_warning", ""),
-                "indicators_last_date": processed_audit.get("indicators_last_date"),
-                "candidates_last_date": processed_audit.get("candidates_last_date"),
-                "scored_candidates_last_date": processed_audit.get("scored_candidates_last_date"),
+                "indicators_last_date": processed_audit.get("indicators_last_date_in_range") or processed_audit.get("indicators_last_date"),
+                "candidates_last_date": processed_audit.get("candidates_last_date_in_range") or processed_audit.get("candidates_last_date"),
+                "scored_candidates_last_date": processed_audit.get("scored_candidates_last_date_in_range") or processed_audit.get("scored_candidates_last_date"),
                 "feature_status": {
                     name: item.get("status")
                     for name, item in (activation.get("features", {}) or {}).items()
@@ -4924,6 +5076,19 @@ def build_experiment_batch_summary(
             "role": profiles.get(base_profile_id, {}).get("role", ""),
             "enabled_features": _enabled_registry_features(profiles.get(base_profile_id, {})),
             "backtest_coverage_audit": base_date_audit.get("backtest_coverage_audit", {}) if isinstance(base_date_audit, dict) else {},
+            "result_integrity_status": base_result_integrity.get("result_integrity_status", ""),
+            "integrity_error_count": len(base_result_integrity.get("errors", []) or []),
+            "market_filter_violation_count": base_result_integrity.get("market_filter_violation_count", 0),
+            "trade_without_selected_count": base_result_integrity.get("trade_without_selected_count", 0),
+            "out_of_period_trade_count": base_result_integrity.get("out_of_period_trade_count", 0),
+            "stale_cache_read_count": base_result_integrity.get("stale_cache_read_count", 0),
+            "score_integrity_status": base_score_integrity.get("score_integrity_status", ""),
+            "score_integrity_errors": base_score_integrity.get("score_integrity_errors", []),
+            "total_score_mismatch_count": base_score_integrity.get("total_score_mismatch_count", 0),
+            "stale_score_cache_count": base_score_integrity.get("stale_score_cache_count", 0),
+            "future_data_leak_count": base_score_integrity.get("future_data_leak_count", 0),
+            "signal_entry_date_violation_count": base_score_integrity.get("signal_entry_date_violation_count", 0),
+            "no_trade_fallback_selected_count": base_score_integrity.get("no_trade_fallback_selected_count", 0),
             **base_row,
         },
         "experiments": experiment_rows,
@@ -4934,13 +5099,7 @@ def build_experiment_batch_summary(
 
 
 def _experiment_date_range_audit(profile_id: str, start_date_text: str, end_date_text: str) -> dict[str, Any]:
-    summary_path = ROOT / "logs" / "backtests" / profile_id / f"{start_date_text}_to_{end_date_text}" / "backtest_summary.json"
-    if not summary_path.exists():
-        return {}
-    try:
-        summary = read_json(summary_path)
-    except Exception:
-        return {}
+    summary = _backtest_summary_payload(profile_id, start_date_text, end_date_text)
     audit = summary.get("date_range_audit", {})
     return audit if isinstance(audit, dict) else {}
 
@@ -5073,6 +5232,25 @@ def write_experiment_batch_outputs(
     return markdown_path, json_path
 
 
+def _experiment_integrity_failures(summary: dict[str, Any]) -> list[str]:
+    failures = []
+    base = summary.get("base", {})
+    base_status = base.get("result_integrity_status")
+    if base_status and base_status != "OK":
+        failures.append(f"{base.get('profile_id', 'base')}={base_status}")
+    base_score_status = base.get("score_integrity_status")
+    if base_score_status and base_score_status != "OK":
+        failures.append(f"{base.get('profile_id', 'base')}.score={base_score_status}")
+    for row in summary.get("experiments", []) or []:
+        status = row.get("result_integrity_status")
+        if status and status != "OK":
+            failures.append(f"{row.get('profile_id')}={status}")
+        score_status = row.get("score_integrity_status")
+        if score_status and score_status != "OK":
+            failures.append(f"{row.get('profile_id')}.score={score_status}")
+    return failures
+
+
 def experiment_batch_output_dir(start_date_text: str, end_date_text: str, base_profile_id: str) -> Path:
     return ROOT / "reports" / "experiments" / f"{start_date_text}_to_{end_date_text}" / base_profile_id
 
@@ -5136,16 +5314,39 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             f"- candidate_time: {performance.get('candidate_time', 0)}",
             f"- scoring_time: {performance.get('scoring_time', 0)}",
             f"- trade_time: {performance.get('trade_time', 0)}",
+            f"- report_time: {performance.get('report_time', 0)}",
             f"- profile_scoring_time_by_profile: {_compact_json(performance.get('profile_scoring_time_by_profile', {}))}",
             f"- profile_trade_time_by_profile: {_compact_json(performance.get('profile_trade_time_by_profile', {}))}",
+            f"- profile_report_time_by_profile: {_compact_json(performance.get('profile_report_time_by_profile', {}))}",
             f"- profile_total_time_by_profile: {_compact_json(performance.get('profile_total_time_by_profile', {}))}",
+            f"- profile_phase_time_by_profile: {_compact_json(performance.get('profile_phase_time_by_profile', {}))}",
+            f"- profile_phase_accounting_delta_by_profile: {_compact_json(performance.get('profile_phase_accounting_delta_by_profile', {}))}",
+            f"- compare_profiles_time: {performance.get('compare_profiles_time', 0)}",
+            f"- top_bottlenecks: {_compact_json(performance.get('top_bottlenecks', []))}",
+            f"- json_read_file_count_by_profile: {_compact_json(performance.get('json_read_file_count_by_profile', {}))}",
+            f"- json_read_date_range_by_profile: {_compact_json(performance.get('json_read_date_range_by_profile', {}))}",
+            f"- json_read_date_min_by_profile: {_compact_json(performance.get('json_read_date_min_by_profile', {}))}",
+            f"- json_read_date_max_by_profile: {_compact_json(performance.get('json_read_date_max_by_profile', {}))}",
+            f"- json_read_bytes_by_profile: {_compact_json(performance.get('json_read_bytes_by_profile', {}))}",
+            f"- json_read_breakdown_by_profile: {_compact_json(performance.get('json_read_breakdown_by_profile', {}))}",
+            f"- top_json_read_files_by_profile: {_compact_json(performance.get('top_json_read_files_by_profile', {}))}",
+            f"- json_read_scope_by_profile: {_compact_json(performance.get('json_read_scope_by_profile', {}))}",
+            f"- json_read_out_of_range_count_by_profile: {_compact_json(performance.get('json_read_out_of_range_count_by_profile', {}))}",
+            f"- json_read_warnings: {_compact_json(performance.get('json_read_warnings', []))}",
             f"- price_fetch_skipped: {str(bool(performance.get('price_fetch_skipped', False))).lower()}",
             f"- daily_logs_enabled: {str(bool(performance.get('daily_logs_enabled', True))).lower()}",
+            f"- quiet: {str(bool(performance.get('quiet', False))).lower()}",
+            f"- progress_interval: {performance.get('progress_interval', '-')}",
+            f"- daily_reports_skipped_count: {performance.get('daily_reports_skipped_count', 0)}",
+            f"- articles_skipped_count: {performance.get('articles_skipped_count', 0)}",
+            f"- reflections_skipped_count: {performance.get('reflections_skipped_count', 0)}",
             f"- reused_indicator_count: {performance.get('reused_indicator_count', 0)}",
             f"- reused_candidate_count: {performance.get('reused_candidate_count', 0)}",
             f"- reused_scoring_count: {performance.get('reused_scoring_count', 0)}",
             f"- cache_reused_from_common_count: {performance.get('cache_reused_from_common_count', 0)}",
             f"- profile_specific_cache_count: {performance.get('profile_specific_cache_count', 0)}",
+            f"- indicator_cache_source: {_compact_json(performance.get('indicator_cache_source', {}))}",
+            f"- candidate_cache_source: {_compact_json(performance.get('candidate_cache_source', {}))}",
             f"- generated_cache_size: {_format_bytes(int(performance.get('generated_cache_size', 0) or 0))}",
             f"- cleanup_hint: {performance.get('cleanup_hint', '-')}",
             f"- skipped_profiles: {_compact_json(performance.get('skipped_profiles', []))}",
@@ -5177,8 +5378,8 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             "",
             "## Results",
             "",
-            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | investor_filter_rejected_count | market_filter | market_candidate_count | market_selected_count | market_filter_excluded_count | selection_diff_count | outcome_diff_count | indicators_last_date | candidates_last_date | scored_candidates_last_date | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | earnings_calendar_records | earnings_filter_rejected_count | earnings_filter_status | practical_effect | effect_reason | verdict | verdict_reason |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | investor_filter_rejected_count | market_filter | market_candidate_count | market_selected_count | market_filter_excluded_count | market_trade_consistency_warning | result_integrity_status | integrity_error_count | market_filter_violation_count | trade_without_selected_count | out_of_period_trade_count | stale_cache_read_count | score_integrity_status | total_score_mismatch_count | stale_score_cache_count | future_data_leak_count | signal_entry_date_violation_count | no_trade_fallback_selected_count | selection_diff_count | outcome_diff_count | indicators_last_date | candidates_last_date | scored_candidates_last_date | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | earnings_calendar_records | earnings_filter_rejected_count | earnings_filter_status | practical_effect | effect_reason | verdict | verdict_reason |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for row in summary.get("experiments", []):
@@ -5196,6 +5397,13 @@ def _experiment_summary_table_row(row: dict[str, Any]) -> str:
         f"{row.get('total_trades')} | {row.get('newly_selected_count')} | {row.get('removed_count')} | {row.get('investor_filter_rejected_count', 0)} | "
         f"{_compact_json(row.get('market_filter', {}))} | {_compact_json(row.get('market_candidate_count', {}))} | "
         f"{_compact_json(row.get('market_selected_count', {}))} | {row.get('market_filter_excluded_count', 0)} | "
+        f"{row.get('market_trade_consistency_warning', '') or '-'} | "
+        f"{row.get('result_integrity_status', '') or '-'} | {row.get('integrity_error_count', 0)} | "
+        f"{row.get('market_filter_violation_count', 0)} | {row.get('trade_without_selected_count', 0)} | "
+        f"{row.get('out_of_period_trade_count', 0)} | {row.get('stale_cache_read_count', 0)} | "
+        f"{row.get('score_integrity_status', '') or '-'} | {row.get('total_score_mismatch_count', 0)} | "
+        f"{row.get('stale_score_cache_count', 0)} | {row.get('future_data_leak_count', 0)} | "
+        f"{row.get('signal_entry_date_violation_count', 0)} | {row.get('no_trade_fallback_selected_count', 0)} | "
         f"{row.get('selection_diff_count')} | {row.get('outcome_diff_count')} | "
         f"{row.get('indicators_last_date', '')} | {row.get('candidates_last_date', '')} | {row.get('scored_candidates_last_date', '')} | "
         f"{_compact_json(row.get('feature_data_enabled', {}))} | {_compact_json(row.get('feature_scoring_enabled', {}))} | "
@@ -5236,6 +5444,20 @@ def render_experiment_profile_markdown(row: dict[str, Any]) -> str:
             f"- market_candidate_count: {_compact_json(row.get('market_candidate_count', {}))}",
             f"- market_selected_count: {_compact_json(row.get('market_selected_count', {}))}",
             f"- market_filter_excluded_count: {row.get('market_filter_excluded_count', 0)}",
+            f"- market_trade_consistency_warning: {row.get('market_trade_consistency_warning', '') or '-'}",
+            f"- result_integrity_status: {row.get('result_integrity_status', '') or '-'}",
+            f"- integrity_error_count: {row.get('integrity_error_count', 0)}",
+            f"- market_filter_violation_count: {row.get('market_filter_violation_count', 0)}",
+            f"- trade_without_selected_count: {row.get('trade_without_selected_count', 0)}",
+            f"- out_of_period_trade_count: {row.get('out_of_period_trade_count', 0)}",
+            f"- stale_cache_read_count: {row.get('stale_cache_read_count', 0)}",
+            f"- score_integrity_status: {row.get('score_integrity_status', '') or '-'}",
+            f"- score_integrity_errors: {_compact_json(row.get('score_integrity_errors', []))}",
+            f"- total_score_mismatch_count: {row.get('total_score_mismatch_count', 0)}",
+            f"- stale_score_cache_count: {row.get('stale_score_cache_count', 0)}",
+            f"- future_data_leak_count: {row.get('future_data_leak_count', 0)}",
+            f"- signal_entry_date_violation_count: {row.get('signal_entry_date_violation_count', 0)}",
+            f"- no_trade_fallback_selected_count: {row.get('no_trade_fallback_selected_count', 0)}",
             f"- selection_diff_count: {row.get('selection_diff_count', 0)}",
             f"- outcome_diff_count: {row.get('outcome_diff_count', 0)}",
             f"- indicators_last_date: {row.get('indicators_last_date', '-')}",
@@ -5406,14 +5628,17 @@ def _profile_compare_row(config: dict[str, Any], db_path: Path, start_date_text:
         else None
     )
     max_drawdown = min((float(row.get("max_drawdown") or 0) for row in portfolio_rows), default=None) if portfolio_rows else None
-    return {
+    market_coverage = _backtest_summary_market_coverage(profile_id, start_date_text, end_date_text)
+    if not _market_coverage_has_counts(market_coverage) and scoring_rows:
+        market_coverage = _market_coverage_from_scoring_rows(scoring_rows)
+    row = {
         "profile_id": profile_id,
         "profile_name": profile_name_from(config),
         "market_filter": {
             "allowed_sections": sorted(allowed_market_sections(config)),
             "allow_unknown_market": bool(config.get("market_filter", {}).get("allow_unknown_market", False)),
         },
-        "market_coverage": _backtest_summary_market_coverage(profile_id, start_date_text, end_date_text),
+        "market_coverage": market_coverage,
         "stop_loss_execution": config.get("execution", {}).get("stop_loss_execution", "next_day_open"),
         "final_assets": latest.get("total_assets"),
         "net_cumulative_profit": latest.get("net_cumulative_profit"),
@@ -5440,9 +5665,68 @@ def _profile_compare_row(config: dict[str, Any], db_path: Path, start_date_text:
         "conditional_rejected_count": _conditional_rejected_count(scoring_rows),
         "score_detail": score_detail_groups(closed),
     }
+    return _profile_compare_row_with_backtest_summary(row, profile_id, start_date_text, end_date_text)
+
+
+def _profile_compare_row_with_backtest_summary(
+    row: dict[str, Any],
+    profile_id: str,
+    start_date_text: str,
+    end_date_text: str,
+) -> dict[str, Any]:
+    summary = _backtest_summary_payload(profile_id, start_date_text, end_date_text)
+    if not summary:
+        return row
+    patched = dict(row)
+    summary_metric_keys = [
+        "final_assets",
+        "net_cumulative_profit",
+        "win_rate",
+        "profit_factor",
+        "max_drawdown",
+        "total_trades",
+        "closed_trade_count",
+        "win_count",
+        "loss_count",
+        "excluded_order_event_count",
+    ]
+    for key in summary_metric_keys:
+        if key in summary:
+            patched[key] = summary.get(key)
+    if "closed_trade_count" in summary and "closed_trade_count" not in row:
+        patched["closed_trade_count"] = summary.get("closed_trade_count")
+    coverage = summary.get("market_coverage", {})
+    if isinstance(coverage, dict):
+        patched["market_coverage"] = coverage
+    patched["summary_source"] = "backtest_summary"
+    return patched
 
 
 def _backtest_summary_market_coverage(profile_id: str, start_date_text: str, end_date_text: str) -> dict[str, Any]:
+    payload = _backtest_summary_payload(profile_id, start_date_text, end_date_text)
+    coverage = payload.get("market_coverage", {})
+    return coverage if isinstance(coverage, dict) else {}
+
+
+def _backtest_summary_result_integrity(profile_id: str, start_date_text: str, end_date_text: str) -> dict[str, Any]:
+    payload = _backtest_summary_payload(profile_id, start_date_text, end_date_text)
+    audit = payload.get("backtest_result_integrity_audit", {})
+    return audit if isinstance(audit, dict) else {}
+
+
+def _backtest_summary_score_integrity(profile_id: str, start_date_text: str, end_date_text: str) -> dict[str, Any]:
+    payload = _backtest_summary_payload(profile_id, start_date_text, end_date_text)
+    audit = payload.get("score_integrity_audit", {})
+    return audit if isinstance(audit, dict) else {}
+
+
+def _backtest_summary_market_filter_audit(profile_id: str, start_date_text: str, end_date_text: str) -> dict[str, Any]:
+    payload = _backtest_summary_payload(profile_id, start_date_text, end_date_text)
+    audit = payload.get("market_filter_audit", {})
+    return audit if isinstance(audit, dict) else {}
+
+
+def _backtest_summary_payload(profile_id: str, start_date_text: str, end_date_text: str) -> dict[str, Any]:
     path = ROOT / "logs" / "backtests" / profile_id / f"{start_date_text}_to_{end_date_text}" / "backtest_summary.json"
     if not path.exists():
         return {}
@@ -5450,8 +5734,56 @@ def _backtest_summary_market_coverage(profile_id: str, start_date_text: str, end
         payload = read_json(path)
     except Exception:
         return {}
-    coverage = payload.get("market_coverage", {})
-    return coverage if isinstance(coverage, dict) else {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _market_coverage_has_counts(coverage: dict[str, Any]) -> bool:
+    for key in ("candidate_count", "selected_count"):
+        value = coverage.get(key)
+        if isinstance(value, dict) and any(int(count or 0) for count in value.values()):
+            return True
+    return False
+
+
+def _market_coverage_from_scoring_rows(scoring_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    candidates = [dict(row) for row in scoring_rows]
+    selected = [row for row in candidates if bool(row.get("selected"))]
+    return {
+        "candidate_count": market_section_counts(candidates),
+        "selected_count": market_section_counts(selected),
+        "market_filter_excluded_count": sum(1 for row in candidates if row.get("market_section_filter_blocked")),
+        "source": "db_scoring_results_period",
+    }
+
+
+def _market_trade_consistency_warning(market_coverage: dict[str, Any], total_trades: Any) -> str:
+    candidate_counts = market_coverage.get("candidate_count", {}) if isinstance(market_coverage, dict) else {}
+    candidate_total = sum(int(value or 0) for value in candidate_counts.values()) if isinstance(candidate_counts, dict) else 0
+    try:
+        trade_count = int(total_trades or 0)
+    except (TypeError, ValueError):
+        trade_count = 0
+    if candidate_total == 0 and trade_count > 0:
+        source = market_coverage.get("source", "unknown") if isinstance(market_coverage, dict) else "unknown"
+        return f"market_candidate_count is zero but total_trades={trade_count}; coverage_source={source}"
+    return ""
+
+
+def _result_integrity_with_market_trade_check(
+    result_integrity: dict[str, Any],
+    market_coverage: dict[str, Any],
+    total_trades: Any,
+) -> dict[str, Any]:
+    warning = _market_trade_consistency_warning(market_coverage, total_trades)
+    if not warning:
+        return result_integrity
+    patched = dict(result_integrity)
+    errors = list(patched.get("errors", []) or [])
+    if warning not in errors:
+        errors.append(warning)
+    patched["errors"] = errors
+    patched["result_integrity_status"] = "ERROR"
+    return patched
 
 
 def build_profile_diff_analysis(
@@ -7747,12 +8079,17 @@ def run_screen(provider_name: str, target_date_text: str) -> None:
     config = load_config(CONFIG_PATH)
     payload = read_json(indicators_path)
     indicators = payload.get("indicators", [])
+    filter_started = time.perf_counter()
     market_filtered = _apply_market_section_filter(indicators, config)
+    _record_backtest_phase_time("market_filter", time.perf_counter() - filter_started)
     indicators = market_filtered["allowed"]
 
     if indicators:
+        candidate_started = time.perf_counter()
         indicators = enrich_indicators_with_sector_momentum(indicators, target_date_text, provider_name)
         result = screen_candidates(indicators, target_count=50)
+        result["candidates"] = _fill_market_sections_from_master(result.get("candidates", []))
+        _record_backtest_phase_time("candidate_filter", time.perf_counter() - candidate_started)
     else:
         result = {
             "candidates": [],
@@ -7785,8 +8122,16 @@ def run_screen(provider_name: str, target_date_text: str) -> None:
             "allowed_sections": sorted(allowed_market_sections(config)),
             "allow_unknown_market": bool(config.get("market_filter", {}).get("allow_unknown_market", False)),
             "input_counts": market_filtered["input_counts"],
+            "allowed_counts": market_filtered["allowed_counts"],
+            "excluded_counts": market_filtered["excluded_counts"],
             "candidate_counts": market_section_counts(candidates),
             "market_filter_excluded_count": market_filtered["excluded_count"],
+            "unknown_market_count": market_filtered["input_counts"].get("Unknown", 0),
+            "market_section_lookup_source": market_filtered.get("lookup_source", {}),
+            "listed_info_match_count": market_filtered.get("listed_info_match_count", 0),
+            "listed_info_missing_count": market_filtered.get("listed_info_missing_count", 0),
+            "market_section_filled_from_master_count": market_filtered.get("market_section_filled_from_master_count", 0),
+            "sample": market_filtered.get("sample", []),
         },
     }
 
@@ -7806,6 +8151,10 @@ def run_screen(provider_name: str, target_date_text: str) -> None:
         "candidates": candidates,
         "market_coverage": screening_log["market_coverage"],
     }
+    write_json(candidates_path, candidate_payload)
+    reloaded_candidate_payload = read_json(candidates_path)
+    reloaded_candidates = _fill_market_sections_from_master(reloaded_candidate_payload.get("candidates", []))
+    candidate_payload["market_coverage"]["post_filter_validation"] = _candidate_market_filter_validation(reloaded_candidates, config)
     write_json(candidates_path, candidate_payload)
     if BACKTEST_MODE_ACTIVE:
         _save_common_processed_cache(config, "candidates", target_date_text, candidate_payload)
@@ -7869,12 +8218,32 @@ def enrich_indicators_with_sector_momentum(
 
 
 def _apply_market_section_filter(rows: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, Any]:
+    original_rows = [row for row in rows if isinstance(row, dict)]
+    rows = _fill_market_sections_from_master(original_rows)
+    fill_stats = _market_section_fill_stats(original_rows, rows)
     allowed = []
     excluded = []
-    for row in rows:
+    lookup_source = {"row": 0, "master": fill_stats["market_section_filled_from_master_count"], "unknown": 0}
+    sample = []
+    for original, row in zip(original_rows, rows):
         section = market_section_from_row(row)
+        if section == "Unknown":
+            lookup_source["unknown"] += 1
+        elif market_section_from_row(original) != "Unknown":
+            lookup_source["row"] += 1
         enriched = attach_market_section_fields(row, section)
-        if market_section_allowed(enriched, config):
+        allowed_flag = market_section_allowed(enriched, config)
+        if len(sample) < 20:
+            sample.append(
+                {
+                    "date": row.get("date"),
+                    "code": row.get("code"),
+                    "market_section": section,
+                    "allowed": allowed_flag,
+                    "excluded_reason": "" if allowed_flag else "market_filter_excluded",
+                }
+            )
+        if allowed_flag:
             allowed.append(enriched)
         else:
             excluded.append({**enriched, "rejected_reason": "market_filter_excluded"})
@@ -7885,6 +8254,11 @@ def _apply_market_section_filter(rows: list[dict[str, Any]], config: dict[str, A
         "input_counts": market_section_counts(rows),
         "allowed_counts": market_section_counts(allowed),
         "excluded_counts": market_section_counts(excluded),
+        "lookup_source": lookup_source,
+        "listed_info_match_count": fill_stats["listed_info_match_count"],
+        "listed_info_missing_count": fill_stats["listed_info_missing_count"],
+        "market_section_filled_from_master_count": fill_stats["market_section_filled_from_master_count"],
+        "sample": sample,
     }
 
 
@@ -7916,6 +8290,7 @@ def run_score(provider_name: str, target_date_text: str) -> None:
         investor_context_payload = _load_investor_context_for_date(target_date, config)
         config["_investor_context"] = investor_context_payload["context"]
         config["_investor_context_metadata"] = investor_context_payload["metadata"]
+        score_started = time.perf_counter()
         scoring_log = score_real_candidates(
             candidates,
             target_date_text,
@@ -7923,6 +8298,7 @@ def run_score(provider_name: str, target_date_text: str) -> None:
             provider_name,
             market_context=market_context,
         )
+        _record_backtest_phase_time("score_merge", time.perf_counter() - score_started)
     else:
         earnings_payload = {"records": [], "metadata": {"filter_available": False, "skip_reason": "empty_candidates"}}
         investor_context_payload = {"context": {}, "metadata": {"available": False, "skip_reason": "empty_candidates"}}
@@ -8969,7 +9345,7 @@ def run_daily(provider_name: str, target_date_text: str) -> None:
 
 
 def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -> None:
-    global BACKTEST_MODE_ACTIVE, BACKTEST_PROFILE_TIMINGS
+    global BACKTEST_MODE_ACTIVE, BACKTEST_PROFILE_TIMINGS, BACKTEST_JSON_READ_AUDIT, BACKTEST_JSON_READ_PERIOD
     if provider_name != "jquants":
         raise SystemExit("backtest mode currently supports --provider jquants only.")
     runtime_resolution = _runtime_date_resolution(start_date_text, end_date_text)
@@ -8991,6 +9367,8 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
     range_key = f"{start_date_text}_to_{end_date_text}"
     BACKTEST_MODE_ACTIVE = True
     BACKTEST_PROFILE_TIMINGS = {}
+    BACKTEST_JSON_READ_AUDIT = {"file_count": 0, "out_of_range_count": 0, "out_of_range_sample": []}
+    BACKTEST_JSON_READ_PERIOD = (start_date_text, end_date_text)
     _reset_jquants_api_session()
     total_started_at = time.perf_counter()
     profile_id = profile_id_from(config)
@@ -9067,7 +9445,9 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
             target_date_text = trading_date.isoformat()
             global BACKTEST_DAY_LOG_PREFIX
             BACKTEST_DAY_LOG_PREFIX = f"[day {index}/{len(trading_dates)}] {target_date_text}"
-            print(f"[day {index}/{len(trading_dates)}] {target_date_text} start")
+            show_day_progress = _backtest_progress_due(index, len(trading_dates))
+            if show_day_progress:
+                print(f"[day {index}/{len(trading_dates)}] {target_date_text} start")
             has_history, indicator_input_days, indicator_min_days = _has_minimum_indicator_history(indicator_fetch_start_date, trading_date, config)
             indicator_cache_exists = (
                 processed_profile_path(config, f"indicators_{target_date_text}.json").exists()
@@ -9150,24 +9530,40 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
             trade_result = _run_backtest_day_step(index, len(trading_dates), target_date_text, "trade", run_trade_step, lambda: _backtest_trade_metrics(trade_context))
 
             report_context: dict[str, Any] = {}
+            generate_daily_report = _generate_backtest_daily_markdown(config)
+            generate_article = _generate_articles_in_backtest(config)
 
             def run_reports_step() -> tuple[Path, Path, Path]:
                 reflection_path = backtest_dir / f"reflections_{target_date_text}.json"
                 report_path = report_dir / f"day_{target_date_text}.md"
                 article_path = _backtest_article_path(config, target_date_text, profile_id)
-                if _generate_backtest_daily_markdown(config) and _generate_articles_in_backtest(config):
+                if generate_daily_report and generate_article:
                     reflection_path = write_backtest_reflections(backtest_dir, target_date_text, trade_result)
                     report_path, article_path = write_backtest_daily_markdown(report_dir, article_path.parent, target_date_text, trade_result, scoring_log)
-                elif _generate_backtest_daily_markdown(config):
+                elif generate_daily_report:
                     reflection_path = write_backtest_reflections(backtest_dir, target_date_text, trade_result)
                     report_path = write_backtest_report_markdown(report_dir, target_date_text, trade_result, scoring_log)
-                elif _generate_articles_in_backtest(config):
+                elif generate_article:
                     reflection_path = write_backtest_reflections(backtest_dir, target_date_text, trade_result)
                     article_path = write_backtest_article_markdown(article_path, target_date_text, trade_result)
                 report_context.update({"reflection_path": reflection_path, "report_path": report_path, "article_path": article_path})
                 return reflection_path, report_path, article_path
 
-            reflection_path, report_path, article_path = _run_backtest_day_step(index, len(trading_dates), target_date_text, "reports/articles", run_reports_step, lambda: _backtest_report_metrics(report_context))
+            if not generate_daily_report and not generate_article:
+                skip_reason = "summary_only=true" if SUMMARY_ONLY_ACTIVE else "backtest daily reporting disabled"
+                if not QUIET_ACTIVE:
+                    print(f"[day {index}/{len(trading_dates)}] {target_date_text} reports/articles skipped: {skip_reason}")
+                _record_backtest_report_skip(daily_report=True, article=True, reflection=True)
+                report_path = None
+                article_path = None
+                reflection_path = None
+            else:
+                reflection_path, report_path, article_path = _run_backtest_day_step(index, len(trading_dates), target_date_text, "reports/articles", run_reports_step, lambda: _backtest_report_metrics(report_context))
+                _record_backtest_report_skip(
+                    daily_report=not generate_daily_report,
+                    article=not generate_article,
+                    reflection=False,
+                )
 
             portfolio_summary = trade_context["portfolio_summary"]
             trades = trade_context["trades"]
@@ -9201,14 +9597,18 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
             daily_summaries.append(portfolio_summary)
             all_trades.extend(trades)
             processed_dates.append(target_date_text)
-            print(
-                f"[day {index}/{len(trading_dates)}] {target_date_text} done "
-                f"selected={trade_result['selected_count']} buy={sum(1 for trade in trades if trade.get('action') == 'BUY')} "
-                f"sell={sum(1 for trade in trades if trade.get('action') == 'SELL')} assets={portfolio_summary['total_assets']}"
-            )
-            print(f"  report: {report_path.relative_to(ROOT)}")
-            print(f"  article: {article_path.relative_to(ROOT)}")
-            print(f"  reflections: {reflection_path.relative_to(ROOT)}")
+            if show_day_progress:
+                print(
+                    f"[day {index}/{len(trading_dates)}] {target_date_text} done "
+                    f"selected={trade_result['selected_count']} buy={sum(1 for trade in trades if trade.get('action') == 'BUY')} "
+                    f"sell={sum(1 for trade in trades if trade.get('action') == 'SELL')} assets={portfolio_summary['total_assets']}"
+                )
+            if report_path and not QUIET_ACTIVE:
+                print(f"  report: {report_path.relative_to(ROOT)}")
+            if article_path and not QUIET_ACTIVE:
+                print(f"  article: {article_path.relative_to(ROOT)}")
+            if reflection_path and not QUIET_ACTIVE:
+                print(f"  reflections: {reflection_path.relative_to(ROOT)}")
 
         summary = _run_daily_step(
             3,
@@ -9251,17 +9651,20 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
     except SystemExit as exc:
         print(f"backtest failed during step: {getattr(exc, 'step_name', 'unknown')}")
         BACKTEST_MODE_ACTIVE = False
+        BACKTEST_JSON_READ_PERIOD = None
         raise
     except KeyboardInterrupt as exc:
         print("")
         print("backtest interrupted by Ctrl+C")
         print("No live orders were sent. Partial cache and logs remain on disk.")
         BACKTEST_MODE_ACTIVE = False
+        BACKTEST_JSON_READ_PERIOD = None
         raise SystemExit(130) from exc
     except Exception as exc:
         print(f"backtest failed during step: {getattr(exc, 'step_name', 'unknown')}")
         print(f"reason: {exc}")
         BACKTEST_MODE_ACTIVE = False
+        BACKTEST_JSON_READ_PERIOD = None
         raise SystemExit(1) from exc
 
     print("backtest completed")
@@ -9315,13 +9718,14 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
         print(f"- total_trades: {summary.get('total_trades')}")
         print(f"- report_path: {Path(summary['rule_based_90d_report_path']).relative_to(ROOT)}")
     BACKTEST_MODE_ACTIVE = False
+    BACKTEST_JSON_READ_PERIOD = None
 
 
 def _run_daily_step(step_number: int, total_steps: int, step_name: str, action: Any) -> Any:
     print(f"[{step_number}/{total_steps}] {step_name} start")
     started_at = time.perf_counter()
     try:
-        result = action()
+        result = _run_quietable_action(action, suppress=QUIET_ACTIVE and BACKTEST_MODE_ACTIVE)
     except SystemExit as exc:
         setattr(exc, "step_name", step_name)
         print(f"[{step_number}/{total_steps}] {step_name} failed")
@@ -9353,10 +9757,12 @@ def _run_backtest_day_step(
     metrics: Any | None = None,
 ) -> Any:
     prefix = f"[day {day_number}/{total_days}] {target_date_text} {step_name}"
-    print(f"{prefix} start")
+    show_progress = _backtest_progress_due(day_number, total_days)
+    if show_progress:
+        print(f"{prefix} start")
     started_at = time.perf_counter()
     try:
-        result = action()
+        result = _run_quietable_action(action, suppress=QUIET_ACTIVE)
     except KeyboardInterrupt:
         elapsed = time.perf_counter() - started_at
         print(f"{prefix} interrupted after {elapsed:.1f}s")
@@ -9367,11 +9773,26 @@ def _run_backtest_day_step(
         raise
     elapsed = time.perf_counter() - started_at
     _record_backtest_profile_timing(step_name, elapsed)
-    print(f"{prefix} done in {elapsed:.1f}s")
-    if metrics:
+    if show_progress:
+        print(f"{prefix} done in {elapsed:.1f}s")
+    if metrics and not QUIET_ACTIVE:
         for line in metrics() or []:
             print(f"  {line}")
     return result
+
+
+def _backtest_progress_due(day_number: int, total_days: int) -> bool:
+    if not QUIET_ACTIVE:
+        return True
+    interval = max(1, int(PROGRESS_INTERVAL or 10))
+    return day_number == 1 or day_number == total_days or day_number % interval == 0
+
+
+def _run_quietable_action(action: Any, *, suppress: bool) -> Any:
+    if not suppress:
+        return action()
+    with open(os.devnull, "w", encoding="utf-8") as devnull, redirect_stdout(devnull):
+        return action()
 
 
 def _record_backtest_profile_timing(step_name: str, elapsed: float) -> None:
@@ -9383,23 +9804,91 @@ def _record_backtest_profile_timing(step_name: str, elapsed: float) -> None:
         "screen": "screening",
         "score": "scoring",
         "trade": "trading",
+        "db-save": "sqlite_access",
         "reports/articles": "report",
-        "backtest-summary": "report",
+        "backtest-summary": "summary_generation",
     }.get(step_name)
     if not bucket:
         return
     BACKTEST_PROFILE_TIMINGS[bucket] = BACKTEST_PROFILE_TIMINGS.get(bucket, 0.0) + elapsed
 
 
+def _record_backtest_phase_time(phase: str, elapsed: float) -> None:
+    if BACKTEST_MODE_ACTIVE and elapsed > 0:
+        BACKTEST_PROFILE_TIMINGS[phase] = BACKTEST_PROFILE_TIMINGS.get(phase, 0.0) + elapsed
+
+
+def _profile_phase_time_snapshot(profile_total_seconds: float) -> dict[str, Any]:
+    phases = {
+        "indicator_load": round(float(BACKTEST_PROFILE_TIMINGS.get("indicator", 0.0)), 4),
+        "candidate_load": round(float(BACKTEST_PROFILE_TIMINGS.get("screening", 0.0)), 4),
+        "scoring": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring", 0.0)), 4),
+        "trade": round(float(BACKTEST_PROFILE_TIMINGS.get("trading", 0.0)), 4),
+        "feature_analysis": round(float(BACKTEST_PROFILE_TIMINGS.get("feature_analysis", 0.0)), 4),
+        "candidate_filter": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_filter", 0.0)), 4),
+        "market_filter": round(float(BACKTEST_PROFILE_TIMINGS.get("market_filter", 0.0)), 4),
+        "score_merge": round(float(BACKTEST_PROFILE_TIMINGS.get("score_merge", 0.0)), 4),
+        "portfolio_update": round(float(BACKTEST_PROFILE_TIMINGS.get("portfolio_update", 0.0)), 4),
+        "summary_generation": round(float(BACKTEST_PROFILE_TIMINGS.get("summary_generation", 0.0)), 4),
+        "compare_profiles": 0.0,
+        "report_generation": round(float(BACKTEST_PROFILE_TIMINGS.get("report", 0.0)), 4),
+        "json_read": round(float(BACKTEST_PROFILE_TIMINGS.get("json_read", 0.0)), 4),
+        "json_write": round(float(BACKTEST_PROFILE_TIMINGS.get("json_write", 0.0)), 4),
+        "sqlite_access": round(float(BACKTEST_PROFILE_TIMINGS.get("sqlite_access", 0.0)), 4),
+    }
+    measured_sum = round(sum(float(value) for value in phases.values()), 4)
+    delta = round(float(profile_total_seconds) - measured_sum, 4)
+    if delta >= 0:
+        phases["misc"] = delta
+    else:
+        phases["timing_overlap_adjustment"] = delta
+    final_delta = round(float(profile_total_seconds) - sum(float(value) for value in phases.values()), 4)
+    return {"phases": phases, "accounting_delta": final_delta}
+
+
+def _top_experiment_bottlenecks(performance_report: dict[str, Any], limit: int = 20) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    phase_by_profile = performance_report.get("profile_phase_time_by_profile", {})
+    if isinstance(phase_by_profile, dict):
+        for profile_id, phases in phase_by_profile.items():
+            if not isinstance(phases, dict):
+                continue
+            for phase, elapsed in phases.items():
+                try:
+                    seconds = float(elapsed)
+                except (TypeError, ValueError):
+                    continue
+                if seconds <= 0 or str(phase) == "timing_overlap_adjustment":
+                    continue
+                rows.append({"profile": profile_id, "phase": phase, "elapsed_seconds": round(seconds, 4)})
+    compare_seconds = float(performance_report.get("compare_profiles_time", 0.0) or 0.0)
+    if compare_seconds > 0:
+        rows.append({"profile": "__batch__", "phase": "compare_profiles", "elapsed_seconds": round(compare_seconds, 4)})
+    return sorted(rows, key=lambda item: item["elapsed_seconds"], reverse=True)[:limit]
+
+
+def _record_backtest_report_skip(*, daily_report: bool, article: bool, reflection: bool) -> None:
+    if daily_report:
+        BACKTEST_PROFILE_TIMINGS["daily_reports_skipped_count"] = BACKTEST_PROFILE_TIMINGS.get("daily_reports_skipped_count", 0) + 1
+    if article:
+        BACKTEST_PROFILE_TIMINGS["articles_skipped_count"] = BACKTEST_PROFILE_TIMINGS.get("articles_skipped_count", 0) + 1
+    if reflection:
+        BACKTEST_PROFILE_TIMINGS["reflections_skipped_count"] = BACKTEST_PROFILE_TIMINGS.get("reflections_skipped_count", 0) + 1
+
+
 def _print_backtest_profile_timings(total_seconds: float) -> None:
     print("backtest profile timings:")
     for key in ["fetch_prices", "indicator", "screening", "scoring", "trading", "report"]:
         print(f"- {key} seconds: {BACKTEST_PROFILE_TIMINGS.get(key, 0.0):.2f}")
+    for key in ["daily_reports_skipped_count", "articles_skipped_count", "reflections_skipped_count"]:
+        print(f"- {key}: {int(BACKTEST_PROFILE_TIMINGS.get(key, 0) or 0)}")
     print(f"- total seconds: {total_seconds:.2f}")
     print("")
     print("Performance Summary")
     for key in ["fetch_prices", "indicator", "screening", "scoring", "trading", "report"]:
         print(f"- {key}: {BACKTEST_PROFILE_TIMINGS.get(key, 0.0):.2f}s")
+    for key in ["daily_reports_skipped_count", "articles_skipped_count", "reflections_skipped_count"]:
+        print(f"- {key}: {int(BACKTEST_PROFILE_TIMINGS.get(key, 0) or 0)}")
     print(f"- total_runtime: {total_seconds:.2f}s")
 
 
@@ -9532,6 +10021,7 @@ def _daily_detail_logs_enabled(config: dict[str, Any] | None = None) -> bool:
 def _score_cache_payload(config: dict[str, Any], target_date_text: str) -> dict[str, str]:
     signature = _experiment_scoring_signature(config)
     settings_hash = hashlib.sha1(signature.encode("utf-8")).hexdigest()[:16]
+    market_filter_hash = _market_filter_hash(config)
     cache_key = hashlib.sha1(
         json.dumps(
             {
@@ -9539,26 +10029,30 @@ def _score_cache_payload(config: dict[str, Any], target_date_text: str) -> dict[
                 "config_version": config_version_from(config),
                 "date": target_date_text,
                 "settings_hash": settings_hash,
+                "market_filter_hash": market_filter_hash,
             },
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()[:20]
-    return {"scoring_settings_hash": settings_hash, "scoring_cache_key": cache_key}
+    return {
+        "scoring_settings_hash": settings_hash,
+        "scoring_config_hash": config_version_from(config),
+        "market_filter_hash": market_filter_hash,
+        "scoring_cache_key": cache_key,
+    }
+
+
+def _market_filter_hash(config: dict[str, Any]) -> str:
+    payload = config.get("market_filter", {})
+    return hashlib.sha1(
+        json.dumps(payload if isinstance(payload, dict) else {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
 
 
 def _scored_candidates_cache_valid(payload: dict[str, Any], config: dict[str, Any], target_date_text: str) -> bool:
-    if str(payload.get("date") or "") != target_date_text:
-        return False
-    if str(payload.get("profile_id") or profile_id_from(config)) != profile_id_from(config):
-        return False
-    expected = _score_cache_payload(config, target_date_text)
-    if payload.get("scoring_cache_key") == expected["scoring_cache_key"]:
-        return True
-    # Older caches did not include a scoring hash. Accept matching config_version
-    # so existing long backtest caches are not invalidated all at once.
-    return not payload.get("scoring_cache_key") and payload.get("config_version") == config_version_from(config)
+    return _score_payload_cache_issue(payload, config, target_date_text) == ""
 
 
 def _scored_payload_as_scoring_log(payload: dict[str, Any], provider_name: str, target_date_text: str) -> dict[str, Any]:
@@ -9806,6 +10300,14 @@ def ensure_indicators(provider_name: str, target_date_text: str) -> None:
     profile_path = processed_profile_path(config, f"indicators_{target_date_text}.json")
     indicator_mode = _backtest_indicator_mode(config) if BACKTEST_MODE_ACTIVE else "full"
     enable_relative_strength = _relative_strength_enabled_for_indicators(config)
+    if BACKTEST_MODE_ACTIVE and _restore_common_processed_cache(config, "indicators", target_date_text, profile_path):
+        payload = read_json(profile_path)
+        if _indicator_cache_matches_current_scoring(payload, config, indicator_mode, enable_relative_strength):
+            _ensure_relative_strength_benchmark_cache(config, date.fromisoformat(target_date_text), indicator_mode, enable_relative_strength)
+            write_json(path, payload)
+            _record_cache_source("indicators", "common")
+            print(f"{BACKTEST_DAY_LOG_PREFIX} indicators cache hit source=common path={_common_processed_cache_path(config, 'indicators', target_date_text).relative_to(ROOT)}")
+            return
     if BACKTEST_MODE_ACTIVE and profile_path.exists():
         payload = read_json(profile_path)
         if _indicator_cache_matches_current_scoring(payload, config, indicator_mode, enable_relative_strength):
@@ -9814,14 +10316,8 @@ def ensure_indicators(provider_name: str, target_date_text: str) -> None:
             _save_common_processed_cache(config, "indicators", target_date_text, payload)
             _link_profile_processed_cache_to_common(config, "indicators", target_date_text, profile_path)
             COMMON_CACHE_METRICS["profile_specific_cache_count"] = COMMON_CACHE_METRICS.get("profile_specific_cache_count", 0) + 1
-            print(f"{BACKTEST_DAY_LOG_PREFIX} indicators cache hit: {profile_path.relative_to(ROOT)}")
-            return
-    if BACKTEST_MODE_ACTIVE and _restore_common_processed_cache(config, "indicators", target_date_text, profile_path):
-        payload = read_json(profile_path)
-        if _indicator_cache_matches_current_scoring(payload, config, indicator_mode, enable_relative_strength):
-            _ensure_relative_strength_benchmark_cache(config, date.fromisoformat(target_date_text), indicator_mode, enable_relative_strength)
-            write_json(path, payload)
-            print(f"{BACKTEST_DAY_LOG_PREFIX} indicators common cache hit: {profile_path.relative_to(ROOT)}")
+            _record_cache_source("indicators", "profile")
+            print(f"{BACKTEST_DAY_LOG_PREFIX} indicators cache hit source=profile path={profile_path.relative_to(ROOT)}")
             return
     if path.exists() and not BACKTEST_MODE_ACTIVE:
         return
@@ -9829,27 +10325,38 @@ def ensure_indicators(provider_name: str, target_date_text: str) -> None:
         payload = read_json(path)
         if _indicator_cache_matches_current_scoring(payload, config, indicator_mode, enable_relative_strength):
             _ensure_relative_strength_benchmark_cache(config, date.fromisoformat(target_date_text), indicator_mode, enable_relative_strength)
+            _record_cache_source("indicators", "legacy")
             return
+    _record_cache_source("indicators", "generated")
     run_calculate_indicators(provider_name, target_date_text)
 
 
 def ensure_screen(provider_name: str, target_date_text: str) -> None:
     config = load_config(CONFIG_PATH)
     path = processed_profile_path(config, f"candidates_{target_date_text}.json")
+    if BACKTEST_MODE_ACTIVE and _restore_common_processed_cache(config, "candidates", target_date_text, path):
+        payload = _candidate_payload_with_market_sections(read_json(path), config)
+        write_json(path, payload)
+        _update_common_processed_cache(config, "candidates", target_date_text, payload)
+        save_screening_results(config, ROOT, payload)
+        _record_cache_source("candidates", "common")
+        print(f"{BACKTEST_DAY_LOG_PREFIX} candidates cache hit source=common path={_common_processed_cache_path(config, 'candidates', target_date_text).relative_to(ROOT)}")
+        return
     if path.exists():
         screening_path = ROOT / "logs" / "screening" / profile_id_from(config) / f"screening_{target_date_text}.json"
-        payload = read_json(screening_path) if screening_path.exists() else read_json(path)
+        candidate_payload = _candidate_payload_with_market_sections(read_json(path), config)
+        write_json(path, candidate_payload)
+        _update_common_processed_cache(config, "candidates", target_date_text, candidate_payload)
+        payload_source = read_json(screening_path) if screening_path.exists() else candidate_payload
+        payload = _candidate_payload_with_market_sections(payload_source, config)
         payload.setdefault("config_version", config_version_from(config))
         save_screening_results(config, ROOT, payload)
-        _save_common_processed_cache(config, "candidates", target_date_text, read_json(path))
+        _save_common_processed_cache(config, "candidates", target_date_text, candidate_payload)
         _link_profile_processed_cache_to_common(config, "candidates", target_date_text, path)
         COMMON_CACHE_METRICS["profile_specific_cache_count"] = COMMON_CACHE_METRICS.get("profile_specific_cache_count", 0) + 1
+        _record_cache_source("candidates", "profile")
         return
-    if BACKTEST_MODE_ACTIVE and _restore_common_processed_cache(config, "candidates", target_date_text, path):
-        payload = read_json(path)
-        save_screening_results(config, ROOT, payload)
-        print(f"{BACKTEST_DAY_LOG_PREFIX} candidates common cache hit: {path.relative_to(ROOT)}")
-        return
+    _record_cache_source("candidates", "generated")
     run_screen(provider_name, target_date_text)
 
 
@@ -9859,8 +10366,9 @@ def ensure_score(provider_name: str, target_date_text: str) -> dict[str, Any]:
     if not path.exists():
         run_score(provider_name, target_date_text)
     payload = read_json(path)
-    if not _scored_candidates_cache_valid(payload, config, target_date_text):
-        print(f"{BACKTEST_DAY_LOG_PREFIX} scoring cache stale: {path.relative_to(ROOT)}")
+    stale_reason = _score_payload_cache_issue(payload, config, target_date_text)
+    if stale_reason:
+        print(f"{BACKTEST_DAY_LOG_PREFIX} scoring cache stale: {path.relative_to(ROOT)} reason={stale_reason}; regenerating")
         run_score(provider_name, target_date_text)
         payload = read_json(path)
     payload.setdefault("config_version", config_version_from(config))
@@ -9898,9 +10406,12 @@ def _copy_reusable_scoring_for_active_profile(target_date_text: str) -> dict[str
     source_log = ROOT / "logs" / "scoring" / source_profile_id / f"scoring_{target_date_text}.json"
     if not source_processed.exists():
         return None
+    source_payload = read_json(source_processed)
+    if _score_payload_cache_issue(source_payload, source_config, target_date_text):
+        return None
     target_processed = processed_profile_path(target_config, f"scored_candidates_{target_date_text}.json")
     target_log = ROOT / "logs" / "scoring" / target_profile_id / f"scoring_{target_date_text}.json"
-    processed_payload = _with_profile_metadata(read_json(source_processed), target_config)
+    processed_payload = _with_profile_metadata(source_payload, target_config)
     processed_payload.update(_score_cache_payload(target_config, target_date_text))
     if source_log.exists():
         scoring_payload = _with_profile_metadata(read_json(source_log), target_config)
@@ -9951,6 +10462,7 @@ RUNTIME_SCORE_FIELDS = {
 }
 
 ANALYSIS_SCORE_FIELDS = RUNTIME_SCORE_FIELDS | {
+    "score_components",
     "sector_momentum_score", "sector_rank", "sector_comment", "sector_score_adjustment",
     "five_day_volatility", "five_day_change_rate",
     "stock_return_5d", "stock_return_10d", "stock_return_20d",
@@ -9970,6 +10482,7 @@ ANALYSIS_SCORE_FIELDS = RUNTIME_SCORE_FIELDS | {
 
 RUNTIME_TRADE_FIELDS = {
     "trade_id", "profile_id", "profile_name", "action", "code", "name", "sector_name",
+    "section", "market_section", "listing_market",
     "signal_date", "entry_date", "exit_date", "holding_days", "entry_price",
     "entry_price_source", "signal_close_price", "entry_open_price", "entry_gap_rate",
     "exit_price", "shares", "amount", "profit", "profit_rate", "exit_reason",
@@ -10153,11 +10666,13 @@ def execute_trade_for_date(provider_name: str, target_date_text: str) -> dict[st
         state = initial_live_paper_state(config)
         scored_candidates = enrich_candidates_with_position_prices(scored_payload.get("scores", []), state, target_date_text)
 
+    portfolio_started = time.perf_counter()
     updated_state, portfolio_summary, trades = execute_real_data_paper_trade(scored_candidates, state, config, target_date_text)
     attach_config_version(portfolio_summary, config)
     for trade in trades:
         trade.setdefault("config_version", config_version_from(config))
     attach_commentary(portfolio_summary, trades, scored_candidates, config)
+    _record_backtest_phase_time("portfolio_update", time.perf_counter() - portfolio_started)
 
     storage_trades = _trades_for_storage(trades, config)
     write_json(state_path, updated_state)
@@ -10697,23 +11212,34 @@ def write_real_summary_csvs() -> tuple[Path, Path]:
     return summary_csv, trades_csv
 
 
-def load_trade_rows_for_csv(config: dict[str, Any], root: Path = ROOT) -> list[dict[str, Any]]:
+def load_trade_rows_for_csv(
+    config: dict[str, Any],
+    root: Path = ROOT,
+    start_date_text: str | None = None,
+    end_date_text: str | None = None,
+) -> list[dict[str, Any]]:
     initialize_database(config, root)
     db_path = get_database_path(config, root)
     if not db_path.exists():
         return []
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
+        params: list[Any] = [profile_id_from(config)]
+        date_filter = ""
+        if start_date_text and end_date_text:
+            date_filter = "AND COALESCE(exit_date, entry_date) BETWEEN ? AND ?"
+            params.extend([start_date_text, end_date_text])
         rows = connection.execute(
-            """
+            f"""
             SELECT *
             FROM trades
             WHERE profile_id = ?
               AND order_status = 'FILLED'
               AND action IN ('BUY', 'SELL')
+              {date_filter}
             ORDER BY entry_date, exit_date, id
             """,
-            (profile_id_from(config),),
+            tuple(params),
         ).fetchall()
     return [_normalize_trade_row_for_csv(dict(row)) for row in rows]
 
@@ -10731,8 +11257,13 @@ def _normalize_trade_row_for_csv(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-def write_trades_csv_from_db(config: dict[str, Any], root: Path = ROOT) -> tuple[Path, int, int]:
-    rows = load_trade_rows_for_csv(config, root)
+def write_trades_csv_from_db(
+    config: dict[str, Any],
+    root: Path = ROOT,
+    start_date_text: str | None = None,
+    end_date_text: str | None = None,
+) -> tuple[Path, int, int]:
+    rows = load_trade_rows_for_csv(config, root, start_date_text, end_date_text)
     trades_csv = root / "reports" / profile_id_from(config) / "trades.csv"
     write_trades_csv(trades_csv, rows)
     return trades_csv, len(rows), count_csv_data_rows(trades_csv)
@@ -11203,9 +11734,9 @@ def _backtest_date_range_limited_reason(
         return "no_processed_days"
     if last_processed_day < expected_processing_end_date:
         return "processed_ends_before_expected_processing_end_date"
-    candidates_last = processed_data_audit.get("candidates_last_date")
-    scored_last = processed_data_audit.get("scored_candidates_last_date")
-    indicators_last = processed_data_audit.get("indicators_last_date")
+    candidates_last = processed_data_audit.get("candidates_last_date_in_range") or processed_data_audit.get("candidates_last_date")
+    scored_last = processed_data_audit.get("scored_candidates_last_date_in_range") or processed_data_audit.get("scored_candidates_last_date")
+    indicators_last = processed_data_audit.get("indicators_last_date_in_range") or processed_data_audit.get("indicators_last_date")
     if indicators_last and candidates_last and candidates_last < indicators_last:
         return "candidates_end_before_indicators"
     if candidates_last and scored_last and scored_last < candidates_last:
@@ -11442,7 +11973,23 @@ def write_backtest_summary(
         "date_resolution": resolved_dates,
         "date_range_audit": date_range_audit or {},
         "execution_model": execution_model,
-        "market_coverage": build_market_coverage_summary(backtest_dir),
+        "market_coverage": build_market_coverage_summary(
+            backtest_dir,
+            config,
+            [
+                str(item.get("date"))
+                for item in daily_summaries
+                if item.get("date") and start_date_text <= str(item.get("date")) <= end_date_text
+            ],
+        ),
+        "market_filter_audit": build_market_filter_audit(
+            config,
+            [
+                str(item.get("date"))
+                for item in daily_summaries
+                if item.get("date") and start_date_text <= str(item.get("date")) <= end_date_text
+            ],
+        ),
         "profile_id": profile_id_from(config),
         "profile_name": profile_name_from(config),
         "provider": "jquants",
@@ -11480,9 +12027,35 @@ def write_backtest_summary(
         "daily_asset_curve": daily_asset_curve,
         "dealer_comment": _backtest_dealer_comment(final_assets, initial_capital, closed_trades),
     }
+    result_integrity_audit = build_backtest_result_integrity_audit(
+        config,
+        all_trades,
+        backtest_dir,
+        start_date_text,
+        end_date_text,
+        daily_summaries,
+    )
+    summary["backtest_result_integrity_audit"] = result_integrity_audit
+    score_integrity_audit = build_score_integrity_audit(
+        config,
+        all_trades,
+        backtest_dir,
+        start_date_text,
+        end_date_text,
+        daily_summaries,
+    )
+    summary["score_integrity_audit"] = score_integrity_audit
     integrity_audit = build_backtest_integrity_audit(config, all_trades, backtest_dir, date_range_audit or {})
     summary["backtest_integrity_audit"] = integrity_audit
-    summary["evaluation_label"] = "final_evaluation" if integrity_audit.get("overall_status") == "OK" else "experimental"
+    summary["evaluation_label"] = (
+        "final_evaluation"
+        if (
+            integrity_audit.get("overall_status") == "OK"
+            and result_integrity_audit.get("result_integrity_status") == "OK"
+            and score_integrity_audit.get("score_integrity_status") == "OK"
+        )
+        else "experimental"
+    )
     report_json_path = ROOT / "reports" / profile_id_from(config) / f"backtest_{range_key}.json"
     report_md_path = ROOT / "reports" / profile_id_from(config) / f"backtest_{range_key}.md"
     rule_based_90d_report_path = ROOT / "reports" / "backtests" / f"rule_based_90d_summary_{range_key}.md"
@@ -11516,17 +12089,36 @@ def _date_resolution_with_coverage(
     return resolved
 
 
-def build_market_coverage_summary(backtest_dir: Path) -> dict[str, Any]:
+def build_market_coverage_summary(
+    backtest_dir: Path,
+    config: dict[str, Any] | None = None,
+    run_dates: list[str] | None = None,
+) -> dict[str, Any]:
     candidate_counts = {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0}
     selected_counts = {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0}
     excluded_count = 0
-    for scoring_file in sorted(backtest_dir.glob("scoring_*.json")):
-        try:
-            payload = read_json(scoring_file)
-        except Exception:
-            continue
-        scores = payload.get("scores", [])
+    files_read = 0
+    source = "unavailable"
+    if config and run_dates:
+        payloads = [_load_current_scored_payload_for_day(config, backtest_dir, day) for day in run_dates]
+        payloads = [payload for payload in payloads if payload]
+        files_read = len(payloads)
+        source = "scored_candidates_period"
+    else:
+        payloads = []
+        for scoring_file in sorted(backtest_dir.glob("scoring_*.json")):
+            try:
+                payloads.append(read_json(scoring_file))
+            except Exception:
+                continue
+        files_read = len(payloads)
+        source = "scoring_logs_period" if payloads else "unavailable"
+    for payload in payloads:
+        scores = _fill_market_sections_from_master(payload.get("scores", []))
         selected = [item for item in scores if item.get("selected")]
+        if not scores and payload.get("selected"):
+            selected = _fill_market_sections_from_master([item for item in payload.get("selected", []) if isinstance(item, dict)])
+            scores = selected
         _merge_count_dict(candidate_counts, market_section_counts(scores))
         _merge_count_dict(selected_counts, market_section_counts(selected))
         market_filter = payload.get("market_filter", {})
@@ -11538,6 +12130,275 @@ def build_market_coverage_summary(backtest_dir: Path) -> dict[str, Any]:
         "candidate_count": candidate_counts,
         "selected_count": selected_counts,
         "market_filter_excluded_count": excluded_count,
+        "source": source,
+        "files_read": files_read,
+    }
+
+
+def build_market_filter_audit(config: dict[str, Any], run_dates: list[str]) -> dict[str, Any]:
+    listed_info_stats = _listed_stock_master_stats()
+    before_counts = {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0}
+    after_counts = {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0}
+    excluded_counts = {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0}
+    lookup_source: dict[str, int] = {}
+    samples = []
+    files_read = 0
+    raw_candidate_count = 0
+    listed_info_match_count = 0
+    listed_info_missing_count = 0
+    market_section_filled_from_master_count = 0
+    post_filter_validation = {"status": "OK", "unknown_market_count": 0, "violation_count": 0, "sample": []}
+    for day in run_dates:
+        payload = _load_candidate_payload_for_market_audit(config, day)
+        if not payload:
+            continue
+        files_read += 1
+        coverage = payload.get("market_coverage", {}) if isinstance(payload.get("market_coverage"), dict) else {}
+        filtered = _apply_market_section_filter(payload.get("candidates", []), config)
+        candidates = filtered["allowed"]
+        all_candidate_rows = [*filtered["allowed"], *filtered["excluded"]]
+        fill_stats = _market_section_fill_stats(payload.get("candidates", []), all_candidate_rows)
+        market_section_filled_from_master_count += fill_stats["market_section_filled_from_master_count"]
+        input_counts = coverage.get("input_counts", {}) if isinstance(coverage.get("input_counts"), dict) else {}
+        if input_counts and any(int(value or 0) for value in input_counts.values()) and not candidates:
+            raw_candidate_count += sum(int(value or 0) for value in input_counts.values())
+            _merge_count_dict(before_counts, input_counts)
+            listed_info_match_count += sum(int(value or 0) for key, value in input_counts.items() if key != "Unknown")
+            listed_info_missing_count += int(input_counts.get("Unknown", 0) or 0)
+        elif input_counts and sum(int(value or 0) for value in input_counts.values()) >= len(candidates):
+            raw_candidate_count += sum(int(value or 0) for value in input_counts.values())
+            _merge_count_dict(before_counts, input_counts)
+            listed_info_match_count += sum(int(value or 0) for key, value in input_counts.items() if key != "Unknown")
+            listed_info_missing_count += int(input_counts.get("Unknown", 0) or 0)
+        else:
+            raw_candidate_count += len(all_candidate_rows)
+            _merge_count_dict(before_counts, market_section_counts(all_candidate_rows))
+            listed_info_match_count += fill_stats["listed_info_match_count"]
+            listed_info_missing_count += fill_stats["listed_info_missing_count"]
+        allowed_counts = coverage.get("allowed_counts", {}) if isinstance(coverage.get("allowed_counts"), dict) else {}
+        if candidates:
+            _merge_count_dict(after_counts, market_section_counts(candidates))
+        else:
+            _merge_count_dict(after_counts, allowed_counts)
+        coverage_excluded_counts = coverage.get("excluded_counts", {}) if isinstance(coverage.get("excluded_counts"), dict) else {}
+        if coverage_excluded_counts and any(int(value or 0) for value in coverage_excluded_counts.values()):
+            _merge_count_dict(excluded_counts, coverage_excluded_counts)
+        else:
+            _merge_count_dict(excluded_counts, filtered["excluded_counts"])
+        validation = _candidate_market_filter_validation(candidates, config)
+        post_filter_validation["unknown_market_count"] += int(validation.get("unknown_market_count", 0) or 0)
+        post_filter_validation["violation_count"] += int(validation.get("violation_count", 0) or 0)
+        if validation.get("status") != "OK":
+            post_filter_validation["status"] = "ERROR"
+        post_filter_validation["sample"].extend(validation.get("sample", [])[: max(0, 20 - len(post_filter_validation["sample"]))])
+        for key, value in (coverage.get("market_section_lookup_source", {}) or {}).items():
+            lookup_source[str(key)] = int(lookup_source.get(str(key), 0)) + int(value or 0)
+        for item in coverage.get("sample", []) or []:
+            if len(samples) >= 50:
+                break
+            samples.append(_market_filter_sample_with_master(item, config))
+        if not coverage.get("sample"):
+            for item in candidates:
+                if len(samples) >= 50:
+                    break
+                allowed_flag = market_section_allowed(item, config)
+                samples.append(
+                    {
+                        "date": item.get("date"),
+                        "code": item.get("code"),
+                        "market_section": market_section_from_row(item),
+                        "allowed": allowed_flag,
+                        "excluded_reason": "" if allowed_flag else "market_filter_excluded",
+                    }
+                )
+    after_count = sum(after_counts.values())
+    excluded_count = sum(excluded_counts.values())
+    unknown_market_count = int(before_counts.get("Unknown", 0) or 0)
+    return {
+        "raw_candidate_count": raw_candidate_count,
+        "candidate_market_breakdown_before_filter": before_counts,
+        "candidate_market_breakdown_after_filter": after_counts,
+        "excluded_market_breakdown": excluded_counts,
+        "unknown_market_count": unknown_market_count,
+        "market_section_missing_count": unknown_market_count,
+        "market_section_lookup_source": lookup_source or {"unavailable": 0},
+        "listed_info_total_count": listed_info_stats["total_count"],
+        "listed_info_loaded_count": listed_info_stats["loaded_count"],
+        "listed_info_match_count": listed_info_match_count,
+        "listed_info_missing_count": listed_info_missing_count,
+        "market_section_filled_from_master_count": market_section_filled_from_master_count,
+        "market_section_fill_rate": round(listed_info_match_count / raw_candidate_count, 4) if raw_candidate_count else None,
+        "allowed_sections": sorted(allowed_market_sections(config)),
+        "allow_unknown_market": bool(config.get("market_filter", {}).get("allow_unknown_market", False)),
+        "files_read": files_read,
+        "after_filter_count": after_count,
+        "excluded_count": excluded_count,
+        "post_filter_validation": post_filter_validation,
+        "listed_info_match_rate": round(listed_info_match_count / raw_candidate_count, 4) if raw_candidate_count else None,
+        "samples": samples,
+    }
+
+
+def _load_candidate_payload_for_market_audit(config: dict[str, Any], day: str) -> dict[str, Any]:
+    paths = [
+        processed_profile_path(config, f"candidates_{day}.json"),
+        _common_processed_cache_path(config, "candidates", day),
+    ]
+    for path in paths:
+        if path.exists():
+            payload = read_json(path)
+            return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+def _candidate_payload_with_market_sections(payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    copied = dict(payload)
+    original_candidates = copied.get("candidates", [])
+    filtered = _apply_market_section_filter(original_candidates, config)
+    candidates = filtered["allowed"]
+    copied["candidates"] = candidates
+    copied["candidate_count"] = len(candidates)
+
+    coverage = copied.get("market_coverage", {}) if isinstance(copied.get("market_coverage"), dict) else {}
+    coverage = dict(coverage)
+    previous_input_counts = coverage.get("input_counts", {}) if isinstance(coverage.get("input_counts"), dict) else {}
+    previous_excluded_counts = coverage.get("excluded_counts", {}) if isinstance(coverage.get("excluded_counts"), dict) else {}
+    previous_input_total = sum(int(value or 0) for value in previous_input_counts.values()) if previous_input_counts else 0
+    previous_excluded_total = sum(int(value or 0) for value in previous_excluded_counts.values()) if previous_excluded_counts else 0
+    candidate_counts = market_section_counts(candidates)
+    filled_candidates = [*filtered["allowed"], *filtered["excluded"]]
+    fill_stats = _market_section_fill_stats(original_candidates, filled_candidates)
+    coverage["candidate_counts"] = candidate_counts
+    if previous_input_total > len(original_candidates):
+        coverage["input_counts"] = previous_input_counts
+    else:
+        coverage["input_counts"] = filtered["input_counts"]
+    coverage["allowed_counts"] = candidate_counts
+    if previous_input_total > len(original_candidates) and previous_excluded_total:
+        coverage["excluded_counts"] = previous_excluded_counts
+        coverage["market_filter_excluded_count"] = previous_excluded_total
+    else:
+        coverage["excluded_counts"] = filtered["excluded_counts"]
+        coverage["market_filter_excluded_count"] = filtered["excluded_count"]
+    coverage["unknown_market_count"] = candidate_counts.get("Unknown", 0)
+    coverage["listed_info_match_count"] = fill_stats["listed_info_match_count"]
+    coverage["listed_info_missing_count"] = fill_stats["listed_info_missing_count"]
+    coverage["market_section_filled_from_master_count"] = fill_stats["market_section_filled_from_master_count"]
+    coverage["allowed_sections"] = sorted(allowed_market_sections(config))
+    coverage["allow_unknown_market"] = bool(config.get("market_filter", {}).get("allow_unknown_market", False))
+    if previous_input_total > len(original_candidates) and isinstance(coverage.get("market_section_lookup_source"), dict):
+        coverage["market_section_lookup_source"] = coverage.get("market_section_lookup_source", {})
+    else:
+        coverage["market_section_lookup_source"] = filtered.get("lookup_source", {})
+    if previous_input_total > len(original_candidates) and coverage.get("sample"):
+        coverage["sample"] = coverage.get("sample", [])
+    else:
+        coverage["sample"] = filtered.get("sample", [])
+    coverage["post_filter_validation"] = _candidate_market_filter_validation(candidates, config)
+    copied["market_coverage"] = coverage
+    return copied
+
+
+def _candidate_market_filter_validation(candidates: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, Any]:
+    violations = [
+        {
+            "date": item.get("date"),
+            "code": item.get("code"),
+            "market_section": market_section_from_row(item),
+        }
+        for item in candidates
+        if not market_section_allowed(item, config)
+    ]
+    unknown_count = market_section_counts(candidates).get("Unknown", 0)
+    return {
+        "status": "OK" if not violations else "ERROR",
+        "candidate_count": len(candidates),
+        "unknown_market_count": unknown_count,
+        "violation_count": len(violations),
+        "sample": violations[:20],
+    }
+
+
+def _fill_market_sections_from_master(rows: Any) -> list[dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+    stock_by_code = _listed_stock_master_by_code_with_aliases()
+    filled = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        current_section = market_section_from_row(row)
+        if current_section != "Unknown":
+            filled.append(attach_market_section_fields(row, current_section))
+            continue
+        stock = _lookup_stock_by_code(stock_by_code, row.get("code"))
+        stock_section = market_section_from_row(stock) if stock else "Unknown"
+        if stock_section != "Unknown":
+            filled.append(attach_market_section_fields(row, stock_section))
+        else:
+            filled.append(attach_market_section_fields(row, "Unknown"))
+    return filled
+
+
+def _listed_stock_master_by_code_with_aliases() -> dict[str, dict[str, Any]]:
+    stock_by_code: dict[str, dict[str, Any]] = {}
+    for stock in _listed_stock_master():
+        code = str(stock.get("code") or "").strip()
+        if not code:
+            continue
+        for key in _stock_code_lookup_keys(code):
+            stock_by_code.setdefault(key, stock)
+    return stock_by_code
+
+
+def _lookup_stock_by_code(stock_by_code: dict[str, dict[str, Any]], code: Any) -> dict[str, Any] | None:
+    for key in _stock_code_lookup_keys(str(code or "")):
+        stock = stock_by_code.get(key)
+        if stock:
+            return stock
+    return None
+
+
+def _stock_code_lookup_keys(code: str) -> list[str]:
+    raw = str(code or "").strip()
+    if not raw:
+        return []
+    keys = [raw]
+    if raw.isdigit():
+        keys.append(raw.zfill(5))
+        if len(raw) == 4:
+            keys.append(f"{raw}0")
+        if len(raw) == 5 and raw.endswith("0"):
+            keys.append(raw[:4])
+    return list(dict.fromkeys(keys))
+
+
+def _market_section_fill_stats(original_rows: Any, filled_rows: list[dict[str, Any]]) -> dict[str, int]:
+    originals = [row for row in original_rows if isinstance(row, dict)] if isinstance(original_rows, list) else []
+    listed_info_match_count = sum(1 for row in filled_rows if market_section_from_row(row) != "Unknown")
+    listed_info_missing_count = len(filled_rows) - listed_info_match_count
+    filled_from_master = 0
+    for original, filled in zip(originals, filled_rows):
+        if market_section_from_row(original) == "Unknown" and market_section_from_row(filled) != "Unknown":
+            filled_from_master += 1
+    return {
+        "listed_info_match_count": listed_info_match_count,
+        "listed_info_missing_count": listed_info_missing_count,
+        "market_section_filled_from_master_count": filled_from_master,
+    }
+
+
+def _market_filter_sample_with_master(item: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    filled = _fill_market_sections_from_master([item])
+    row = filled[0] if filled else item
+    allowed_flag = market_section_allowed(row, config)
+    return {
+        **item,
+        "market_section": market_section_from_row(row),
+        "allowed": allowed_flag,
+        "excluded_reason": item.get("excluded_reason") or ("" if allowed_flag else "market_filter_excluded"),
     }
 
 
@@ -11599,6 +12460,18 @@ def render_backtest_summary_markdown(summary: dict[str, Any], config: dict[str, 
         "## Market Coverage",
         "",
         *_market_coverage_lines(summary.get("market_coverage", {})),
+        "",
+        "## Market Filter Audit",
+        "",
+        *_market_filter_audit_lines(summary.get("market_filter_audit", {})),
+        "",
+        "## Backtest Result Integrity Audit",
+        "",
+        *_backtest_result_integrity_audit_lines(summary.get("backtest_result_integrity_audit", {})),
+        "",
+        "## Score Integrity Audit",
+        "",
+        *_score_integrity_audit_lines(summary.get("score_integrity_audit", {})),
         "",
         "## Backtest Integrity Audit",
         "",
@@ -11817,6 +12690,641 @@ def _market_coverage_lines(coverage: dict[str, Any]) -> list[str]:
         f"- Unknown selected count: {selected.get('Unknown', 0)}",
         f"- market_filter_excluded_count: {coverage.get('market_filter_excluded_count', 0)}",
     ]
+
+
+def _market_filter_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- audit: unavailable"]
+    lines = [
+        f"- raw_candidate_count: {audit.get('raw_candidate_count', 0)}",
+        f"- candidate_market_breakdown_before_filter: {_compact_json(audit.get('candidate_market_breakdown_before_filter', {}))}",
+        f"- candidate_market_breakdown_after_filter: {_compact_json(audit.get('candidate_market_breakdown_after_filter', {}))}",
+        f"- excluded_market_breakdown: {_compact_json(audit.get('excluded_market_breakdown', {}))}",
+        f"- unknown_market_count: {audit.get('unknown_market_count', 0)}",
+        f"- market_section_fill_rate: {_format_optional_percent(audit.get('market_section_fill_rate'))}",
+        f"- market_section_missing_count: {audit.get('market_section_missing_count', 0)}",
+        f"- market_section_lookup_source: {_compact_json(audit.get('market_section_lookup_source', {}))}",
+        f"- listed_info_total_count: {audit.get('listed_info_total_count', 0)}",
+        f"- listed_info_loaded_count: {audit.get('listed_info_loaded_count', 0)}",
+        f"- listed_info_match_count: {audit.get('listed_info_match_count', 0)}",
+        f"- listed_info_missing_count: {audit.get('listed_info_missing_count', 0)}",
+        f"- market_section_filled_from_master_count: {audit.get('market_section_filled_from_master_count', 0)}",
+        f"- allowed_sections: {_compact_json(audit.get('allowed_sections', []))}",
+        f"- allow_unknown_market: {str(bool(audit.get('allow_unknown_market'))).lower()}",
+        f"- listed_info_match_rate: {_format_optional_percent(audit.get('listed_info_match_rate'))}",
+        f"- files_read: {audit.get('files_read', 0)}",
+        "",
+        "| date | code | market_section | allowed | excluded_reason |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    samples = audit.get("samples", []) or []
+    if not samples:
+        lines.append("| - | - | - | - | - |")
+    for item in samples[:20]:
+        lines.append(
+            f"| {item.get('date') or ''} | {item.get('code') or ''} | {item.get('market_section') or 'Unknown'} | "
+            f"{str(bool(item.get('allowed'))).lower()} | {item.get('excluded_reason') or ''} |"
+        )
+    return lines
+
+
+def build_backtest_result_integrity_audit(
+    config: dict[str, Any],
+    all_trades: list[dict[str, Any]],
+    backtest_dir: Path,
+    start_date_text: str,
+    end_date_text: str,
+    daily_summaries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    run_dates = [
+        str(item.get("date"))
+        for item in daily_summaries
+        if item.get("date") and start_date_text <= str(item.get("date")) <= end_date_text
+    ]
+    score_rows, selected_rows = _score_rows_for_result_integrity(config, backtest_dir, run_dates)
+    selected_keys = {_selection_trade_key(row) for row in selected_rows if _selection_trade_key(row)}
+    selected_by_key = {_selection_trade_key(row): row for row in selected_rows if _selection_trade_key(row)}
+    buy_trades = [
+        trade
+        for trade in all_trades
+        if str(trade.get("action") or "").upper() == "BUY" and _trade_is_filled_or_unknown(trade)
+    ]
+    sell_trades = [
+        trade
+        for trade in all_trades
+        if str(trade.get("action") or "").upper() == "SELL" and _trade_is_filled_or_unknown(trade)
+    ]
+    buy_missing_key_count = sum(1 for trade in buy_trades if not _trade_selection_key(trade))
+    buy_keys = {_trade_selection_key(trade) for trade in buy_trades if _trade_selection_key(trade)}
+    selected_without_trade = selected_keys - buy_keys
+    trade_without_selected = buy_keys - selected_keys
+    trade_without_selected_count = len(trade_without_selected) + buy_missing_key_count
+    audit_trades = _audit_trade_rows([*buy_trades, *sell_trades], selected_by_key)
+    market_filter_violations = []
+    for row in selected_rows:
+        if not market_section_allowed(row, config):
+            market_filter_violations.append({"date": row.get("date"), "code": row.get("code"), "section": market_section_from_row(row)})
+    for trade in audit_trades:
+        if str(trade.get("action") or "").upper() != "BUY":
+            continue
+        key = _trade_selection_key(trade)
+        row = selected_by_key.get(key or "") or trade
+        if not market_section_allowed(row, config):
+            market_filter_violations.append(
+                {
+                    "date": trade.get("signal_date") or trade.get("date") or trade.get("entry_date"),
+                    "code": trade.get("code"),
+                    "section": market_section_from_row(row),
+                }
+            )
+    out_of_period_trades = [trade for trade in all_trades if _trade_out_of_period(trade, start_date_text, end_date_text)]
+    out_of_range_by_category = BACKTEST_JSON_READ_AUDIT.get("out_of_range_by_category", {})
+    out_of_period_candidate_count = int((out_of_range_by_category or {}).get("candidates", 0) or 0) if isinstance(out_of_range_by_category, dict) else 0
+    out_of_period_scored_candidate_count = int((out_of_range_by_category or {}).get("scored_candidates", 0) or 0) if isinstance(out_of_range_by_category, dict) else 0
+    stale_cache_read_count = int(BACKTEST_JSON_READ_AUDIT.get("out_of_range_count", 0) or 0)
+    profile_cache_used_count = int((COMMON_CACHE_METRICS.get("indicator_cache_source", {}) or {}).get("profile", 0) or 0) + int(
+        (COMMON_CACHE_METRICS.get("candidate_cache_source", {}) or {}).get("profile", 0) or 0
+    )
+    common_cache_used_count = int((COMMON_CACHE_METRICS.get("indicator_cache_source", {}) or {}).get("common", 0) or 0) + int(
+        (COMMON_CACHE_METRICS.get("candidate_cache_source", {}) or {}).get("common", 0) or 0
+    )
+    warnings = []
+    errors = []
+    if trade_without_selected_count:
+        errors.append("buy trade exists without selected candidate in the run period")
+    if market_filter_violations:
+        errors.append("selected/traded row violates market_filter")
+    if out_of_period_trades:
+        errors.append("trade date is outside requested run period")
+    if out_of_period_candidate_count or out_of_period_scored_candidate_count:
+        errors.append("candidate/scored candidate cache outside requested run period was read")
+    if stale_cache_read_count:
+        errors.append("period-outside JSON cache was read")
+    scored_market_candidate_count = market_section_counts(score_rows)
+    scored_market_selected_count = market_section_counts(selected_rows)
+    reported_market_coverage = build_market_coverage_summary(backtest_dir, config, run_dates)
+    reported_market_coverage_has_files = int(reported_market_coverage.get("files_read", 0) or 0) > 0
+    reported_market_candidate_count = reported_market_coverage.get("candidate_count", {})
+    reported_market_selected_count = reported_market_coverage.get("selected_count", {})
+    market_candidate_count = (
+        reported_market_candidate_count
+        if reported_market_coverage_has_files and isinstance(reported_market_candidate_count, dict)
+        else scored_market_candidate_count
+    )
+    market_selected_count = (
+        reported_market_selected_count
+        if reported_market_coverage_has_files and isinstance(reported_market_selected_count, dict)
+        else scored_market_selected_count
+    )
+    market_trade_count = market_section_counts(audit_trades)
+    unknown_market_trade_count = int(market_trade_count.get("Unknown", 0) or 0)
+    total_market_candidates = sum(int(value or 0) for value in market_candidate_count.values())
+    if total_market_candidates == 0 and (buy_trades or sell_trades):
+        errors.append("market_candidate_count is zero but trades exist")
+    if unknown_market_trade_count and not bool(config.get("market_filter", {}).get("allow_unknown_market", False)):
+        errors.append("trade has unknown market_section while allow_unknown_market=false")
+    if not selected_rows and buy_trades:
+        errors.append("selected_count is zero but buy trades exist")
+    if selected_without_trade:
+        warnings.append("selected candidate did not become a BUY trade")
+    if profile_cache_used_count and not common_cache_used_count:
+        warnings.append("profile cache was used while common cache was not reused")
+    status = "ERROR" if errors else "WARNING" if warnings else "OK"
+    return {
+        "selected_count": len(selected_rows),
+        "buy_trade_count": len(buy_trades),
+        "sell_trade_count": len(sell_trades),
+        "selected_without_trade_count": len(selected_without_trade),
+        "trade_without_selected_count": trade_without_selected_count,
+        "market_filter_violation_count": len(market_filter_violations),
+        "out_of_period_candidate_count": out_of_period_candidate_count,
+        "out_of_period_scored_candidate_count": out_of_period_scored_candidate_count,
+        "out_of_period_trade_count": len(out_of_period_trades),
+        "stale_cache_read_count": stale_cache_read_count,
+        "profile_cache_used_count": profile_cache_used_count,
+        "common_cache_used_count": common_cache_used_count,
+        "cache_source_breakdown": {
+            "indicator_cache_source": COMMON_CACHE_METRICS.get("indicator_cache_source", {}),
+            "candidate_cache_source": COMMON_CACHE_METRICS.get("candidate_cache_source", {}),
+            "json_read_scope": _json_read_scope_breakdown(BACKTEST_JSON_READ_AUDIT),
+        },
+        "trade_selected_match_rate": round(((len(buy_keys) - len(trade_without_selected)) / len(buy_trades)), 4) if buy_trades else None,
+        "integrity_error_count": len(errors),
+        "market_coverage_source": reported_market_coverage.get("source", "scored_candidates_period"),
+        "market_candidate_count": market_candidate_count,
+        "market_selected_count": market_selected_count,
+        "scored_market_candidate_count": scored_market_candidate_count,
+        "scored_market_selected_count": scored_market_selected_count,
+        "market_trade_count": market_trade_count,
+        "unknown_market_trade_count": unknown_market_trade_count,
+        "result_integrity_status": status,
+        "warnings": warnings,
+        "errors": errors,
+        "trade_without_selected_sample": sorted(trade_without_selected)[:20],
+        "selected_without_trade_sample": sorted(selected_without_trade)[:20],
+        "market_filter_violation_sample": market_filter_violations[:20],
+        "out_of_period_trade_sample": [
+            {
+                "trade_id": trade.get("trade_id"),
+                "code": trade.get("code"),
+                "signal_date": trade.get("signal_date"),
+                "entry_date": trade.get("entry_date"),
+                "exit_date": trade.get("exit_date"),
+            }
+            for trade in out_of_period_trades[:20]
+        ],
+        "market_trade_samples": _market_trade_samples(audit_trades, selected_keys, trade_without_selected, config),
+    }
+
+
+def _score_rows_for_result_integrity(config: dict[str, Any], backtest_dir: Path, run_dates: list[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    scores: list[dict[str, Any]] = []
+    selected_rows: list[dict[str, Any]] = []
+    profile_id = profile_id_from(config)
+    for day in run_dates:
+        payload = _load_current_scored_payload_for_day(config, backtest_dir, day)
+        day_scores = payload.get("scores", []) if isinstance(payload, dict) else []
+        for row in day_scores:
+            if isinstance(row, dict):
+                scores.append({**row, "date": str(row.get("date") or day), "profile_id": row.get("profile_id") or profile_id})
+        selected = payload.get("selected", []) if isinstance(payload, dict) else []
+        if not selected and isinstance(payload, dict):
+            selected = [item for item in payload.get("scores", []) if item.get("selected")]
+        for row in selected:
+            if isinstance(row, dict):
+                selected_rows.append({**row, "selected": True, "date": str(row.get("date") or day), "profile_id": row.get("profile_id") or profile_id})
+    if not scores:
+        scores = list(selected_rows)
+    return scores, selected_rows
+
+
+def _audit_trade_rows(trades: list[dict[str, Any]], selected_by_key: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    stock_by_code = _listed_stock_master_by_code_with_aliases()
+    rows = []
+    for trade in trades:
+        row = dict(trade)
+        if market_section_from_row(row) == "Unknown":
+            selected = selected_by_key.get(_trade_selection_key(row) or "")
+            if selected and market_section_from_row(selected) != "Unknown":
+                row = {**row, **attach_market_section_fields({}, market_section_from_row(selected))}
+            else:
+                stock = _lookup_stock_by_code(stock_by_code, row.get("code"))
+                if stock and market_section_from_row(stock) != "Unknown":
+                    row = {**row, **attach_market_section_fields({}, market_section_from_row(stock))}
+        rows.append(row)
+    return rows
+
+
+def _market_trade_samples(
+    trades: list[dict[str, Any]],
+    selected_keys: set[str],
+    trade_without_selected: set[str],
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    samples = []
+    for trade in trades[:20]:
+        key = _trade_selection_key(trade)
+        selected_found = bool(key and key in selected_keys)
+        section = market_section_from_row(trade)
+        reasons = []
+        if key in trade_without_selected:
+            reasons.append("trade_without_selected")
+        if section == "Unknown":
+            reasons.append("unknown_market_section")
+        if not market_section_allowed(trade, config):
+            reasons.append("market_filter_violation")
+        samples.append(
+            {
+                "trade_date": trade.get("entry_date") or trade.get("exit_date") or trade.get("date"),
+                "code": trade.get("code"),
+                "name": trade.get("name"),
+                "market_section": section,
+                "selected_found": selected_found,
+                "reason": ",".join(reasons) or "ok",
+            }
+        )
+    return samples
+
+
+def _selection_trade_key(row: dict[str, Any]) -> str:
+    code = str(row.get("code") or "")
+    day = str(row.get("signal_date") or row.get("date") or "")
+    return f"{day}|{code}" if day and code else ""
+
+
+def _trade_selection_key(trade: dict[str, Any]) -> str:
+    code = str(trade.get("code") or "")
+    day = str(trade.get("signal_date") or trade.get("date") or "")
+    return f"{day}|{code}" if day and code else ""
+
+
+def _trade_is_filled_or_unknown(trade: dict[str, Any]) -> bool:
+    status = trade.get("order_status") or trade.get("status")
+    return status in {None, "", "FILLED", "filled", "Filled"}
+
+
+def _trade_out_of_period(trade: dict[str, Any], start_date_text: str, end_date_text: str) -> bool:
+    for value in [trade.get("signal_date"), trade.get("entry_date"), trade.get("exit_date")]:
+        if value and (str(value) < start_date_text or str(value) > end_date_text):
+            return True
+    return False
+
+
+def _backtest_result_integrity_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- audit: unavailable"]
+    keys = [
+        "selected_count",
+        "buy_trade_count",
+        "sell_trade_count",
+        "selected_without_trade_count",
+        "trade_without_selected_count",
+        "market_filter_violation_count",
+        "out_of_period_candidate_count",
+        "out_of_period_scored_candidate_count",
+        "out_of_period_trade_count",
+        "stale_cache_read_count",
+        "profile_cache_used_count",
+        "common_cache_used_count",
+        "cache_source_breakdown",
+        "trade_selected_match_rate",
+        "market_coverage_source",
+        "market_candidate_count",
+        "market_selected_count",
+        "scored_market_candidate_count",
+        "scored_market_selected_count",
+        "market_trade_count",
+        "unknown_market_trade_count",
+        "result_integrity_status",
+    ]
+    lines = [
+        f"- {key}: {_compact_json(audit.get(key)) if isinstance(audit.get(key), dict) else audit.get(key)}"
+        for key in keys
+    ]
+    lines.extend(["", "### Market Trade Samples", ""])
+    samples = audit.get("market_trade_samples", []) or []
+    if samples:
+        lines.append("| trade_date | code | name | market_section | selected_found | reason |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
+        for item in samples[:20]:
+            lines.append(
+                f"| {item.get('trade_date') or ''} | {item.get('code') or ''} | {item.get('name') or ''} | "
+                f"{item.get('market_section') or 'Unknown'} | {str(bool(item.get('selected_found'))).lower()} | {item.get('reason') or ''} |"
+            )
+    else:
+        lines.append("- samples: none")
+    for warning in audit.get("warnings", []) or []:
+        lines.append(f"- warning: {warning}")
+    for error in audit.get("errors", []) or []:
+        lines.append(f"- error: {error}")
+    if audit.get("result_integrity_status") != "OK":
+        lines.append("- conclusion: result_integrity_status が OK になるまで、この収益評価は信用しないでください。")
+    return lines
+
+
+def build_score_integrity_audit(
+    config: dict[str, Any],
+    all_trades: list[dict[str, Any]],
+    backtest_dir: Path,
+    start_date_text: str,
+    end_date_text: str,
+    daily_summaries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    run_dates = [
+        str(item.get("date"))
+        for item in daily_summaries
+        if item.get("date") and start_date_text <= str(item.get("date")) <= end_date_text
+    ]
+    payloads = _scored_payloads_for_integrity(config, backtest_dir, run_dates)
+    rows = [
+        row
+        for payload in payloads
+        for row in _fill_market_sections_from_master(payload.get("scores", []))
+        if isinstance(row, dict)
+    ]
+    selected_rows = [
+        row
+        for payload in payloads
+        for row in _fill_market_sections_from_master(
+            payload.get("selected") or [item for item in payload.get("scores", []) if isinstance(item, dict) and item.get("selected")]
+        )
+        if isinstance(row, dict)
+    ]
+    total_score_mismatch_count = sum(1 for row in rows if not _score_total_matches_formula(row))
+    component_total_mismatch_count = sum(1 for row in rows if not _score_component_total_matches(row))
+    duplicate_score_component_count = sum(1 for row in rows if _score_duplicate_component_warning(row))
+    future_data_leak_count = sum(1 for row in rows if _score_row_has_future_data(row))
+    stale_score_cache_files = _stale_score_cache_files(payloads, config)
+    stale_score_cache_count = len(stale_score_cache_files)
+    profile_config_mismatch_count = sum(1 for payload in payloads if _score_payload_profile_config_mismatch(payload, config))
+    selected_below_threshold_count = sum(1 for row in selected_rows if _selected_below_threshold(row, config))
+    no_trade_fallback_selected_count = sum(1 for row in selected_rows if _no_trade_fallback_selected(row, config))
+    market_filter_after_scoring_violation_count = sum(1 for row in rows if row.get("selected") and not market_section_allowed(row, config))
+    signal_entry_date_violation_count = sum(1 for trade in all_trades if _signal_entry_date_violation(trade, config))
+    errors = []
+    warnings = []
+    if total_score_mismatch_count:
+        errors.append("total_score does not match active score formula")
+    if component_total_mismatch_count:
+        errors.append("score_components_total does not match row total_score")
+    if future_data_leak_count:
+        errors.append("score row contains context dated after signal_date")
+    if stale_score_cache_count:
+        errors.append("scored_candidates cache does not match profile/date/settings")
+    if profile_config_mismatch_count:
+        errors.append("scored_candidates profile_id/config_version does not match active profile")
+    if duplicate_score_component_count:
+        warnings.append("duplicate or deprecated score component detected")
+    if selected_below_threshold_count:
+        warnings.append("selected candidate below min_score threshold")
+    if no_trade_fallback_selected_count:
+        warnings.append("fallback/top-pick selected below regular min_score")
+    if market_filter_after_scoring_violation_count:
+        errors.append("market_filter excluded row remained selected after scoring")
+    if signal_entry_date_violation_count:
+        errors.append("entry_date violates configured signal/entry timing")
+    score_integrity_errors = _score_integrity_error_details(
+        {
+            "total_score_mismatch_count": total_score_mismatch_count,
+            "component_total_mismatch_count": component_total_mismatch_count,
+            "future_data_leak_count": future_data_leak_count,
+            "stale_score_cache_count": stale_score_cache_count,
+            "profile_config_mismatch_count": profile_config_mismatch_count,
+            "market_filter_after_scoring_violation_count": market_filter_after_scoring_violation_count,
+            "signal_entry_date_violation_count": signal_entry_date_violation_count,
+        }
+    )
+    status = "ERROR" if errors else "WARNING" if warnings else "OK"
+    return {
+        "score_integrity_status": status,
+        "score_integrity_errors": score_integrity_errors,
+        "total_score_mismatch_count": total_score_mismatch_count,
+        "component_total_mismatch_count": component_total_mismatch_count,
+        "future_data_leak_count": future_data_leak_count,
+        "stale_score_cache_count": stale_score_cache_count,
+        "profile_config_mismatch_count": profile_config_mismatch_count,
+        "duplicate_score_component_count": duplicate_score_component_count,
+        "selected_below_threshold_count": selected_below_threshold_count,
+        "no_trade_fallback_selected_count": no_trade_fallback_selected_count,
+        "market_filter_after_scoring_violation_count": market_filter_after_scoring_violation_count,
+        "signal_entry_date_violation_count": signal_entry_date_violation_count,
+        "stale_score_cache_files": stale_score_cache_files[:100],
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
+def _scored_payloads_for_integrity(config: dict[str, Any], backtest_dir: Path, run_dates: list[str]) -> list[dict[str, Any]]:
+    payloads = []
+    for day in run_dates:
+        payload = _load_current_scored_payload_for_day(config, backtest_dir, day)
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return payloads
+
+
+def _load_current_scored_payload_for_day(config: dict[str, Any], backtest_dir: Path, day: str) -> dict[str, Any]:
+    log_path = backtest_dir / f"scoring_{day}.json"
+    processed_path = processed_profile_path(config, f"scored_candidates_{day}.json")
+    candidates: list[tuple[Path, dict[str, Any]]] = []
+    for path in [processed_path, log_path]:
+        if not path.exists():
+            continue
+        payload = read_json(path)
+        if isinstance(payload, dict):
+            candidates.append((path, payload))
+    if not candidates:
+        return {}
+    for path, payload in candidates:
+        if _score_payload_cache_issue(payload, config, day) == "":
+            return _payload_with_score_integrity_path(payload, path)
+    path, payload = candidates[0]
+    return _payload_with_score_integrity_path(payload, path)
+
+
+def _payload_with_score_integrity_path(payload: dict[str, Any], path: Path) -> dict[str, Any]:
+    copied = dict(payload)
+    try:
+        copied["_score_integrity_path"] = str(path.relative_to(ROOT))
+    except ValueError:
+        copied["_score_integrity_path"] = str(path)
+    return copied
+
+
+def _score_total_matches_formula(row: dict[str, Any]) -> bool:
+    total = _safe_float(row.get("total_score"))
+    if total is None:
+        return False
+    if row.get("score_components_total") is not None and _score_component_total_matches(row):
+        return True
+    if any(row.get(key) is None for key in ["technical_score", "relative_strength_score", "investor_context_score", "market_context_score", "penalty_score"]):
+        return True
+    expected = sum(
+        _safe_float(row.get(key)) or 0.0
+        for key in ["technical_score", "relative_strength_score", "investor_context_score", "market_context_score", "penalty_score"]
+    )
+    return abs(round(expected, 2) - round(total, 2)) <= 0.01
+
+
+def _score_component_total_matches(row: dict[str, Any]) -> bool:
+    total = _safe_float(row.get("total_score"))
+    if total is None:
+        return False
+    component_total = _safe_float(row.get("score_components_total"))
+    components = row.get("score_components") if isinstance(row.get("score_components"), dict) else {}
+    if component_total is None:
+        component_total = _safe_float(components.get("component_total")) if isinstance(components, dict) else None
+    if component_total is None:
+        return _score_total_matches_formula(row)
+    return abs(round(component_total, 2) - round(total, 2)) <= 0.01
+
+
+def _score_duplicate_component_warning(row: dict[str, Any]) -> bool:
+    components = row.get("score_components") if isinstance(row.get("score_components"), dict) else {}
+    if not isinstance(components, dict):
+        return False
+    deprecated = {"news_score", "financial_score", "base_score"}
+    if any(key in components for key in deprecated):
+        return True
+    technical = _safe_float(row.get("technical_score"))
+    if technical is None:
+        return False
+    base_parts = sum(_safe_float(row.get(key)) or 0.0 for key in ["ma_score", "rsi_score", "volume_score", "candlestick_score", "sector_score"])
+    outside = sum(_safe_float(row.get(key)) or 0.0 for key in ["relative_strength_score", "investor_context_score", "market_context_score"])
+    return outside > 0 and technical > base_parts and abs(technical - (base_parts + outside)) <= 0.01
+
+
+def _score_row_has_future_data(row: dict[str, Any]) -> bool:
+    signal_text = str(row.get("signal_date") or row.get("date") or "")
+    if not signal_text:
+        return False
+    for key in ["earnings_announcement_date", "earnings_candidate_date", "investor_context_week", "financial_source_date"]:
+        value = row.get(key)
+        if value and str(value) > signal_text:
+            return True
+    return False
+
+
+def _score_payload_profile_config_mismatch(payload: dict[str, Any], config: dict[str, Any]) -> bool:
+    profile_id = payload.get("profile_id")
+    config_version = payload.get("config_version")
+    return profile_id != profile_id_from(config) or config_version != config_version_from(config)
+
+
+def _score_payload_cache_strictly_valid(payload: dict[str, Any], config: dict[str, Any]) -> bool:
+    return _score_payload_cache_issue(payload, config) == ""
+
+
+def _score_payload_cache_issue(payload: dict[str, Any], config: dict[str, Any], target_date_text: str | None = None) -> str:
+    target_date_text = str(target_date_text or payload.get("date") or "")
+    if not target_date_text:
+        return "missing_date"
+    expected = _score_cache_payload(config, target_date_text)
+    if str(payload.get("date") or "") != target_date_text:
+        return "date_mismatch"
+    if payload.get("profile_id") != profile_id_from(config):
+        return "profile_id_mismatch"
+    if payload.get("config_version") != config_version_from(config):
+        return "config_version_mismatch"
+    if payload.get("scoring_settings_hash") != expected["scoring_settings_hash"]:
+        return "scoring_settings_hash_mismatch"
+    if payload.get("market_filter_hash") != expected["market_filter_hash"]:
+        return "market_filter_hash_mismatch"
+    if payload.get("scoring_cache_key") != expected["scoring_cache_key"]:
+        return "scoring_cache_key_mismatch"
+    return ""
+
+
+def _stale_score_cache_files(payloads: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    for payload in payloads:
+        reason = _score_payload_cache_issue(payload, config)
+        if not reason:
+            continue
+        rows.append(
+            {
+                "path": payload.get("_score_integrity_path", ""),
+                "cache_path": payload.get("_score_integrity_path", ""),
+                "profile": payload.get("profile_id", ""),
+                "date": payload.get("date", ""),
+                "expected_config_hash": config_version_from(config),
+                "actual_config_hash": payload.get("config_version", ""),
+                "expected_market_filter_hash": _score_cache_payload(config, str(payload.get("date") or ""))["market_filter_hash"] if payload.get("date") else "",
+                "actual_market_filter_hash": payload.get("market_filter_hash", ""),
+                "reason": reason,
+            }
+        )
+    return rows
+
+
+def _score_integrity_error_details(counts: dict[str, int]) -> list[str]:
+    return [f"{key}={value}" for key, value in counts.items() if int(value or 0) > 0]
+
+
+def _selected_below_threshold(row: dict[str, Any], config: dict[str, Any]) -> bool:
+    if not row.get("selected"):
+        return False
+    min_score = float(config.get("selection", {}).get("min_score", 0) or 0)
+    return (_safe_float(row.get("total_score")) or 0.0) < min_score
+
+
+def _no_trade_fallback_selected(row: dict[str, Any], config: dict[str, Any]) -> bool:
+    if not _selected_below_threshold(row, config):
+        return False
+    min_allowed = float(config.get("selection", {}).get("top_pick_min_score", config.get("selection", {}).get("fallback_min_score", 0)) or 0)
+    return (_safe_float(row.get("total_score")) or 0.0) >= min_allowed
+
+
+def _signal_entry_date_violation(trade: dict[str, Any], config: dict[str, Any]) -> bool:
+    if str(trade.get("action") or "").upper() != "BUY" or not _trade_is_filled_or_unknown(trade):
+        return False
+    signal = str(trade.get("signal_date") or "")
+    entry = str(trade.get("entry_date") or "")
+    if not signal or not entry:
+        return True
+    entry_timing = str(config.get("backtest", {}).get("entry_timing", "next_business_day_open"))
+    if entry_timing == "same_day_close":
+        return entry != signal
+    return entry <= signal
+
+
+def _score_integrity_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- audit: unavailable"]
+    keys = [
+        "score_integrity_status",
+        "total_score_mismatch_count",
+        "component_total_mismatch_count",
+        "future_data_leak_count",
+        "stale_score_cache_count",
+        "profile_config_mismatch_count",
+        "duplicate_score_component_count",
+        "selected_below_threshold_count",
+        "no_trade_fallback_selected_count",
+        "market_filter_after_scoring_violation_count",
+        "signal_entry_date_violation_count",
+    ]
+    lines = [f"- {key}: {audit.get(key)}" for key in keys]
+    for detail in audit.get("score_integrity_errors", []) or []:
+        lines.append(f"- score_integrity_error: {detail}")
+    stale_files = audit.get("stale_score_cache_files", []) or []
+    if stale_files:
+        lines.append("- stale_score_cache_files:")
+        for item in stale_files[:20]:
+            lines.append(
+                "  - "
+                f"date={item.get('date')} profile={item.get('profile')} cache_path={item.get('cache_path') or item.get('path')} "
+                f"expected_config_hash={item.get('expected_config_hash')} actual_config_hash={item.get('actual_config_hash')} "
+                f"expected_market_filter_hash={item.get('expected_market_filter_hash')} actual_market_filter_hash={item.get('actual_market_filter_hash')} "
+                f"reason={item.get('reason')}"
+            )
+    for warning in audit.get("warnings", []) or []:
+        lines.append(f"- warning: {warning}")
+    for error in audit.get("errors", []) or []:
+        lines.append(f"- error: {error}")
+    if audit.get("score_integrity_status") != "OK":
+        lines.append("- conclusion: Score Integrity Audit が OK になるまで、この収益評価は信用しないでください。")
+    return lines
 
 
 def _backtest_execution_model_stats(all_trades: list[dict[str, Any]], model: dict[str, Any]) -> dict[str, Any]:
@@ -13157,13 +14665,41 @@ def _listed_stock_master() -> list[dict[str, Any]]:
     if not path.exists():
         return []
     payload = read_json(path)
-    stocks = [_normalize_listed_stock(stock) for stock in payload.get("stocks", []) if stock.get("code")]
+    records = _listed_stock_records_from_payload(payload)
+    stocks = [_normalize_listed_stock(stock) for stock in records if isinstance(stock, dict) and stock.get("code")]
     if path.name == "prime_stocks_jquants.json":
         return [
             attach_market_section_fields(stock, "TSEPrime") if market_section_from_row(stock) == "Unknown" else stock
             for stock in stocks
         ]
     return stocks
+
+
+def _listed_stock_records_from_payload(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        stocks = payload.get("stocks")
+        if isinstance(stocks, list):
+            return [item for item in stocks if isinstance(item, dict)]
+        # Older exports may be a provider response with a different root key.
+        for key in ("listed_info", "data", "records"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _listed_stock_master_stats() -> dict[str, int]:
+    path = _listed_stock_master_path()
+    if not path.exists():
+        return {"total_count": 0, "loaded_count": 0}
+    payload = read_json(path)
+    records = _listed_stock_records_from_payload(payload)
+    total_count = len(records)
+    if isinstance(payload, dict):
+        total_count = int(payload.get("total_count") or total_count)
+    return {"total_count": total_count, "loaded_count": len(_listed_stock_master())}
 
 
 def _allowed_stock_master_by_code(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -13421,8 +14957,171 @@ def _format_jquants_date(value: str) -> str:
 
 
 def read_json(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as file:
-        return json.load(file)
+    started = time.perf_counter()
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            return json.load(file)
+    finally:
+        _record_json_read_audit(path)
+        _record_backtest_phase_time("json_read", time.perf_counter() - started)
+
+
+def _record_json_read_audit(path: Path) -> None:
+    if not BACKTEST_MODE_ACTIVE:
+        return
+    if not _json_read_path_relevant_for_period_warning(path):
+        return
+    logical_date = _date_from_path_text(path)
+    date_text = logical_date.isoformat() if logical_date else None
+    audit = BACKTEST_JSON_READ_AUDIT
+    audit["file_count"] = int(audit.get("file_count", 0) or 0) + 1
+    try:
+        byte_size = int(path.stat().st_size)
+    except OSError:
+        byte_size = 0
+    audit["bytes"] = int(audit.get("bytes", 0) or 0) + byte_size
+    category = _json_read_category(path)
+    breakdown = audit.setdefault("breakdown", {})
+    if isinstance(breakdown, dict):
+        item = breakdown.setdefault(category, {"count": 0, "bytes": 0})
+        if isinstance(item, dict):
+            item["count"] = int(item.get("count", 0) or 0) + 1
+            item["bytes"] = int(item.get("bytes", 0) or 0) + byte_size
+    scope = _json_read_scope(path)
+    scope_breakdown = audit.setdefault("scope_breakdown", {})
+    if isinstance(scope_breakdown, dict):
+        item = scope_breakdown.setdefault(scope, {"count": 0, "bytes": 0})
+        if isinstance(item, dict):
+            item["count"] = int(item.get("count", 0) or 0) + 1
+            item["bytes"] = int(item.get("bytes", 0) or 0) + byte_size
+    top_files = audit.setdefault("top_files", {})
+    if isinstance(top_files, dict):
+        try:
+            path_text = str(path.relative_to(ROOT))
+        except ValueError:
+            path_text = str(path)
+        item = top_files.setdefault(path_text, {"path": path_text, "count": 0, "bytes": 0})
+        if isinstance(item, dict):
+            item["count"] = int(item.get("count", 0) or 0) + 1
+            item["bytes"] = int(item.get("bytes", 0) or 0) + byte_size
+    if date_text:
+        current_min = audit.get("date_min")
+        current_max = audit.get("date_max")
+        audit["date_min"] = min(str(current_min), date_text) if current_min else date_text
+        audit["date_max"] = max(str(current_max), date_text) if current_max else date_text
+        if BACKTEST_JSON_READ_PERIOD:
+            start_text, end_text = BACKTEST_JSON_READ_PERIOD
+            if date_text < start_text or date_text > end_text:
+                audit["out_of_range_count"] = int(audit.get("out_of_range_count", 0) or 0) + 1
+                by_category = audit.setdefault("out_of_range_by_category", {})
+                if isinstance(by_category, dict):
+                    by_category[category] = int(by_category.get(category, 0) or 0) + 1
+                sample = audit.setdefault("out_of_range_sample", [])
+                if isinstance(sample, list) and len(sample) < 20:
+                    try:
+                        path_text = str(path.relative_to(ROOT))
+                    except ValueError:
+                        path_text = str(path)
+                    sample.append({"date": date_text, "path": path_text})
+
+
+def _json_read_category(path: Path) -> str:
+    name = path.name
+    parent_parts = path.parts
+    if name.startswith("indicators_"):
+        return "indicators"
+    if name.startswith("candidates_"):
+        return "candidates"
+    if name.startswith("scored_candidates_") or name.startswith("scoring_"):
+        return "scored_candidates"
+    if name.startswith("trades_") or name == "trades.csv":
+        return "trades"
+    if name.startswith("portfolio_") or name == "state.json":
+        return "portfolio"
+    if name.startswith("backtest_summary") or name.startswith("analysis_") or name.startswith("feature_analysis") or name.startswith("selection_quality"):
+        return "feature_analysis"
+    if any(part == "reports" for part in parent_parts) or name.endswith(".md"):
+        return "reports"
+    if name.startswith("screening_"):
+        return "candidates"
+    return "other"
+
+
+def _json_read_scope(path: Path) -> str:
+    try:
+        parts = path.relative_to(ROOT).parts
+    except ValueError:
+        return "outside_root"
+    if len(parts) >= 3 and parts[0] == "data" and parts[1] == "processed":
+        if parts[2] == "common":
+            return "common"
+        return "profile"
+    if len(parts) >= 2:
+        if parts[0] == "logs":
+            return "logs"
+        if parts[0] == "reports":
+            return "reports"
+        if parts[0] == "data":
+            return "data_other"
+    return "other"
+
+
+def _top_json_read_files(audit: dict[str, Any], limit: int = 50) -> list[dict[str, Any]]:
+    files = audit.get("top_files", {})
+    if not isinstance(files, dict):
+        return []
+    rows = [dict(item) for item in files.values() if isinstance(item, dict)]
+    return sorted(rows, key=lambda item: (int(item.get("bytes", 0) or 0), int(item.get("count", 0) or 0)), reverse=True)[:limit]
+
+
+def _json_read_breakdown(audit: dict[str, Any]) -> dict[str, dict[str, int]]:
+    categories = [
+        "indicators",
+        "candidates",
+        "scored_candidates",
+        "trades",
+        "portfolio",
+        "reports",
+        "sqlite_exports",
+        "feature_analysis",
+        "other",
+    ]
+    raw = audit.get("breakdown", {})
+    output: dict[str, dict[str, int]] = {}
+    for category in categories:
+        item = raw.get(category, {}) if isinstance(raw, dict) else {}
+        output[category] = {
+            "count": int(item.get("count", 0) or 0) if isinstance(item, dict) else 0,
+            "bytes": int(item.get("bytes", 0) or 0) if isinstance(item, dict) else 0,
+        }
+    return output
+
+
+def _json_read_scope_breakdown(audit: dict[str, Any]) -> dict[str, dict[str, int]]:
+    scopes = ["common", "profile", "logs", "reports", "data_other", "outside_root", "other"]
+    raw = audit.get("scope_breakdown", {})
+    output: dict[str, dict[str, int]] = {}
+    for scope in scopes:
+        item = raw.get(scope, {}) if isinstance(raw, dict) else {}
+        output[scope] = {
+            "count": int(item.get("count", 0) or 0) if isinstance(item, dict) else 0,
+            "bytes": int(item.get("bytes", 0) or 0) if isinstance(item, dict) else 0,
+        }
+    return output
+
+
+def _json_read_path_relevant_for_period_warning(path: Path) -> bool:
+    try:
+        parts = path.relative_to(ROOT).parts
+    except ValueError:
+        return False
+    if len(parts) >= 3 and parts[0] == "data" and parts[1] == "processed":
+        return True
+    if len(parts) >= 2 and parts[0] == "logs" and parts[1] in {"backtests", "scoring", "screening"}:
+        return True
+    if len(parts) >= 2 and parts[0] == "reports" and parts[1] in {"backtests", "experiments"}:
+        return True
+    return False
 
 
 def add_business_days(start_date: date, offset: int) -> date:
@@ -14981,10 +16680,14 @@ def build_daily_trade_log(paper_trade_log: dict[str, Any], reflection_log: dict[
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
+    started = time.perf_counter()
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as file:
-        json.dump(payload, file, ensure_ascii=False, indent=2)
-        file.write("\n")
+    try:
+        with path.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False, indent=2)
+            file.write("\n")
+    finally:
+        _record_backtest_phase_time("json_write", time.perf_counter() - started)
 
 
 def write_text(path: Path, text: str) -> None:
@@ -15048,6 +16751,9 @@ def write_trades_csv(path: Path, trades: list[dict[str, Any]]) -> None:
         "code",
         "name",
         "sector_name",
+        "section",
+        "market_section",
+        "listing_market",
         "signal_date",
         "entry_date",
         "exit_date",

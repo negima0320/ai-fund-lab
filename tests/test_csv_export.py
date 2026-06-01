@@ -84,6 +84,44 @@ def test_trades_csv_row_count_matches_database(config_copy: dict, tmp_path) -> N
     assert "entry_price_source" in columns
 
 
+def test_trades_csv_from_db_can_filter_period(config_copy: dict, tmp_path) -> None:
+    config_copy["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    initialize_database(config_copy, tmp_path)
+    save_trades(
+        config_copy,
+        tmp_path,
+        "2026-03-02",
+        [
+            {
+                "trade_id": "in-range",
+                "action": "SELL",
+                "code": "1001",
+                "entry_date": "2026-03-01",
+                "exit_date": "2026-03-05",
+                "order_status": "FILLED",
+                "profit": 1000,
+            },
+            {
+                "trade_id": "out-of-range",
+                "action": "SELL",
+                "code": "1002",
+                "entry_date": "2026-05-20",
+                "exit_date": "2026-05-29",
+                "order_status": "FILLED",
+                "profit": 2000,
+            },
+        ],
+    )
+
+    csv_path, db_count, csv_count = write_trades_csv_from_db(config_copy, tmp_path, "2026-01-01", "2026-03-06")
+
+    assert db_count == 1
+    assert csv_count == 1
+    text = csv_path.read_text(encoding="utf-8")
+    assert "in-range" in text
+    assert "out-of-range" not in text
+
+
 def test_profile_outputs_are_separated(tmp_path) -> None:
     profile_01 = load_profile("rookie_dealer_01")
     profile_02 = load_profile("rookie_dealer_02")

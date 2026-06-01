@@ -668,6 +668,9 @@ def test_backtest_speed_flags_are_parsed(monkeypatch) -> None:
             "rookie_dealer_02_v2_11",
             "--no-daily-logs",
             "--skip-price-fetch",
+            "--quiet",
+            "--progress-interval",
+            "50",
         ],
     )
 
@@ -676,6 +679,8 @@ def test_backtest_speed_flags_are_parsed(monkeypatch) -> None:
     assert args.profiles == ["rookie_dealer_02_v2_6", "rookie_dealer_02_v2_11"]
     assert args.no_daily_logs is True
     assert args.skip_price_fetch is True
+    assert args.quiet is True
+    assert args.progress_interval == 50
 
 
 def test_experiment_judgement_candidate_needs_review_and_rejected() -> None:

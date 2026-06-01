@@ -158,7 +158,7 @@ def test_run_experiments_skip_analyze_skips_analyze_step(tmp_path, monkeypatch) 
     assert [call[0] for call in calls].count("compare") == 1
 
 
-def test_summary_only_skips_analyze_step(tmp_path, monkeypatch) -> None:
+def test_summary_only_still_runs_analyze_for_feature_audits(tmp_path, monkeypatch) -> None:
     calls: list[tuple] = []
     monkeypatch.setattr(main_module, "ROOT", tmp_path)
     monkeypatch.setattr(main_module, "SUMMARY_ONLY_ACTIVE", True)
@@ -187,7 +187,7 @@ def test_summary_only_skips_analyze_step(tmp_path, monkeypatch) -> None:
         skip_analyze=False,
     )
 
-    assert "analyze" not in [call[0] for call in calls]
+    assert [call[0] for call in calls].count("analyze") == 2
     assert [call[0] for call in calls].count("backtest") == 2
     assert [call[0] for call in calls].count("compare") == 1
 
@@ -315,6 +315,108 @@ def test_scored_candidates_cache_reuses_same_profile_date_and_hash(tmp_path, mon
     assert payload["scoring_cache_key"] == cache_bits["scoring_cache_key"]
 
 
+def test_profile_phase_time_snapshot_accounts_for_profile_total(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main_module,
+        "BACKTEST_PROFILE_TIMINGS",
+        {
+            "indicator": 2.0,
+            "screening": 3.0,
+            "scoring": 4.0,
+            "trading": 5.0,
+            "report": 1.0,
+            "json_read": 0.5,
+            "json_write": 0.5,
+            "sqlite_access": 1.0,
+        },
+    )
+
+    snapshot = main_module._profile_phase_time_snapshot(20.0)
+
+    assert snapshot["accounting_delta"] == 0
+    assert round(sum(snapshot["phases"].values()), 4) == 20.0
+    assert snapshot["phases"]["misc"] == 3.0
+
+
+def test_top_experiment_bottlenecks_are_sorted() -> None:
+    bottlenecks = main_module._top_experiment_bottlenecks(
+        {
+            "profile_phase_time_by_profile": {
+                "p1": {"scoring": 10, "trade": 2},
+                "p2": {"json_read": 7, "timing_overlap_adjustment": -1},
+            },
+            "compare_profiles_time": 4,
+        },
+        limit=3,
+    )
+
+    assert bottlenecks == [
+        {"profile": "p1", "phase": "scoring", "elapsed_seconds": 10.0},
+        {"profile": "p2", "phase": "json_read", "elapsed_seconds": 7.0},
+        {"profile": "__batch__", "phase": "compare_profiles", "elapsed_seconds": 4.0},
+    ]
+
+
+def test_json_read_audit_flags_period_out_of_range_reads(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "BACKTEST_MODE_ACTIVE", True)
+    monkeypatch.setattr(main_module, "BACKTEST_JSON_READ_PERIOD", ("2026-01-01", "2026-03-06"))
+    monkeypatch.setattr(main_module, "BACKTEST_JSON_READ_AUDIT", {"file_count": 0, "out_of_range_count": 0, "out_of_range_sample": []})
+    path = tmp_path / "data" / "processed" / "rookie_dealer_02_v2_1" / "scored_candidates_2026-05-29.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{}", encoding="utf-8")
+
+    main_module.read_json(path)
+
+    audit = main_module.BACKTEST_JSON_READ_AUDIT
+    assert audit["file_count"] == 1
+    assert audit["date_min"] == "2026-05-29"
+    assert audit["date_max"] == "2026-05-29"
+    assert audit["out_of_range_count"] == 1
+    assert audit["bytes"] == 2
+    assert main_module._json_read_breakdown(audit)["scored_candidates"]["count"] == 1
+    assert main_module._json_read_scope_breakdown(audit)["profile"]["count"] == 1
+    assert main_module._top_json_read_files(audit)[0]["path"].endswith("scored_candidates_2026-05-29.json")
+
+
+def test_ensure_indicators_prefers_common_cache_over_profile_cache(tmp_path, monkeypatch) -> None:
+    config = main_module.load_profile("rookie_dealer_02_v2_1")
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "load_config", lambda _path: config)
+    monkeypatch.setattr(main_module, "BACKTEST_MODE_ACTIVE", True)
+    monkeypatch.setattr(
+        main_module,
+        "COMMON_CACHE_METRICS",
+        {
+            "cache_reused_from_common_count": 0,
+            "profile_specific_cache_count": 0,
+            "generated_cache_size": 0,
+            "indicator_cache_source": {},
+            "candidate_cache_source": {},
+        },
+    )
+    target_date = "2026-03-06"
+    profile_path = main_module.processed_profile_path(config, f"indicators_{target_date}.json")
+    common_path = main_module._common_processed_cache_path(config, "indicators", target_date)
+    profile_path.parent.mkdir(parents=True)
+    common_path.parent.mkdir(parents=True)
+    payload_base = {
+        "date": target_date,
+        "indicator_mode": main_module._backtest_indicator_mode(config),
+        "relative_strength_enabled": False,
+        "benchmark_source": "unavailable",
+    }
+    main_module.write_json(profile_path, {**payload_base, "indicators": [{"code": "profile"}]})
+    main_module.write_json(common_path, {**payload_base, "indicators": [{"code": "common"}]})
+
+    main_module.ensure_indicators("jquants", target_date)
+
+    restored = main_module.read_json(profile_path)
+    assert restored["indicators"][0]["code"] == "common"
+    assert main_module.COMMON_CACHE_METRICS["cache_reused_from_common_count"] == 1
+    assert main_module.COMMON_CACHE_METRICS["indicator_cache_source"]["common"] == 1
+
+
 def test_experiment_verdict_no_practical_effect() -> None:
     base = {"net_cumulative_profit": 100, "profit_factor": 1.2, "max_drawdown": -0.1, "total_trades": 10}
     same = {"net_cumulative_profit": 100, "profit_factor": 1.2, "max_drawdown": -0.1, "total_trades": 10}
@@ -364,6 +466,46 @@ def test_experiment_summary_row_includes_feature_activation() -> None:
     assert '{"financial_context":false}' in rendered
     assert '{"financial_context":0}' in rendered
     assert "| 3 | 1 | active |" in rendered
+
+
+def test_profile_compare_row_prefers_backtest_summary_source(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    profile_id = "rookie_dealer_02_v2_1"
+    summary_dir = tmp_path / "logs" / "backtests" / profile_id / "2026-01-01_to_2026-03-06"
+    summary_dir.mkdir(parents=True)
+    main_module.write_json(
+        summary_dir / "backtest_summary.json",
+        {
+            "total_trades": 0,
+            "closed_trade_count": 0,
+            "net_cumulative_profit": 0,
+            "market_coverage": {
+                "candidate_count": {"Prime": 1819, "Standard": 0, "Growth": 0, "Unknown": 0},
+                "selected_count": {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0},
+                "market_filter_excluded_count": 29,
+            },
+        },
+    )
+
+    row = main_module._profile_compare_row_with_backtest_summary(
+        {
+            "profile_id": profile_id,
+            "total_trades": 1,
+            "market_coverage": {
+                "candidate_count": {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0},
+                "selected_count": {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0},
+                "market_filter_excluded_count": 1848,
+            },
+        },
+        profile_id,
+        "2026-01-01",
+        "2026-03-06",
+    )
+
+    assert row["total_trades"] == 0
+    assert row["market_coverage"]["market_filter_excluded_count"] == 29
+    assert row["market_coverage"]["candidate_count"]["Prime"] == 1819
+    assert row["summary_source"] == "backtest_summary"
 
 
 def test_experiment_capability_warning_for_light_profile_on_free_plan() -> None:

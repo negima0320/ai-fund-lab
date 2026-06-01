@@ -195,13 +195,13 @@ python src/main.py --mode simulate-operation --days 30 --profile rookie_dealer_0
 
 `--period 6m|1y|3y|5y` を使うと期間を自動計算できます。CLIで `--start-date` / `--end-date` を指定した場合は明示日付を優先します。`--profiles rookie_dealer_02_v2_6 rookie_dealer_02_v2_8` を付けると対象実験を絞れます。`--skip-backtest` は既存DB結果を使ってanalyze/compareのみ実行し、`--skip-analyze` はanalyzeを省略してcompareのみ進めます。どちらも必要な既存結果がなければ分かりやすく停止します。実行するのはbacktest/analyze/compareのみで、実売買やbroker発注は行いません。
 
-長期検証を速く回したい場合は、対象profileを明示し、`--summary-only` を付けます。`run-experiments` は価格取得、indicator計算、candidate生成、market_context生成を共通stageとして先に1回だけ作り、profileごとにはscoring、selection、tradeを中心に実行します。feature setとselection/filter設定が同じprofileではscoring結果も再利用します。`--summary-only` は日別Markdown、記事生成、重いanalyze、日別詳細JSONログを省き、比較summaryの作成に絞ります。価格キャッシュが揃っている場合は `--skip-price-fetch` でJ-Quants価格取得を省略できます。日別JSONログだけ止めたい場合は `--no-daily-logs` を使います。
+長期検証を速く回したい場合は、対象profileを明示し、`--summary-only` を付けます。`run-experiments` は価格取得、indicator計算、candidate生成、market_context生成を共通stageとして先に1回だけ作り、profileごとにはscoring、selection、tradeを中心に実行します。feature setとselection/filter設定が同じprofileではscoring結果も再利用します。`--summary-only` は日別Markdown、記事生成、重いanalyze、日別詳細JSONログを省き、比較summaryの作成に絞ります。価格キャッシュが揃っている場合は `--skip-price-fetch` でJ-Quants価格取得を省略できます。日別JSONログだけ止めたい場合は `--no-daily-logs` を使います。ターミナル出力も減らす場合は `--quiet --progress-interval 50` のように指定します。
 
 ```bash
-python src/main.py --mode run-experiments --base-profile rookie_dealer_02_v2_1 --profiles rookie_dealer_02_v2_1 rookie_dealer_02_v2_6 rookie_dealer_02_v2_11 --period 5y --summary-only --fast-analysis --skip-price-fetch
+python src/main.py --mode run-experiments --base-profile rookie_dealer_02_v2_1 --profiles rookie_dealer_02_v2_1 rookie_dealer_02_v2_6 rookie_dealer_02_v2_11 --period 5y --summary-only --fast-analysis --skip-price-fetch --quiet --progress-interval 50
 ```
 
-`experiment_summary.md` の `Run Experiments Performance Report` には `shared_price_fetch_time`、`shared_indicator_time`、`shared_candidate_time`、`profile_scoring_time_by_profile`、`profile_trade_time_by_profile`、`profile_total_time_by_profile`、`price_fetch_skipped`、`daily_logs_enabled`、`reused_scoring_count`、`skipped_profiles` が出力されます。
+`experiment_summary.md` の `Run Experiments Performance Report` には `shared_price_fetch_time`、`shared_indicator_time`、`shared_candidate_time`、`profile_scoring_time_by_profile`、`profile_trade_time_by_profile`、`profile_total_time_by_profile`、`price_fetch_skipped`、`daily_logs_enabled`、`quiet`、`progress_interval`、`reused_scoring_count`、`skipped_profiles` が出力されます。
 
 各profile実行前にregistryの `required_plan` と現在のJ-Quants planを照合します。Light専用capabilityがFree planで不足していてもfallback可能ならwarningとして実行し、fallback不可ならそのprofileを `skipped` としてsummaryに残します。J-Quants planは `config/jquants.yaml` を正とし、`--jquants-plan` は一時上書き用途だけにします。
 

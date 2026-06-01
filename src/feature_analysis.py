@@ -150,6 +150,7 @@ def build_feature_analysis(
     relative_strength_debug = _relative_strength_debug(scoring_rows)
     relative_strength_pipeline = _relative_strength_pipeline(config, scoring_rows)
     investor_context_filter = _investor_context_filter_analysis(scoring_rows, records)
+    integrity_audits = _backtest_integrity_audits(root, profile_id, start_date, end_date)
 
     return {
         "profile_id": profile_id,
@@ -228,6 +229,9 @@ def build_feature_analysis(
             "effect_analysis": _investor_context_effect_analysis(records),
         },
         "investor_context_filter": investor_context_filter,
+        "market_filter_audit": integrity_audits.get("market_filter_audit", {}),
+        "backtest_result_integrity_audit": integrity_audits.get("backtest_result_integrity_audit", {}),
+        "score_integrity_audit": integrity_audits.get("score_integrity_audit", {}),
         "records_used": records,
     }
 
@@ -278,6 +282,18 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "## Feature Activation Audit",
         "",
         *_feature_activation_audit_lines(analysis.get("feature_activation_audit", {})),
+        "",
+        "## Backtest Result Integrity Audit",
+        "",
+        *_generic_audit_lines(analysis.get("backtest_result_integrity_audit", {})),
+        "",
+        "## Market Filter Audit",
+        "",
+        *_generic_audit_lines(analysis.get("market_filter_audit", {})),
+        "",
+        "## Score Integrity Audit",
+        "",
+        *_generic_audit_lines(analysis.get("score_integrity_audit", {})),
         "",
         "## Relative Strength Analysis",
         "",
@@ -2186,6 +2202,53 @@ def _duplicated_signal_warnings(config: dict[str, Any], relative_strength_enable
             }
         )
     return warnings
+
+
+def _backtest_integrity_audits(root: Path, profile_id: str, start_date: str | None, end_date: str | None) -> dict[str, Any]:
+    if not start_date or not end_date:
+        return {}
+    summary_path = root / "logs" / "backtests" / profile_id / f"{start_date}_to_{end_date}" / "backtest_summary.json"
+    if not summary_path.exists():
+        return {}
+    try:
+        with summary_path.open("r", encoding="utf-8") as file:
+            payload = json.load(file)
+    except Exception:
+        return {}
+    return {
+        "market_filter_audit": payload.get("market_filter_audit", {}),
+        "backtest_result_integrity_audit": payload.get("backtest_result_integrity_audit", {}),
+        "score_integrity_audit": payload.get("score_integrity_audit", {}),
+    }
+
+
+def _generic_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- audit: unavailable"]
+    lines = []
+    for key, value in audit.items():
+        if key in {"warnings", "errors", "stale_score_cache_files"}:
+            continue
+        if isinstance(value, (dict, list)):
+            lines.append(f"- {key}: {json.dumps(value, ensure_ascii=False, sort_keys=True)}")
+        else:
+            lines.append(f"- {key}: {value}")
+    for warning in audit.get("warnings", []) or []:
+        lines.append(f"- warning: {warning}")
+    for error in audit.get("errors", []) or []:
+        lines.append(f"- error: {error}")
+    stale_files = audit.get("stale_score_cache_files", []) or []
+    if stale_files:
+        lines.append("- stale_score_cache_files:")
+        for item in stale_files[:20]:
+            lines.append(
+                "  - "
+                f"date={item.get('date')} profile={item.get('profile')} cache_path={item.get('cache_path') or item.get('path')} "
+                f"expected_config_hash={item.get('expected_config_hash')} actual_config_hash={item.get('actual_config_hash')} "
+                f"expected_market_filter_hash={item.get('expected_market_filter_hash')} actual_market_filter_hash={item.get('actual_market_filter_hash')} "
+                f"reason={item.get('reason')}"
+            )
+    return lines
 
 
 def _number(value: Any) -> float | None:
