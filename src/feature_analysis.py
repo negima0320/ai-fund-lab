@@ -2320,6 +2320,13 @@ def _performance_audit_lines(audit: dict[str, Any]) -> list[str]:
         "scoring_total",
         "cache_lookup_total",
         "cache_materialize_total",
+        "materialize_indicators_sec",
+        "materialize_candidates_sec",
+        "materialize_scored_candidates_sec",
+        "materialize_market_context_sec",
+        "materialize_file_exists_check_sec",
+        "materialize_copy_write_sec",
+        "materialize_unknown_sec",
         "file_copy_or_link_total",
         "backtest_day_iteration_total",
         "feature_analysis_total",
@@ -2396,7 +2403,21 @@ def _performance_audit_lines(audit: dict[str, Any]) -> list[str]:
     else:
         lines.append("| unavailable | - | 0 | 0 | 0 |")
     targets = audit.get("optimization_targets_top3", [])
-    lines.extend(["", f"- optimization_targets_top3: {_compact_json(targets)}"])
+    materialize = audit.get("materialize_audit", {}) if isinstance(audit.get("materialize_audit"), dict) else {}
+    lines.extend(
+        [
+            "",
+            "### Materialize Audit",
+            "",
+            f"- indicator_materialize_skipped_count: {materialize.get('indicator_materialize_skipped_count', 0)}",
+            f"- indicator_materialize_required_count: {materialize.get('indicator_materialize_required_count', 0)}",
+            f"- candidate_materialize_skipped_count: {materialize.get('candidate_materialize_skipped_count', 0)}",
+            f"- candidate_materialize_required_count: {materialize.get('candidate_materialize_required_count', 0)}",
+            f"- materialize_skip_reason: {_compact_json(materialize.get('materialize_skip_reason', {}))}",
+            "",
+            f"- optimization_targets_top3: {_compact_json(targets)}",
+        ]
+    )
     return lines
 
 

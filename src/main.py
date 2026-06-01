@@ -130,6 +130,11 @@ COMMON_CACHE_METRICS: dict[str, Any] = {
     "generated_cache_size": 0,
     "indicator_cache_source": {},
     "candidate_cache_source": {},
+    "indicator_materialize_skipped_count": 0,
+    "indicator_materialize_required_count": 0,
+    "candidate_materialize_skipped_count": 0,
+    "candidate_materialize_required_count": 0,
+    "materialize_skip_reason": {},
 }
 RUNTIME_MEMORY_CACHE: dict[str, Any] = {
     "listed_stocks_raw": {},
@@ -4833,6 +4838,11 @@ def prepare_run_experiments_common_stages(profile_ids: list[str], start_date_tex
             "generated_cache_size": 0,
             "indicator_cache_source": {},
             "candidate_cache_source": {},
+            "indicator_materialize_skipped_count": 0,
+            "indicator_materialize_required_count": 0,
+            "candidate_materialize_skipped_count": 0,
+            "candidate_materialize_required_count": 0,
+            "materialize_skip_reason": {},
         }
         BACKTEST_MODE_ACTIVE = True
         price_start = time.perf_counter()
@@ -5061,8 +5071,12 @@ def _common_processed_cache_path(config: dict[str, Any], stage: str, target_date
 
 def _restore_common_processed_cache(config: dict[str, Any], stage: str, target_date_text: str, target_path: Path) -> bool:
     started = time.perf_counter()
+    exists_started = time.perf_counter()
     common_path = _common_processed_cache_path(config, stage, target_date_text)
-    if not common_path.exists():
+    common_exists = common_path.exists()
+    exists_elapsed = time.perf_counter() - exists_started
+    _record_backtest_phase_time("materialize_file_exists_check_sec", exists_elapsed)
+    if not common_exists:
         _record_backtest_phase_time("cache_lookup_total", time.perf_counter() - started)
         return False
     lookup_elapsed = time.perf_counter() - started
@@ -5071,16 +5085,60 @@ def _restore_common_processed_cache(config: dict[str, Any], stage: str, target_d
     payload = read_json(common_path)
     if stage == "candidates":
         payload = _with_profile_metadata(payload, config)
-    write_json(target_path, payload)
-    if stage == "indicators":
+    skip_materialize = stage == "indicators" and _skip_profile_indicator_materialize(config)
+    copy_write_elapsed = 0.0
+    if skip_materialize:
         _runtime_indicator_cache_set(target_path, payload)
+        _record_materialize_skip(stage, "summary_fast_skip_price_fetch_uses_runtime_indicator_payload")
+    else:
+        copy_started = time.perf_counter()
+        write_json(target_path, payload)
+        copy_write_elapsed = time.perf_counter() - copy_started
+        _record_backtest_phase_time("materialize_copy_write_sec", copy_write_elapsed)
+        if stage == "indicators":
+            _runtime_indicator_cache_set(target_path, payload)
+        _record_materialize_required(stage)
     COMMON_CACHE_METRICS["cache_reused_from_common_count"] = COMMON_CACHE_METRICS.get("cache_reused_from_common_count", 0) + 1
     materialize_elapsed = time.perf_counter() - materialize_started
     _record_backtest_phase_time("cache_materialize_total", materialize_elapsed)
+    _record_materialize_stage_time(stage, materialize_elapsed)
     if stage == "indicators":
-        _record_backtest_phase_time("indicator_copy_from_common_sec", materialize_elapsed)
+        _record_backtest_phase_time("indicator_copy_from_common_sec", copy_write_elapsed)
     _record_backtest_phase_time("cache_copy_or_write", time.perf_counter() - started)
     return True
+
+
+def _skip_profile_indicator_materialize(config: dict[str, Any]) -> bool:
+    return bool(
+        BACKTEST_MODE_ACTIVE
+        and SUMMARY_ONLY_ACTIVE
+        and FAST_ANALYSIS_ACTIVE
+        and SKIP_PRICE_FETCH_ACTIVE
+        and _fast_analysis_enabled(config)
+    )
+
+
+def _record_materialize_required(stage: str) -> None:
+    key = "indicator_materialize_required_count" if stage == "indicators" else "candidate_materialize_required_count" if stage == "candidates" else f"{stage}_materialize_required_count"
+    COMMON_CACHE_METRICS[key] = int(COMMON_CACHE_METRICS.get(key, 0) or 0) + 1
+
+
+def _record_materialize_skip(stage: str, reason: str) -> None:
+    key = "indicator_materialize_skipped_count" if stage == "indicators" else "candidate_materialize_skipped_count" if stage == "candidates" else f"{stage}_materialize_skipped_count"
+    COMMON_CACHE_METRICS[key] = int(COMMON_CACHE_METRICS.get(key, 0) or 0) + 1
+    reasons = COMMON_CACHE_METRICS.setdefault("materialize_skip_reason", {})
+    if isinstance(reasons, dict):
+        reasons[reason] = int(reasons.get(reason, 0) or 0) + 1
+
+
+def _record_materialize_stage_time(stage: str, elapsed: float) -> None:
+    phase = {
+        "indicators": "materialize_indicators_sec",
+        "candidates": "materialize_candidates_sec",
+        "scored_candidates": "materialize_scored_candidates_sec",
+        "market_context": "materialize_market_context_sec",
+    }.get(stage, "materialize_unknown_sec")
+    _record_backtest_phase_time(phase, elapsed)
 
 
 def _record_cache_source(stage: str, source: str) -> None:
@@ -10238,6 +10296,13 @@ def _profile_phase_time_snapshot(profile_total_seconds: float) -> dict[str, Any]
         "scoring_total": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_total", 0.0)), 4),
         "cache_lookup_total": round(float(BACKTEST_PROFILE_TIMINGS.get("cache_lookup_total", 0.0)), 4),
         "cache_materialize_total": round(float(BACKTEST_PROFILE_TIMINGS.get("cache_materialize_total", 0.0)), 4),
+        "materialize_indicators_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("materialize_indicators_sec", 0.0)), 4),
+        "materialize_candidates_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("materialize_candidates_sec", 0.0)), 4),
+        "materialize_scored_candidates_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("materialize_scored_candidates_sec", 0.0)), 4),
+        "materialize_market_context_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("materialize_market_context_sec", 0.0)), 4),
+        "materialize_file_exists_check_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("materialize_file_exists_check_sec", 0.0)), 4),
+        "materialize_copy_write_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("materialize_copy_write_sec", 0.0)), 4),
+        "materialize_unknown_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("materialize_unknown_sec", 0.0)), 4),
         "file_copy_or_link_total": round(float(BACKTEST_PROFILE_TIMINGS.get("file_copy_or_link_total", 0.0)), 4),
         "indicator_load": round(float(BACKTEST_PROFILE_TIMINGS.get("indicator_load", 0.0) or BACKTEST_PROFILE_TIMINGS.get("indicator", 0.0)), 4),
         "candidate_load": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_load", 0.0) or BACKTEST_PROFILE_TIMINGS.get("screening", 0.0)), 4),
@@ -10361,6 +10426,7 @@ def build_experiment_performance_audit(
         "profile_read_reason": profile_read_reason,
         "indicator_field_audit": indicator_field_audit,
         "runtime_memory_cache_audit": _runtime_memory_cache_audit(),
+        "materialize_audit": _materialize_audit(performance_report),
         "optimization_targets_top3": _performance_optimization_targets(phase_elapsed, json_scope, profile_read_reasons, indicator_field_audit),
     }
 
@@ -10375,6 +10441,16 @@ def _runtime_memory_cache_audit() -> dict[str, dict[str, Any]]:
         }
         for name, item in sorted(RUNTIME_MEMORY_CACHE_AUDIT.items())
         if isinstance(item, dict)
+    }
+
+
+def _materialize_audit(performance_report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "indicator_materialize_skipped_count": int(performance_report.get("indicator_materialize_skipped_count", COMMON_CACHE_METRICS.get("indicator_materialize_skipped_count", 0)) or 0),
+        "indicator_materialize_required_count": int(performance_report.get("indicator_materialize_required_count", COMMON_CACHE_METRICS.get("indicator_materialize_required_count", 0)) or 0),
+        "candidate_materialize_skipped_count": int(performance_report.get("candidate_materialize_skipped_count", COMMON_CACHE_METRICS.get("candidate_materialize_skipped_count", 0)) or 0),
+        "candidate_materialize_required_count": int(performance_report.get("candidate_materialize_required_count", COMMON_CACHE_METRICS.get("candidate_materialize_required_count", 0)) or 0),
+        "materialize_skip_reason": performance_report.get("materialize_skip_reason", COMMON_CACHE_METRICS.get("materialize_skip_reason", {})),
     }
 
 
@@ -10401,7 +10477,7 @@ def _runtime_indicator_cache_get(path: Path) -> dict[str, Any] | None:
 
 
 def _runtime_indicator_cache_set(path: Path, payload: Any) -> None:
-    if not isinstance(payload, dict) or not _is_processed_indicator_json_path(path) or not path.exists():
+    if not isinstance(payload, dict) or not _is_processed_indicator_json_path(path):
         return
     cache = RUNTIME_MEMORY_CACHE.setdefault("indicator_runtime_cache", {})
     if isinstance(cache, dict):
@@ -10424,6 +10500,13 @@ def _aggregate_phase_elapsed(performance_report: dict[str, Any]) -> dict[str, fl
         "scoring_total",
         "cache_lookup_total",
         "cache_materialize_total",
+        "materialize_indicators_sec",
+        "materialize_candidates_sec",
+        "materialize_scored_candidates_sec",
+        "materialize_market_context_sec",
+        "materialize_file_exists_check_sec",
+        "materialize_copy_write_sec",
+        "materialize_unknown_sec",
         "file_copy_or_link_total",
         "backtest_day_iteration_total",
         "feature_analysis_total",
