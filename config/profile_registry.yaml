@@ -76,6 +76,105 @@ profiles:
       financial_context: false
       earnings_filter: false
 
+  rookie_dealer_02_v2_12:
+    role: experiment
+    description: 出来高過熱ガード max_volume_ratio 5.0 検証
+    required_plan: free
+    compare_to: rookie_dealer_02_v2_1
+    features:
+      relative_strength: false
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      volume_filter: true
+      volume_hot_guard: true
+
+  rookie_dealer_02_v2_13:
+    role: experiment
+    description: 出来高過熱ガード max_volume_ratio 4.0 検証
+    required_plan: free
+    compare_to: rookie_dealer_02_v2_1
+    features:
+      relative_strength: false
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      volume_filter: true
+      volume_hot_guard: true
+
+  rookie_dealer_02_v2_14:
+    role: experiment
+    description: 出来高過熱ガード max_volume_ratio 3.5 検証
+    required_plan: free
+    compare_to: rookie_dealer_02_v2_1
+    features:
+      relative_strength: false
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      volume_filter: true
+      volume_hot_guard: true
+
+  rookie_dealer_02_v2_15:
+    role: experiment
+    description: RSI 60-70 × volume_ratio 3-5 過熱ゾーン除外検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_6
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      rsi_volume_hot_zone_filter: true
+
+  rookie_dealer_02_v2_16:
+    role: experiment
+    description: 資金効率改善 max_position_size 300000 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_6
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+
+  rookie_dealer_02_v2_17:
+    role: experiment
+    description: 資金効率改善 max_position_size 500000 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_6
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+
+  rookie_dealer_02_v2_18:
+    role: experiment
+    description: 資金効率改善 max_positions 10 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_6
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+
+  rookie_dealer_02_v2_19:
+    role: experiment
+    description: 資金最大活用ポリシー検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_6
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+
   rookie_dealer_03_growth:
     role: experiment
     description: 東証グロース市場のみを対象にする攻撃型検証

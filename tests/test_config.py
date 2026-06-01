@@ -74,6 +74,54 @@ def test_rookie_dealer_02_v2_dot_1_alias_loads() -> None:
     assert profile["volume_filter"]["min_volume_ratio"] == 2.0
 
 
+def test_rookie_dealer_02_v2_volume_hot_guard_profiles_load() -> None:
+    expected = {
+        "rookie_dealer_02_v2_12": 5.0,
+        "rookie_dealer_02_v2_13": 4.0,
+        "rookie_dealer_02_v2_14": 3.5,
+    }
+
+    for profile_id, max_volume_ratio in expected.items():
+        profile = load_profile(profile_id)
+
+        assert profile["profile_id"] == profile_id
+        assert profile["volume_filter"]["enabled"] is True
+        assert profile["volume_filter"]["min_volume_ratio"] == 2.0
+        assert profile["volume_filter"]["max_volume_ratio"] == max_volume_ratio
+        assert "出来高過熱ガード" in profile["description"]
+        assert profile["selection"]["min_score"] == 45
+        assert profile["broker"]["provider"] == "paper"
+
+
+def test_rookie_dealer_02_v2_dot_12_alias_loads() -> None:
+    profile = load_profile("rookie_dealer_02_v2.12")
+
+    assert profile["profile_id"] == "rookie_dealer_02_v2_12"
+    assert profile["volume_filter"]["max_volume_ratio"] == 5.0
+
+
+def test_rookie_dealer_02_v2_15_profile_uses_rsi_volume_hot_zone_filter() -> None:
+    profile = load_profile("rookie_dealer_02_v2_15")
+
+    assert profile["profile_id"] == "rookie_dealer_02_v2_15"
+    assert profile["scoring"]["use_relative_strength_score"] is True
+    assert profile["volume_filter"]["min_volume_ratio"] == 2.0
+    assert profile["rsi_volume_hot_zone_filter"] == {
+        "enabled": True,
+        "min_rsi": 60,
+        "min_volume_ratio": 3,
+        "max_volume_ratio": 5,
+        "reason": "rsi_volume_hot_zone",
+    }
+
+
+def test_rookie_dealer_02_v2_dot_15_alias_loads() -> None:
+    profile = load_profile("rookie_dealer_02_v2.15")
+
+    assert profile["profile_id"] == "rookie_dealer_02_v2_15"
+    assert profile["rsi_volume_hot_zone_filter"]["enabled"] is True
+
+
 def test_rookie_dealer_02_v2_2_profile_relaxes_risk_off_filter() -> None:
     profile = load_profile("rookie_dealer_02_v2_2")
 

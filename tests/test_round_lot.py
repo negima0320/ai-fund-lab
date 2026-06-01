@@ -12,7 +12,7 @@ def test_calculates_100_share_round_lot(config_copy: dict) -> None:
 def test_does_not_buy_when_round_lot_exceeds_limit(config_copy: dict) -> None:
     shares, reason = _calculate_buy_shares(3000, 200000, config_copy)
     assert shares == 0
-    assert "100株購入に必要な金額" in reason
+    assert reason == "round_lot_unaffordable"
 
 
 def test_skipped_reason_is_recorded(config_copy: dict) -> None:
@@ -26,7 +26,7 @@ def test_skipped_reason_is_recorded(config_copy: dict) -> None:
         allocation_limit=200000,
         score=70,
         reason="test",
-        skipped_reason="100株購入に必要な金額が1銘柄上限を超えるため買付不可",
+        skipped_reason="round_lot_unaffordable",
         config=config_copy,
     )
     assert attempt["shares"] == 0

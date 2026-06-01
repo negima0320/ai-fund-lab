@@ -449,23 +449,89 @@ def _apply_exit_costs(
 
 def _calculate_buy_shares(price: float, allocation: float, config: dict[str, Any]) -> tuple[int, str]:
     if price <= 0 or allocation <= 0:
-        return 0, "買付余力が不足しているため買付不可"
+        return 0, "insufficient_available_cash"
     if _use_round_lot(config):
         lot_size = _round_lot_size(config)
         minimum_amount = price * lot_size
         if minimum_amount > allocation:
-            return 0, f"{lot_size}株購入に必要な金額が1銘柄上限を超えるため買付不可"
+            return 0, "round_lot_unaffordable"
         lots = int(allocation // minimum_amount)
         return lots * lot_size, ""
     if not bool(config.get("trading", {}).get("allow_fractional_shares", False)):
         shares = int(allocation // price)
         if shares <= 0:
-            return 0, "1株購入に必要な金額が1銘柄上限を超えるため買付不可"
+            return 0, "round_lot_unaffordable"
         return shares, ""
     shares = int(allocation // price)
     if shares <= 0:
-        return 0, "買付可能株数が0のため買付不可"
+        return 0, "round_lot_unaffordable"
     return shares, ""
+
+
+def _capital_utilization_policy(config: dict[str, Any]) -> dict[str, Any]:
+    policy = config.get("capital_utilization_policy")
+    return policy if isinstance(policy, dict) else {}
+
+
+def _capital_utilization_enabled(config: dict[str, Any]) -> bool:
+    return bool(_capital_utilization_policy(config).get("enabled", False))
+
+
+def _current_market_exposure(state: dict[str, Any]) -> float:
+    total = 0.0
+    for position in state.get("positions", []) or []:
+        if not isinstance(position, dict):
+            continue
+        value = position.get("market_value")
+        if value is None:
+            value = float(position.get("shares") or position.get("quantity") or 0) * float(
+                position.get("current_price") or position.get("entry_price") or 0
+            )
+        total += float(value or 0)
+    return total
+
+
+def _available_buy_budget(
+    cash: float,
+    initial_cash: float,
+    state: dict[str, Any],
+    config: dict[str, Any],
+    pending_buy_amount: float = 0.0,
+) -> tuple[float, str]:
+    base_allocation = initial_cash * float(config["portfolio"]["max_allocation_per_symbol"])
+    policy = _capital_utilization_policy(config)
+    if not bool(policy.get("enabled", False)):
+        return max(0.0, min(base_allocation, cash - pending_buy_amount)), "legacy_allocation_limit"
+
+    min_cash_buffer = float(policy.get("min_cash_buffer", 0) or 0)
+    cash_available = cash - pending_buy_amount - min_cash_buffer
+    if cash_available <= 0:
+        return 0.0, "insufficient_available_cash"
+
+    total_assets = float(state.get("total_assets") or (cash + _current_market_exposure(state)) or initial_cash)
+    max_position_value_rate = policy.get("max_position_value_rate")
+    if max_position_value_rate is not None:
+        position_cap = total_assets * float(max_position_value_rate)
+    else:
+        position_cap = float(
+            policy.get("max_position_size")
+            or config.get("safety", {}).get("max_single_order_amount")
+            or base_allocation
+            or 0
+        )
+    if position_cap <= 0:
+        position_cap = base_allocation
+    if not bool(policy.get("buy_as_much_as_possible") or policy.get("allow_budget_reallocation", False)):
+        position_cap = min(position_cap, base_allocation)
+
+    target_exposure = policy.get("target_exposure")
+    if target_exposure is not None:
+        remaining_exposure = total_assets * float(target_exposure) - _current_market_exposure(state) - pending_buy_amount
+        if remaining_exposure <= 0:
+            return 0.0, "target_exposure_limit"
+        position_cap = min(position_cap, remaining_exposure)
+
+    return max(0.0, min(cash_available, position_cap)), "capital_utilization_policy"
 
 
 def _skipped_buy_attempt(
@@ -953,7 +1019,22 @@ def execute_real_data_paper_trade(
             )
             continue
         if len(next_positions) + len(pending_buy_codes) >= max_positions:
-            break
+            trades.append(
+                _skipped_buy_attempt(
+                    trade_id=f"{trade_date}_{item['code']}_SKIP_BUY",
+                    action="SKIP_BUY",
+                    code=item["code"],
+                    name=item["name"],
+                    trade_date=trade_date,
+                    price=_candidate_entry_price(item),
+                    allocation_limit=0,
+                    score=item.get("total_score"),
+                    reason=item.get("selection_reason") or item.get("selected_reason") or item["reason"],
+                    skipped_reason="max_positions_limit",
+                    config=config,
+                )
+            )
+            continue
         if item["code"] in held_codes or item["code"] in pending_buy_codes:
             continue
         if item.get("entry_price_available") is False:
@@ -973,10 +1054,20 @@ def execute_real_data_paper_trade(
                 )
             )
             continue
-        allocation = min(allocation_limit, cash)
+        allocation, allocation_reason = _available_buy_budget(
+            cash,
+            initial_cash,
+            state,
+            config,
+            pending_buy_amount=sum(float(order.get("estimated_amount") or order.get("amount") or 0) for order in buy_candidates),
+        )
         entry_price = _candidate_entry_price(item)
         current_price = _candidate_market_price(item, entry_price)
         shares, skipped_reason = _calculate_buy_shares(entry_price, allocation, config)
+        if shares <= 0 and allocation_reason in {"insufficient_available_cash", "target_exposure_limit"}:
+            skipped_reason = allocation_reason
+        elif shares <= 0 and _capital_utilization_enabled(config):
+            skipped_reason = "selected_but_not_affordable"
         if shares <= 0:
             trades.append(
                 _skipped_buy_attempt(
@@ -1029,6 +1120,8 @@ def execute_real_data_paper_trade(
             "entry_price": entry_price,
             "shares": shares,
             "amount": round(amount, 2),
+            "allocation_limit": round(allocation, 2),
+            "allocation_reason": allocation_reason,
             "buy_commission": buy_commission,
             "score": item["total_score"],
             "reason": item.get("selection_reason") or item.get("selected_reason") or item["reason"],

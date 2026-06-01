@@ -418,6 +418,127 @@ def test_volume_filter_allows_candidate_at_threshold(config_copy: dict) -> None:
     assert len(result["selected"]) == 1
 
 
+def test_volume_filter_allows_candidate_when_max_volume_ratio_unset(config_copy: dict) -> None:
+    config_copy["volume_filter"] = {"enabled": True, "min_volume_ratio": 2.0}
+    result = score_real_candidates(
+        [candidate("1001", volume_ratio=9.0, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02)],
+        "2026-03-06",
+        config_copy,
+        "test",
+    )
+
+    assert result["scores"][0]["volume_filter_excluded"] is False
+    assert result["scores"][0]["volume_filter_max_threshold"] is None
+    assert len(result["selected"]) == 1
+
+
+def test_volume_filter_excludes_candidate_above_max_volume_ratio(config_copy: dict) -> None:
+    config_copy["volume_filter"] = {"enabled": True, "min_volume_ratio": 2.0, "max_volume_ratio": 4.0}
+    result = score_real_candidates(
+        [candidate("1001", volume_ratio=4.01, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02)],
+        "2026-03-06",
+        config_copy,
+        "test",
+    )
+
+    score = result["scores"][0]
+    assert len(result["selected"]) == 0
+    assert score["volume_filter_excluded"] is True
+    assert score["volume_filter_threshold"] == 2.0
+    assert score["volume_filter_max_threshold"] == 4.0
+    assert score["volume_filter_reason"] == "volume_ratio_above_max"
+    assert score["rejected_reason"] == "volume_ratio_above_max"
+
+
+def test_volume_filter_allows_candidate_at_max_volume_ratio(config_copy: dict) -> None:
+    config_copy["volume_filter"] = {"enabled": True, "min_volume_ratio": 2.0, "max_volume_ratio": 4.0}
+    result = score_real_candidates(
+        [candidate("1001", volume_ratio=4.0, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02)],
+        "2026-03-06",
+        config_copy,
+        "test",
+    )
+
+    assert result["scores"][0]["volume_filter_excluded"] is False
+    assert len(result["selected"]) == 1
+
+
+def test_rsi_volume_hot_zone_filter_excludes_matching_candidate(config_copy: dict) -> None:
+    config_copy["rsi_volume_hot_zone_filter"] = {
+        "enabled": True,
+        "min_rsi": 60,
+        "min_volume_ratio": 3,
+        "max_volume_ratio": 5,
+        "reason": "rsi_volume_hot_zone",
+    }
+    result = score_real_candidates(
+        [candidate("1001", volume_ratio=3.5, turnover_value=2_500_000_000, rsi=60, volatility=0.02)],
+        "2026-03-06",
+        config_copy,
+        "test",
+    )
+
+    score = result["scores"][0]
+    assert len(result["selected"]) == 0
+    assert score["rsi_volume_hot_zone_excluded"] is True
+    assert score["rsi_volume_hot_zone_reason"] == "rsi_volume_hot_zone"
+    assert score["rejected_reason"] == "rsi_volume_hot_zone"
+
+
+def test_rsi_volume_hot_zone_filter_uses_inclusive_volume_upper_bound(config_copy: dict) -> None:
+    config_copy["rsi_volume_hot_zone_filter"] = {
+        "enabled": True,
+        "min_rsi": 60,
+        "min_volume_ratio": 3,
+        "max_volume_ratio": 5,
+        "reason": "rsi_volume_hot_zone",
+    }
+    result = score_real_candidates(
+        [candidate("1001", volume_ratio=5.0, turnover_value=2_500_000_000, rsi=64, volatility=0.02)],
+        "2026-03-06",
+        config_copy,
+        "test",
+    )
+
+    assert result["scores"][0]["rsi_volume_hot_zone_excluded"] is True
+    assert result["scores"][0]["rejected_reason"] == "rsi_volume_hot_zone"
+
+
+def test_rsi_volume_hot_zone_filter_allows_non_matching_candidates(config_copy: dict) -> None:
+    config_copy["rsi_volume_hot_zone_filter"] = {
+        "enabled": True,
+        "min_rsi": 60,
+        "min_volume_ratio": 3,
+        "max_volume_ratio": 5,
+        "reason": "rsi_volume_hot_zone",
+    }
+    result = score_real_candidates(
+        [
+            candidate("1001", volume_ratio=2.99, turnover_value=2_500_000_000, rsi=64, volatility=0.02),
+            candidate("1002", volume_ratio=5.01, turnover_value=2_500_000_000, rsi=64, volatility=0.02),
+            candidate("1003", volume_ratio=3.5, turnover_value=2_500_000_000, rsi=59.99, volatility=0.02),
+        ],
+        "2026-03-06",
+        config_copy,
+        "test",
+    )
+
+    assert [score["rsi_volume_hot_zone_excluded"] for score in result["scores"]] == [False, False, False]
+    assert len(result["selected"]) == 3
+
+
+def test_rsi_volume_hot_zone_filter_disabled_keeps_existing_profile_behavior(config_copy: dict) -> None:
+    result = score_real_candidates(
+        [candidate("1001", volume_ratio=3.5, turnover_value=2_500_000_000, rsi=60, volatility=0.02)],
+        "2026-03-06",
+        config_copy,
+        "test",
+    )
+
+    assert result["scores"][0]["rsi_volume_hot_zone_excluded"] is False
+    assert len(result["selected"]) == 1
+
+
 def test_volume_filter_can_use_two_times_threshold(config_copy: dict) -> None:
     config_copy["volume_filter"] = {"enabled": True, "min_volume_ratio": 2.0}
     below = score_real_candidates(

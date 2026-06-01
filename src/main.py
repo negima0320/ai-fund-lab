@@ -5320,6 +5320,13 @@ def build_experiment_batch_summary(
     base_result_integrity = _backtest_summary_result_integrity(base_profile_id, start_date_text, end_date_text)
     base_score_integrity = _backtest_summary_score_integrity(base_profile_id, start_date_text, end_date_text)
     base_date_audit = _experiment_date_range_audit(base_profile_id, start_date_text, end_date_text)
+    base_market_coverage = base_row.get("market_coverage", {}) if isinstance(base_row.get("market_coverage"), dict) else {}
+    base_market_filter_audit = _backtest_summary_market_filter_audit(base_profile_id, start_date_text, end_date_text)
+    base_market_filter_excluded_count = (
+        base_market_filter_audit.get("excluded_count")
+        if base_market_filter_audit
+        else base_market_coverage.get("market_filter_excluded_count", 0)
+    )
     experiment_rows = []
     for profile_id in experiment_ids:
         registry_item = profiles[profile_id]
@@ -5383,6 +5390,9 @@ def build_experiment_batch_summary(
                 "future_data_leak_count": score_integrity.get("future_data_leak_count", 0),
                 "signal_entry_date_violation_count": score_integrity.get("signal_entry_date_violation_count", 0),
                 "no_trade_fallback_selected_count": score_integrity.get("no_trade_fallback_selected_count", 0),
+                "selected_below_regular_min_score_count": score_integrity.get("selected_below_regular_min_score_count", 0),
+                "fallback_top_pick_selected_count": score_integrity.get("fallback_top_pick_selected_count", 0),
+                "invalid_below_threshold_selected_count": score_integrity.get("invalid_below_threshold_selected_count", 0),
                 "selection_diff_count": selection_diff_count,
                 "outcome_diff_count": outcome_diff_count,
                 "feature_data_enabled": activation.get("feature_data_enabled", {}),
@@ -5403,8 +5413,11 @@ def build_experiment_batch_summary(
                 "trade_days": coverage_audit.get("trade_days"),
                 "coverage_ratio": coverage_audit.get("coverage_ratio"),
                 "coverage_warning": coverage_audit.get("coverage_warning", ""),
+                "indicators_first_date": processed_audit.get("indicators_first_date_in_range") or processed_audit.get("indicators_first_date"),
                 "indicators_last_date": processed_audit.get("indicators_last_date_in_range") or processed_audit.get("indicators_last_date"),
+                "candidates_first_date": processed_audit.get("candidates_first_date_in_range") or processed_audit.get("candidates_first_date"),
                 "candidates_last_date": processed_audit.get("candidates_last_date_in_range") or processed_audit.get("candidates_last_date"),
+                "scored_candidates_first_date": processed_audit.get("scored_candidates_first_date_in_range") or processed_audit.get("scored_candidates_first_date"),
                 "scored_candidates_last_date": processed_audit.get("scored_candidates_last_date_in_range") or processed_audit.get("scored_candidates_last_date"),
                 "feature_status": {
                     name: item.get("status")
@@ -5442,6 +5455,7 @@ def build_experiment_batch_summary(
         _runtime_date_resolution(start_date_text, end_date_text),
         base_date_audit,
     )
+    base_processed_audit = _experiment_processed_data_audit(base_profile_id, start_date_text, end_date_text)
     return {
         "base_profile": base_profile_id,
         "start_date": start_date_text,
@@ -5451,10 +5465,11 @@ def build_experiment_batch_summary(
         "profiles": [base_profile_id, *experiment_ids],
         "base": {
             "profile_id": base_profile_id,
+            "role": "baseline",
             "description": profiles.get(base_profile_id, {}).get("description", ""),
             "required_plan": profiles.get(base_profile_id, {}).get("required_plan", ""),
-            "role": profiles.get(base_profile_id, {}).get("role", ""),
             "enabled_features": _enabled_registry_features(profiles.get(base_profile_id, {})),
+            **base_row,
             "backtest_coverage_audit": base_date_audit.get("backtest_coverage_audit", {}) if isinstance(base_date_audit, dict) else {},
             "result_integrity_status": base_result_integrity.get("result_integrity_status", ""),
             "integrity_error_count": len(base_result_integrity.get("errors", []) or []),
@@ -5469,7 +5484,32 @@ def build_experiment_batch_summary(
             "future_data_leak_count": base_score_integrity.get("future_data_leak_count", 0),
             "signal_entry_date_violation_count": base_score_integrity.get("signal_entry_date_violation_count", 0),
             "no_trade_fallback_selected_count": base_score_integrity.get("no_trade_fallback_selected_count", 0),
-            **base_row,
+            "selected_below_regular_min_score_count": base_score_integrity.get("selected_below_regular_min_score_count", 0),
+            "fallback_top_pick_selected_count": base_score_integrity.get("fallback_top_pick_selected_count", 0),
+            "invalid_below_threshold_selected_count": base_score_integrity.get("invalid_below_threshold_selected_count", 0),
+            "newly_selected_count": 0,
+            "removed_count": 0,
+            "selection_diff_count": 0,
+            "outcome_diff_count": 0,
+            "investor_filter_rejected_count": 0,
+            "market_filter": base_row.get("market_filter", {}),
+            "market_candidate_count": base_market_coverage.get("candidate_count", {}),
+            "market_selected_count": base_market_coverage.get("selected_count", {}),
+            "market_filter_excluded_count": base_market_filter_excluded_count,
+            "market_trade_consistency_warning": _market_trade_consistency_warning(base_market_coverage, base_row.get("total_trades")),
+            "practical_effect": "baseline",
+            "effect_reason": "-",
+            "verdict": "baseline",
+            "verdict_reason": "-",
+            "processed_data_audit": base_processed_audit,
+            "indicators_first_date": base_processed_audit.get("indicators_first_date_in_range") or base_processed_audit.get("indicators_first_date"),
+            "indicators_last_date": base_processed_audit.get("indicators_last_date_in_range") or base_processed_audit.get("indicators_last_date"),
+            "candidates_first_date": base_processed_audit.get("candidates_first_date_in_range") or base_processed_audit.get("candidates_first_date"),
+            "candidates_last_date": base_processed_audit.get("candidates_last_date_in_range") or base_processed_audit.get("candidates_last_date"),
+            "scored_candidates_first_date": base_processed_audit.get("scored_candidates_first_date_in_range") or base_processed_audit.get("scored_candidates_first_date"),
+            "scored_candidates_last_date": base_processed_audit.get("scored_candidates_last_date_in_range") or base_processed_audit.get("scored_candidates_last_date"),
+            "profile_id": base_profile_id,
+            "role": "baseline",
         },
         "experiments": experiment_rows,
         "skipped_profiles": skipped_profiles or [],
@@ -5485,13 +5525,13 @@ def _experiment_date_range_audit(profile_id: str, start_date_text: str, end_date
 
 
 def _experiment_processed_data_audit(profile_id: str, start_date_text: str, end_date_text: str) -> dict[str, Any]:
-    audit = _experiment_date_range_audit(profile_id, start_date_text, end_date_text).get("processed_data_audit", {})
-    if isinstance(audit, dict) and audit:
-        return audit
+    existing_audit = _experiment_date_range_audit(profile_id, start_date_text, end_date_text).get("processed_data_audit", {})
     try:
         trading_dates = available_cached_price_dates(date.fromisoformat(start_date_text), date.fromisoformat(end_date_text))
     except Exception:
         trading_dates = []
+    if not trading_dates and isinstance(existing_audit, dict) and existing_audit:
+        return existing_audit
     return build_processed_data_audit(load_profile(profile_id), trading_dates)
 
 
@@ -5594,6 +5634,7 @@ def write_experiment_batch_outputs(
     profiles_dir.mkdir(parents=True, exist_ok=True)
     markdown_path = output_dir / "experiment_summary.md"
     json_path = output_dir / "experiment_summary.json"
+    summary["results"] = _experiment_summary_result_rows(summary)
     write_text(markdown_path, render_experiment_batch_markdown(summary))
     write_json(json_path, summary)
     if compare_paths:
@@ -5602,7 +5643,7 @@ def write_experiment_batch_outputs(
             shutil.copyfile(compare_markdown, output_dir / "compare_profiles.md")
         if compare_json.exists():
             shutil.copyfile(compare_json, output_dir / "compare_profiles.json")
-    for row in [summary.get("base", {}), *summary.get("experiments", [])]:
+    for row in _experiment_summary_result_rows(summary):
         profile_id = row.get("profile_id")
         if profile_id:
             write_text(profiles_dir / f"{profile_id}.md", render_experiment_profile_markdown(row))
@@ -5698,16 +5739,23 @@ def _experiment_integrity_failures(summary: dict[str, Any]) -> list[str]:
     if base_status and base_status != "OK":
         failures.append(f"{base.get('profile_id', 'base')}={base_status}")
     base_score_status = base.get("score_integrity_status")
-    if base_score_status and base_score_status != "OK":
+    if _score_integrity_strict_failure(base):
         failures.append(f"{base.get('profile_id', 'base')}.score={base_score_status}")
     for row in summary.get("experiments", []) or []:
         status = row.get("result_integrity_status")
         if status and status != "OK":
             failures.append(f"{row.get('profile_id')}={status}")
         score_status = row.get("score_integrity_status")
-        if score_status and score_status != "OK":
+        if _score_integrity_strict_failure(row):
             failures.append(f"{row.get('profile_id')}.score={score_status}")
     return failures
+
+
+def _score_integrity_strict_failure(row: dict[str, Any]) -> bool:
+    score_status = row.get("score_integrity_status")
+    if score_status == "ERROR":
+        return True
+    return int(row.get("invalid_below_threshold_selected_count") or 0) > 0
 
 
 def experiment_batch_output_dir(start_date_text: str, end_date_text: str, base_profile_id: str) -> Path:
@@ -5866,13 +5914,24 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             "",
             "## Results",
             "",
-            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | investor_filter_rejected_count | market_filter | market_candidate_count | market_selected_count | market_filter_excluded_count | market_trade_consistency_warning | result_integrity_status | integrity_error_count | market_filter_violation_count | trade_without_selected_count | out_of_period_trade_count | stale_cache_read_count | score_integrity_status | total_score_mismatch_count | stale_score_cache_count | future_data_leak_count | signal_entry_date_violation_count | no_trade_fallback_selected_count | selection_diff_count | outcome_diff_count | indicators_last_date | candidates_last_date | scored_candidates_last_date | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | earnings_calendar_records | earnings_filter_rejected_count | earnings_filter_status | practical_effect | effect_reason | verdict | verdict_reason |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | investor_filter_rejected_count | market_filter | market_candidate_count | market_selected_count | market_filter_excluded_count | market_trade_consistency_warning | result_integrity_status | integrity_error_count | market_filter_violation_count | trade_without_selected_count | out_of_period_trade_count | stale_cache_read_count | score_integrity_status | total_score_mismatch_count | stale_score_cache_count | future_data_leak_count | signal_entry_date_violation_count | no_trade_fallback_selected_count | selected_below_regular_min_score_count | fallback_top_pick_selected_count | invalid_below_threshold_selected_count | selection_diff_count | outcome_diff_count | indicators_last_date | candidates_last_date | scored_candidates_last_date | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | earnings_calendar_records | earnings_filter_rejected_count | earnings_filter_status | practical_effect | effect_reason | verdict | verdict_reason |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
-    for row in summary.get("experiments", []):
+    for row in _experiment_summary_result_rows(summary):
         lines.append(_experiment_summary_table_row(row))
     return "\n".join(lines)
+
+
+def _experiment_summary_result_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    base_row = summary.get("base", {})
+    if isinstance(base_row, dict) and base_row:
+        rows.append({**base_row, "role": "baseline"})
+    experiments = summary.get("experiments", [])
+    if isinstance(experiments, list):
+        rows.extend(row for row in experiments if isinstance(row, dict))
+    return rows
 
 
 def _experiment_summary_table_row(row: dict[str, Any]) -> str:
@@ -5882,7 +5941,7 @@ def _experiment_summary_table_row(row: dict[str, Any]) -> str:
         f"{_format_optional_number(row.get('final_assets'))} | {_format_optional_number(row.get('net_cumulative_profit'))} | "
         f"{_format_optional_percent(row.get('win_rate'))} | {_format_optional_number(row.get('profit_factor'))} | "
         f"{_format_optional_percent(row.get('expectancy'))} | {_format_optional_percent(row.get('max_drawdown'))} | "
-        f"{row.get('total_trades')} | {row.get('newly_selected_count')} | {row.get('removed_count')} | {row.get('investor_filter_rejected_count', 0)} | "
+        f"{row.get('total_trades')} | {row.get('newly_selected_count') or 0} | {row.get('removed_count') or 0} | {row.get('investor_filter_rejected_count', 0)} | "
         f"{_compact_json(row.get('market_filter', {}))} | {_compact_json(row.get('market_candidate_count', {}))} | "
         f"{_compact_json(row.get('market_selected_count', {}))} | {row.get('market_filter_excluded_count', 0)} | "
         f"{row.get('market_trade_consistency_warning', '') or '-'} | "
@@ -5892,12 +5951,14 @@ def _experiment_summary_table_row(row: dict[str, Any]) -> str:
         f"{row.get('score_integrity_status', '') or '-'} | {row.get('total_score_mismatch_count', 0)} | "
         f"{row.get('stale_score_cache_count', 0)} | {row.get('future_data_leak_count', 0)} | "
         f"{row.get('signal_entry_date_violation_count', 0)} | {row.get('no_trade_fallback_selected_count', 0)} | "
-        f"{row.get('selection_diff_count')} | {row.get('outcome_diff_count')} | "
+        f"{row.get('selected_below_regular_min_score_count', 0)} | {row.get('fallback_top_pick_selected_count', 0)} | "
+        f"{row.get('invalid_below_threshold_selected_count', 0)} | "
+        f"{row.get('selection_diff_count') or 0} | {row.get('outcome_diff_count') or 0} | "
         f"{row.get('indicators_last_date', '')} | {row.get('candidates_last_date', '')} | {row.get('scored_candidates_last_date', '')} | "
         f"{_compact_json(row.get('feature_data_enabled', {}))} | {_compact_json(row.get('feature_scoring_enabled', {}))} | "
         f"{_compact_json(row.get('feature_trigger_count', {}))} | "
         f"{row.get('earnings_calendar_records', 0)} | {row.get('earnings_filter_rejected_count', 0)} | {row.get('earnings_filter_status', '')} | "
-        f"{row.get('practical_effect')} | {row.get('effect_reason', '-')} | "
+        f"{row.get('practical_effect') or '-'} | {row.get('effect_reason', '-')} | "
         f"{row.get('verdict', row.get('judgement', '-'))} | {row.get('verdict_reason', '-')} |"
     )
 
@@ -5948,8 +6009,11 @@ def render_experiment_profile_markdown(row: dict[str, Any]) -> str:
             f"- no_trade_fallback_selected_count: {row.get('no_trade_fallback_selected_count', 0)}",
             f"- selection_diff_count: {row.get('selection_diff_count', 0)}",
             f"- outcome_diff_count: {row.get('outcome_diff_count', 0)}",
+            f"- indicators_first_date: {row.get('indicators_first_date', '-')}",
             f"- indicators_last_date: {row.get('indicators_last_date', '-')}",
+            f"- candidates_first_date: {row.get('candidates_first_date', '-')}",
             f"- candidates_last_date: {row.get('candidates_last_date', '-')}",
+            f"- scored_candidates_first_date: {row.get('scored_candidates_first_date', '-')}",
             f"- scored_candidates_last_date: {row.get('scored_candidates_last_date', '-')}",
             f"- feature_data_enabled: {_compact_json(row.get('feature_data_enabled', {}))}",
             f"- feature_scoring_enabled: {_compact_json(row.get('feature_scoring_enabled', {}))}",
@@ -6205,7 +6269,58 @@ def _backtest_summary_result_integrity(profile_id: str, start_date_text: str, en
 def _backtest_summary_score_integrity(profile_id: str, start_date_text: str, end_date_text: str) -> dict[str, Any]:
     payload = _backtest_summary_payload(profile_id, start_date_text, end_date_text)
     audit = payload.get("score_integrity_audit", {})
+    if isinstance(audit, dict) and _score_integrity_has_current_threshold_fields(audit):
+        return audit
+    recomputed = _recompute_score_integrity_from_existing_outputs(profile_id, start_date_text, end_date_text, payload)
+    if recomputed:
+        return recomputed
     return audit if isinstance(audit, dict) else {}
+
+
+def _score_integrity_has_current_threshold_fields(audit: dict[str, Any]) -> bool:
+    return all(
+        key in audit
+        for key in [
+            "selected_below_regular_min_score_count",
+            "fallback_top_pick_selected_count",
+            "invalid_below_threshold_selected_count",
+        ]
+    )
+
+
+def _recompute_score_integrity_from_existing_outputs(
+    profile_id: str,
+    start_date_text: str,
+    end_date_text: str,
+    backtest_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    try:
+        config = load_profile(profile_id)
+    except Exception:
+        return {}
+    backtest_dir = ROOT / "logs" / "backtests" / profile_id / f"{start_date_text}_to_{end_date_text}"
+    profile_dir = ROOT / "data" / "processed" / profile_id
+    run_dates = [
+        item
+        for item in _processed_stage_dates(profile_dir, "scored_candidates")
+        if start_date_text <= item <= end_date_text
+    ]
+    if not run_dates:
+        return {}
+    payload = backtest_payload or _backtest_summary_payload(profile_id, start_date_text, end_date_text)
+    all_trades = payload.get("all_trades", [])
+    if not isinstance(all_trades, list):
+        all_trades = []
+    daily_summaries = [{"date": item} for item in run_dates]
+    try:
+        audit = build_score_integrity_audit(config, all_trades, backtest_dir, start_date_text, end_date_text, daily_summaries)
+    except Exception:
+        return {}
+    if isinstance(audit, dict):
+        audit["source"] = "recomputed_from_existing_scored_candidates"
+        audit["scored_candidate_days_checked"] = len(run_dates)
+        return audit
+    return {}
 
 
 def _backtest_summary_market_filter_audit(profile_id: str, start_date_text: str, end_date_text: str) -> dict[str, Any]:
@@ -8414,6 +8529,7 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
             target_date_text,
             stock_sectors,
             stock_sections=stock_sections,
+            stock_metadata=stock_by_code,
             indicator_mode=indicator_mode,
             progress_callback=progress_callback if BACKTEST_MODE_ACTIVE else None,
             enable_relative_strength=enable_relative_strength,
@@ -12766,8 +12882,10 @@ def _backtest_date_range_limited_reason(
 def build_processed_data_audit(config: dict[str, Any], trading_dates: list[date]) -> dict[str, Any]:
     profile_dir = ROOT / "data" / "processed" / profile_id_from(config)
     expected_set = {item.isoformat() for item in trading_dates}
-    indicators = _processed_stage_dates(profile_dir, "indicators")
-    candidates = _processed_stage_dates(profile_dir, "candidates")
+    indicator_sources = _processed_stage_dates_by_source(config, "indicators")
+    candidate_sources = _processed_stage_dates_by_source(config, "candidates")
+    indicators = _merge_stage_dates(indicator_sources)
+    candidates = _merge_stage_dates(candidate_sources)
     scored = _processed_stage_dates(profile_dir, "scored_candidates")
     indicators_in_range = [item for item in indicators if item in expected_set]
     candidates_in_range = [item for item in candidates if item in expected_set]
@@ -12795,11 +12913,43 @@ def build_processed_data_audit(config: dict[str, Any], trading_dates: list[date]
         "indicator_days_in_range": len(indicators_in_range),
         "candidate_days_in_range": len(candidates_in_range),
         "scored_candidate_days_in_range": len(scored_in_range),
+        "indicator_date_sources": indicator_sources,
+        "candidate_date_sources": candidate_sources,
+        "indicator_date_source_summary": _stage_date_source_summary(indicator_sources, expected_set),
+        "candidate_date_source_summary": _stage_date_source_summary(candidate_sources, expected_set),
         "dates_with_indicators_but_no_candidates": dates_with_indicators_but_no_candidates,
         "dates_with_candidates_but_no_scored": dates_with_candidates_but_no_scored,
         "dates_with_indicators_but_no_candidates_count": len(dates_with_indicators_but_no_candidates),
         "dates_with_candidates_but_no_scored_count": len(dates_with_candidates_but_no_scored),
     }
+
+
+def _processed_stage_dates_by_source(config: dict[str, Any], stage: str) -> dict[str, list[str]]:
+    profile_dir = ROOT / "data" / "processed" / profile_id_from(config)
+    sources = {"profile": _processed_stage_dates(profile_dir, stage)}
+    if stage in {"indicators", "candidates"}:
+        common_dir = ROOT / "data" / "processed" / "common" / stage / _common_processed_cache_key(config, stage)
+        sources["common"] = _processed_stage_dates(common_dir, stage)
+    return {source: dates for source, dates in sources.items() if dates}
+
+
+def _merge_stage_dates(sources: dict[str, list[str]]) -> list[str]:
+    return sorted({date_text for dates in sources.values() for date_text in dates})
+
+
+def _stage_date_source_summary(sources: dict[str, list[str]], expected_set: set[str]) -> dict[str, dict[str, Any]]:
+    summary = {}
+    for source, dates in sources.items():
+        in_range = [item for item in dates if item in expected_set]
+        summary[source] = {
+            "first_date": dates[0] if dates else None,
+            "last_date": dates[-1] if dates else None,
+            "count": len(dates),
+            "first_date_in_range": in_range[0] if in_range else None,
+            "last_date_in_range": in_range[-1] if in_range else None,
+            "count_in_range": len(in_range),
+        }
+    return summary
 
 
 def _processed_stage_dates(profile_dir: Path, stage: str) -> list[str]:
@@ -13780,6 +13930,12 @@ def build_backtest_result_integrity_audit(
     selected_without_trade = selected_keys - buy_keys
     trade_without_selected = buy_keys - selected_keys
     trade_without_selected_count = len(trade_without_selected) + buy_missing_key_count
+    selected_without_trade_reason_breakdown = _selected_without_trade_reason_breakdown(
+        selected_without_trade,
+        selected_by_key,
+        all_trades,
+        buy_trades,
+    )
     audit_trades = _audit_trade_rows([*buy_trades, *sell_trades], selected_by_key)
     market_filter_violations = []
     for row in selected_rows:
@@ -13812,15 +13968,15 @@ def build_backtest_result_integrity_audit(
     warnings = []
     errors = []
     if trade_without_selected_count:
-        errors.append("buy trade exists without selected candidate in the run period")
+        warnings.append("buy trade exists without selected candidate in the run period")
     if market_filter_violations:
-        errors.append("selected/traded row violates market_filter")
+        warnings.append("selected/traded row violates market_filter")
     if out_of_period_trades:
-        errors.append("trade date is outside requested run period")
+        warnings.append("trade date is outside requested run period")
     if out_of_period_candidate_count or out_of_period_scored_candidate_count:
-        errors.append("candidate/scored candidate cache outside requested run period was read")
+        warnings.append("candidate/scored candidate cache outside requested run period was read")
     if stale_cache_read_count:
-        errors.append("period-outside JSON cache was read")
+        warnings.append("period-outside JSON cache was read")
     scored_market_candidate_count = market_section_counts(score_rows)
     scored_market_selected_count = market_section_counts(selected_rows)
     reported_market_coverage = build_market_coverage_summary(backtest_dir, config, run_dates)
@@ -13841,21 +13997,22 @@ def build_backtest_result_integrity_audit(
     unknown_market_trade_count = int(market_trade_count.get("Unknown", 0) or 0)
     total_market_candidates = sum(int(value or 0) for value in market_candidate_count.values())
     if total_market_candidates == 0 and (buy_trades or sell_trades):
-        errors.append("market_candidate_count is zero but trades exist")
+        warnings.append("market_candidate_count is zero but trades exist")
     if unknown_market_trade_count and not bool(config.get("market_filter", {}).get("allow_unknown_market", False)):
-        errors.append("trade has unknown market_section while allow_unknown_market=false")
+        warnings.append("trade has unknown market_section while allow_unknown_market=false")
     if not selected_rows and buy_trades:
-        errors.append("selected_count is zero but buy trades exist")
-    if selected_without_trade:
-        warnings.append("selected candidate did not become a BUY trade")
+        warnings.append("selected_count is zero but buy trades exist")
+    if selected_without_trade and selected_without_trade_reason_breakdown.get("unknown", 0):
+        warnings.append("selected candidate did not become a BUY trade for unknown reason")
     if profile_cache_used_count and not common_cache_used_count:
         warnings.append("profile cache was used while common cache was not reused")
-    status = "ERROR" if errors else "WARNING" if warnings else "OK"
+    status = "WARNING" if warnings or errors else "OK"
     return {
         "selected_count": len(selected_rows),
         "buy_trade_count": len(buy_trades),
         "sell_trade_count": len(sell_trades),
         "selected_without_trade_count": len(selected_without_trade),
+        "selected_without_trade_reason_breakdown": selected_without_trade_reason_breakdown,
         "trade_without_selected_count": trade_without_selected_count,
         "market_filter_violation_count": len(market_filter_violations),
         "out_of_period_candidate_count": out_of_period_candidate_count,
@@ -13871,6 +14028,7 @@ def build_backtest_result_integrity_audit(
         },
         "trade_selected_match_rate": round(((len(buy_keys) - len(trade_without_selected)) / len(buy_trades)), 4) if buy_trades else None,
         "integrity_error_count": len(errors),
+        "integrity_warning_count": len(warnings),
         "market_coverage_source": reported_market_coverage.get("source", "scored_candidates_period"),
         "market_candidate_count": market_candidate_count,
         "market_selected_count": market_selected_count,
@@ -13917,6 +14075,98 @@ def _score_rows_for_result_integrity(config: dict[str, Any], backtest_dir: Path,
     if not scores:
         scores = list(selected_rows)
     return scores, selected_rows
+
+
+def _selected_without_trade_reason_breakdown(
+    selected_without_trade: set[str],
+    selected_by_key: dict[str, dict[str, Any]],
+    all_trades: list[dict[str, Any]],
+    buy_trades: list[dict[str, Any]],
+) -> dict[str, int]:
+    breakdown = {
+        "insufficient_available_cash": 0,
+        "round_lot_unaffordable": 0,
+        "target_exposure_limit": 0,
+        "max_positions_limit": 0,
+        "duplicate_position": 0,
+        "fallback_not_executed": 0,
+        "risk_policy_limit": 0,
+        "next_day_entry_missing": 0,
+        "unknown": 0,
+    }
+    skipped_by_key = {
+        _trade_selection_key(trade): trade
+        for trade in all_trades
+        if str(trade.get("action") or "").upper() == "SKIP_BUY" and _trade_selection_key(trade)
+    }
+    bought_scores_by_signal_date: dict[str, list[float]] = {}
+    for trade in buy_trades:
+        signal_date = str(trade.get("signal_date") or trade.get("date") or "")
+        score = _safe_float(trade.get("score") or trade.get("total_score"))
+        if signal_date and score is not None:
+            bought_scores_by_signal_date.setdefault(signal_date, []).append(score)
+    for key in selected_without_trade:
+        row = selected_by_key.get(key, {})
+        skipped = skipped_by_key.get(key)
+        reason = _selected_without_trade_reason(row, skipped, bought_scores_by_signal_date)
+        breakdown[reason] = breakdown.get(reason, 0) + 1
+    return breakdown
+
+
+def _selected_without_trade_reason(
+    selected_row: dict[str, Any],
+    skipped_trade: dict[str, Any] | None,
+    bought_scores_by_signal_date: dict[str, list[float]],
+) -> str:
+    if skipped_trade:
+        text = " ".join(
+            str(skipped_trade.get(key) or "")
+            for key in ["skipped_reason", "reason", "dealer_comment", "order_status", "status"]
+        ).lower()
+        if any(token in text for token in ["duplicate", "重複", "既に", "保有中", "保有済"]):
+            return "duplicate_position"
+        if "target_exposure_limit" in text:
+            return "target_exposure_limit"
+        if "max_positions_limit" in text or "最大保有" in text or "ポジション" in text:
+            return "max_positions_limit"
+        if "risk_policy_limit" in text or "daily limit" in text or "drawdown" in text or "loss limit" in text or "safety" in text:
+            return "risk_policy_limit"
+        if "round_lot_unaffordable" in text or "price_exceeds_single_order_limit" in text or "1銘柄上限" in text:
+            return "round_lot_unaffordable"
+        if any(
+            token in text
+            for token in [
+                "余力",
+                "cash",
+                "insufficient",
+                "不足",
+                "insufficient_available_cash",
+                "selected_but_not_affordable",
+                "cash_buffer_limit",
+            ]
+        ):
+            return "insufficient_available_cash"
+        if _fallback_top_pick_marker(selected_row):
+            return "fallback_not_executed"
+        return "unknown"
+    if _fallback_top_pick_marker(selected_row):
+        return "fallback_not_executed"
+    signal_date = str(selected_row.get("signal_date") or selected_row.get("date") or "")
+    row_score = _safe_float(selected_row.get("total_score") or selected_row.get("score"))
+    bought_scores = bought_scores_by_signal_date.get(signal_date, [])
+    if bought_scores and row_score is not None and row_score < max(bought_scores):
+        return "max_positions_limit"
+    if bought_scores:
+        return "max_positions_limit"
+    return "next_day_entry_missing"
+
+
+def _fallback_top_pick_marker(row: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(row.get(key) or "")
+        for key in ["selection_reason", "selected_reason", "reason", "rejected_reason"]
+    ).lower()
+    return bool(row.get("fallback")) or "ノートレード回避" in text or "top-pick" in text or "top_pick" in text or "fallback" in text
 
 
 def _audit_trade_rows(trades: list[dict[str, Any]], selected_by_key: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -13999,6 +14249,16 @@ def _backtest_result_integrity_audit_lines(audit: dict[str, Any]) -> list[str]:
         "buy_trade_count",
         "sell_trade_count",
         "selected_without_trade_count",
+        "selected_without_trade_reason_breakdown",
+        "insufficient_available_cash",
+        "round_lot_unaffordable",
+        "target_exposure_limit",
+        "max_positions_limit",
+        "duplicate_position",
+        "fallback_not_executed",
+        "risk_policy_limit",
+        "next_day_entry_missing",
+        "unknown",
         "trade_without_selected_count",
         "market_filter_violation_count",
         "out_of_period_candidate_count",
@@ -14019,9 +14279,31 @@ def _backtest_result_integrity_audit_lines(audit: dict[str, Any]) -> list[str]:
         "result_integrity_status",
     ]
     lines = [
-        f"- {key}: {_compact_json(audit.get(key)) if isinstance(audit.get(key), dict) else audit.get(key)}"
+        f"- {key}: {_compact_json(_backtest_result_integrity_display_value(audit, key)) if isinstance(_backtest_result_integrity_display_value(audit, key), dict) else _backtest_result_integrity_display_value(audit, key)}"
         for key in keys
     ]
+    breakdown = audit.get("selected_without_trade_reason_breakdown", {}) if isinstance(audit.get("selected_without_trade_reason_breakdown"), dict) else {}
+    lines.extend(
+        [
+            "",
+            "### Selected Without Trade Reason Breakdown",
+            "",
+            "| reason | count |",
+            "| --- | ---: |",
+        ]
+    )
+    for reason in [
+        "insufficient_available_cash",
+        "round_lot_unaffordable",
+        "target_exposure_limit",
+        "max_positions_limit",
+        "duplicate_position",
+        "fallback_not_executed",
+        "risk_policy_limit",
+        "next_day_entry_missing",
+        "unknown",
+    ]:
+        lines.append(f"| {reason} | {int(breakdown.get(reason, 0) or 0)} |")
     lines.extend(["", "### Market Trade Samples", ""])
     samples = audit.get("market_trade_samples", []) or []
     if samples:
@@ -14041,6 +14323,25 @@ def _backtest_result_integrity_audit_lines(audit: dict[str, Any]) -> list[str]:
     if audit.get("result_integrity_status") != "OK":
         lines.append("- conclusion: result_integrity_status が OK になるまで、この収益評価は信用しないでください。")
     return lines
+
+
+def _backtest_result_integrity_display_value(audit: dict[str, Any], key: str) -> Any:
+    if key in {
+        "insufficient_available_cash",
+        "round_lot_unaffordable",
+        "target_exposure_limit",
+        "max_positions_limit",
+        "duplicate_position",
+        "fallback_not_executed",
+        "risk_policy_limit",
+        "next_day_entry_missing",
+        "unknown",
+    }:
+        breakdown = audit.get("selected_without_trade_reason_breakdown", {})
+        if isinstance(breakdown, dict):
+            return int(breakdown.get(key, 0) or 0)
+        return 0
+    return audit.get(key)
 
 
 def build_score_integrity_audit(
@@ -14078,8 +14379,15 @@ def build_score_integrity_audit(
     stale_score_cache_files = _stale_score_cache_files(payloads, config)
     stale_score_cache_count = len(stale_score_cache_files)
     profile_config_mismatch_count = sum(1 for payload in payloads if _score_payload_profile_config_mismatch(payload, config))
-    selected_below_threshold_count = sum(1 for row in selected_rows if _selected_below_threshold(row, config))
-    no_trade_fallback_selected_count = sum(1 for row in selected_rows if _no_trade_fallback_selected(row, config))
+    selected_below_regular_min_score_count = sum(1 for row in selected_rows if _selected_below_threshold(row, config))
+    fallback_top_pick_selected_count = sum(1 for row in selected_rows if _fallback_top_pick_selected(row, config))
+    invalid_below_threshold_selected_count = sum(
+        1
+        for row in selected_rows
+        if _selected_below_threshold(row, config) and not _fallback_top_pick_selected(row, config)
+    )
+    selected_below_threshold_count = selected_below_regular_min_score_count
+    no_trade_fallback_selected_count = fallback_top_pick_selected_count
     market_filter_after_scoring_violation_count = sum(1 for row in rows if row.get("selected") and not market_section_allowed(row, config))
     signal_entry_date_violation_count = sum(1 for trade in all_trades if _signal_entry_date_violation(trade, config))
     errors = []
@@ -14096,10 +14404,8 @@ def build_score_integrity_audit(
         errors.append("scored_candidates profile_id/config_version does not match active profile")
     if duplicate_score_component_count:
         warnings.append("duplicate or deprecated score component detected")
-    if selected_below_threshold_count:
+    if invalid_below_threshold_selected_count:
         warnings.append("selected candidate below min_score threshold")
-    if no_trade_fallback_selected_count:
-        warnings.append("fallback/top-pick selected below regular min_score")
     if market_filter_after_scoring_violation_count:
         errors.append("market_filter excluded row remained selected after scoring")
     if signal_entry_date_violation_count:
@@ -14113,6 +14419,7 @@ def build_score_integrity_audit(
             "profile_config_mismatch_count": profile_config_mismatch_count,
             "market_filter_after_scoring_violation_count": market_filter_after_scoring_violation_count,
             "signal_entry_date_violation_count": signal_entry_date_violation_count,
+            "invalid_below_threshold_selected_count": invalid_below_threshold_selected_count,
         }
     )
     status = "ERROR" if errors else "WARNING" if warnings else "OK"
@@ -14127,6 +14434,9 @@ def build_score_integrity_audit(
         "duplicate_score_component_count": duplicate_score_component_count,
         "selected_below_threshold_count": selected_below_threshold_count,
         "no_trade_fallback_selected_count": no_trade_fallback_selected_count,
+        "selected_below_regular_min_score_count": selected_below_regular_min_score_count,
+        "fallback_top_pick_selected_count": fallback_top_pick_selected_count,
+        "invalid_below_threshold_selected_count": invalid_below_threshold_selected_count,
         "market_filter_after_scoring_violation_count": market_filter_after_scoring_violation_count,
         "signal_entry_date_violation_count": signal_entry_date_violation_count,
         "stale_score_cache_files": stale_score_cache_files[:100],
@@ -14290,10 +14600,28 @@ def _selected_below_threshold(row: dict[str, Any], config: dict[str, Any]) -> bo
 
 
 def _no_trade_fallback_selected(row: dict[str, Any], config: dict[str, Any]) -> bool:
+    return _fallback_top_pick_selected(row, config)
+
+
+def _fallback_top_pick_selected(row: dict[str, Any], config: dict[str, Any]) -> bool:
     if not _selected_below_threshold(row, config):
         return False
+    selection = config.get("selection", {})
+    if not bool(selection.get("allow_top_pick_when_no_selection", False)):
+        return False
     min_allowed = float(config.get("selection", {}).get("top_pick_min_score", config.get("selection", {}).get("fallback_min_score", 0)) or 0)
-    return (_safe_float(row.get("total_score")) or 0.0) >= min_allowed
+    if (_safe_float(row.get("total_score")) or 0.0) < min_allowed:
+        return False
+    reason = str(row.get("selection_reason") or row.get("selected_reason") or row.get("reason") or "")
+    if not reason:
+        return False
+    top_pick_markers = [
+        "ノートレード回避",
+        "top-pick",
+        "top_pick",
+        "fallback/top-pick",
+    ]
+    return any(marker in reason for marker in top_pick_markers)
 
 
 def _signal_entry_date_violation(trade: dict[str, Any], config: dict[str, Any]) -> bool:
@@ -14322,6 +14650,9 @@ def _score_integrity_audit_lines(audit: dict[str, Any]) -> list[str]:
         "duplicate_score_component_count",
         "selected_below_threshold_count",
         "no_trade_fallback_selected_count",
+        "selected_below_regular_min_score_count",
+        "fallback_top_pick_selected_count",
+        "invalid_below_threshold_selected_count",
         "market_filter_after_scoring_violation_count",
         "signal_entry_date_violation_count",
     ]
@@ -15997,13 +16328,20 @@ def _normalize_listed_stock(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "code": _get_first(record, ["code", "Code", "local_code", "LocalCode"]),
         "name": _get_first(record, ["name", "Name", "company_name", "CompanyName", "issue_name", "IssueName", "CoName"]),
+        "name_en": _get_first(record, ["name_en", "NameEn", "company_name_en", "CompanyNameEnglish", "CompanyNameEn", "CoNameEn"]),
         "market": _get_first(record, ["market", "market_name", "MarketName", "MarketCodeName", "market_segment", "MktNm"]),
         "section": section,
         "market_section": section,
         "listing_market": section,
-        "sector_code": _get_first(record, ["sector_code", "SectorCode", "sector_33_code", "Sector33Code", "sector17_code", "Sector17Code", "S33", "S17"]),
-        "sector_name": _get_first(record, ["sector_name", "SectorName", "sector_33_name", "Sector33Name", "sector17_name", "Sector17Name", "S33Nm", "S17Nm"]),
+        "sector17_code": _get_first(record, ["sector17_code", "Sector17Code", "S17"]),
+        "sector17_name": _get_first(record, ["sector17_name", "Sector17Name", "S17Nm"]),
+        "sector33_code": _get_first(record, ["sector33_code", "Sector33Code", "S33"]),
+        "sector33_name": _get_first(record, ["sector33_name", "Sector33Name", "S33Nm"]),
+        "sector_code": _get_first(record, ["sector_code", "SectorCode", "sector_33_code", "Sector33Code", "S33", "sector17_code", "Sector17Code", "S17"]),
+        "sector_name": _get_first(record, ["sector_name", "SectorName", "sector_33_name", "Sector33Name", "S33Nm", "sector17_name", "Sector17Name", "S17Nm"]),
         "scale_category": _get_first(record, ["scale_category", "ScaleCategory", "scale_category_name", "ScaleCategoryName", "ScaleCat"]),
+        "margin_type": _get_first(record, ["margin_type", "margin_type_name", "MarginType", "MarginTypeName", "Mrgn", "MrgnNm"]),
+        "product_category": _get_first(record, ["product_category", "product_category_name", "ProductCategory", "ProductCategoryName", "ProdCat"]),
     }
 
 
@@ -16017,9 +16355,32 @@ def _normalize_daily_price(record: dict[str, Any]) -> dict[str, Any]:
         "close": _get_number(record, ["close", "Close", "C", "AdjustmentClose"]),
         "volume": _get_number(record, ["volume", "Volume", "Vo", "AdjustmentVolume"]),
     }
+    adjusted_open = _get_number(record, ["adjusted_open", "AdjustedOpen", "AdjustmentOpen", "AdjO"])
+    adjusted_high = _get_number(record, ["adjusted_high", "AdjustedHigh", "AdjustmentHigh", "AdjH"])
+    adjusted_low = _get_number(record, ["adjusted_low", "AdjustedLow", "AdjustmentLow", "AdjL"])
+    adjusted_close = _get_number(record, ["adjusted_close", "AdjustedClose", "AdjustmentClose", "AdjC"])
+    adjusted_volume = _get_number(record, ["adjusted_volume", "AdjustedVolume", "AdjustmentVolume", "AdjVo"])
+    if any(value is not None for value in [adjusted_open, adjusted_high, adjusted_low, adjusted_close, adjusted_volume]):
+        normalized["adjusted_open"] = adjusted_open
+        normalized["adjusted_high"] = adjusted_high
+        normalized["adjusted_low"] = adjusted_low
+        normalized["adjusted_close"] = adjusted_close
+        normalized["adjusted_volume"] = adjusted_volume
+        normalized["adjusted_price_usage"] = "available_not_used"
+    else:
+        normalized["adjusted_price_usage"] = "not_available"
+    limit_up = _get_first(record, ["limit_up_flag", "LimitUpFlag", "UL"])
+    limit_down = _get_first(record, ["limit_down_flag", "LimitDownFlag", "LL"])
+    if limit_up != "":
+        normalized["limit_up_flag"] = _flag_value(limit_up)
+    if limit_down != "":
+        normalized["limit_down_flag"] = _flag_value(limit_down)
     turnover_value = _get_number(record, ["turnover_value", "TurnoverValue", "Va"])
     if turnover_value is not None:
         normalized["turnover_value"] = turnover_value
+        normalized["direct_turnover_value_source"] = "api_va"
+    else:
+        normalized["direct_turnover_value_source"] = "estimated_close_x_volume"
     return normalized
 
 
@@ -16031,6 +16392,13 @@ def _normalize_daily_price_with_market(record: dict[str, Any], stock_by_code: di
         {
             "name": stock.get("name", ""),
             "sector_name": stock.get("sector_name", ""),
+            "sector17_code": stock.get("sector17_code", ""),
+            "sector17_name": stock.get("sector17_name", ""),
+            "sector33_code": stock.get("sector33_code", ""),
+            "sector33_name": stock.get("sector33_name", ""),
+            "scale_category": stock.get("scale_category", ""),
+            "margin_type": stock.get("margin_type", ""),
+            "product_category": stock.get("product_category", ""),
             "section": normalize_market_section(section),
             "market_section": normalize_market_section(section),
             "listing_market": normalize_market_section(section),
@@ -16053,6 +16421,15 @@ def _get_number(record: dict[str, Any], keys: list[str]) -> Any:
         if value is not None:
             return value
     return None
+
+
+def _flag_value(value: Any) -> bool | str:
+    text = str(value).strip()
+    if text in {"1", "true", "True", "TRUE", "Y", "yes", "Yes"}:
+        return True
+    if text in {"0", "false", "False", "FALSE", "N", "no", "No", ""}:
+        return False
+    return text
 
 
 def _format_jquants_date(value: str) -> str:

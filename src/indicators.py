@@ -18,6 +18,7 @@ def calculate_indicators(
     target_date: str,
     stock_sectors: dict[str, str] | None = None,
     stock_sections: dict[str, str] | None = None,
+    stock_metadata: dict[str, dict[str, Any]] | None = None,
     indicator_mode: str = "full",
     progress_callback: Callable[[int, int, str], None] | None = None,
     enable_relative_strength: bool = False,
@@ -27,6 +28,7 @@ def calculate_indicators(
     indicator_mode = indicator_mode if indicator_mode in {"full", "fast", "minimal"} else "full"
     stock_sectors = stock_sectors or {}
     stock_sections = stock_sections or {}
+    stock_metadata = stock_metadata or {}
     by_code: dict[str, list[dict[str, Any]]] = {}
     for row in price_rows:
         if row.get("close") is None or row.get("volume") is None:
@@ -71,6 +73,13 @@ def calculate_indicators(
             "code": code,
             "name": stock_names.get(code, ""),
             "sector_name": stock_sectors.get(code, ""),
+            "sector17_code": stock_metadata.get(code, {}).get("sector17_code"),
+            "sector17_name": stock_metadata.get(code, {}).get("sector17_name"),
+            "sector33_code": stock_metadata.get(code, {}).get("sector33_code"),
+            "sector33_name": stock_metadata.get(code, {}).get("sector33_name"),
+            "scale_category": stock_metadata.get(code, {}).get("scale_category"),
+            "margin_type": stock_metadata.get(code, {}).get("margin_type"),
+            "product_category": stock_metadata.get(code, {}).get("product_category"),
             "section": stock_sections.get(code, "Unknown"),
             "market_section": stock_sections.get(code, "Unknown"),
             "listing_market": stock_sections.get(code, "Unknown"),
@@ -80,6 +89,14 @@ def calculate_indicators(
             "low": target.get("low"),
             "close": target["close"],
             "volume": target["volume"],
+            "adjusted_open": target.get("adjusted_open"),
+            "adjusted_high": target.get("adjusted_high"),
+            "adjusted_low": target.get("adjusted_low"),
+            "adjusted_close": target.get("adjusted_close"),
+            "adjusted_volume": target.get("adjusted_volume"),
+            "adjusted_price_usage": target.get("adjusted_price_usage", "not_available"),
+            "limit_up_flag": target.get("limit_up_flag"),
+            "limit_down_flag": target.get("limit_down_flag"),
             "ma5": _round_optional(target.get("ma5"), 2),
             "ma25": _round_optional(target.get("ma25"), 2),
             "previous_close": _round_optional(previous.get("close"), 2),
@@ -96,6 +113,12 @@ def calculate_indicators(
             "atr": _round_optional(target.get("atr"), 4),
             "volume_ratio": _round_optional(target.get("volume_ratio"), 4),
             "turnover_value": round(float(target["close"]) * float(target["volume"]), 2),
+            "direct_turnover_value": target.get("turnover_value"),
+            "direct_turnover_value_source": (
+                "api_va_available_not_used"
+                if target.get("turnover_value") is not None
+                else target.get("direct_turnover_value_source", "estimated_close_x_volume")
+            ),
             "five_day_volatility": _round_optional(target.get("five_day_volatility"), 4),
             "five_day_change_rate": _round_optional(target.get("five_day_change_rate"), 4),
             **(_relative_strength_fields(history, benchmark_returns, benchmark_source) if enable_relative_strength else _empty_relative_strength_fields()),

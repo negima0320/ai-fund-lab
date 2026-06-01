@@ -19,7 +19,7 @@ def validate_order(order: dict[str, Any], portfolio: dict[str, Any], config: dic
         return _reject("emergency_stop", "STOP_TRADING ファイルが存在するため新規買付停止")
 
     max_single = float(safety.get("max_single_order_amount", 0) or 0)
-    if max_single > 0 and amount > max_single:
+    if not _single_order_amount_limit_disabled(config) and max_single > 0 and amount > max_single:
         return _reject("max_single_order_amount", "1注文上限を超えています")
 
     drawdown = check_drawdown_limit(portfolio, config)
@@ -95,6 +95,15 @@ def can_trade(order: dict[str, Any], portfolio: dict[str, Any], config: dict[str
     if not daily_check["allowed"]:
         return daily_check
     return _ok()
+
+
+def _single_order_amount_limit_disabled(config: dict[str, Any]) -> bool:
+    policy = config.get("capital_utilization_policy", {})
+    return bool(
+        config.get("disable_single_order_amount_limit")
+        or config.get("safety", {}).get("disable_single_order_amount_limit")
+        or (isinstance(policy, dict) and policy.get("disable_single_order_amount_limit"))
+    )
 
 
 def safety_event(date: str, order: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:

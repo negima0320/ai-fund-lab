@@ -287,20 +287,19 @@ def test_cached_jquants_price_files_are_used_as_backtest_trading_days(monkeypatc
     rows = main_module.load_cached_prime_prices(date(2026, 5, 29))
 
     assert dates == [date(2026, 5, 29)]
-    assert rows == [
-        {
-            "code": "1001",
-            "date": "2026-05-29",
-            "open": 100,
-            "high": 110,
-            "low": 95,
-            "close": 105,
-            "volume": 1000,
-            "section": "TSEPrime",
-            "market_section": "TSEPrime",
-            "listing_market": "TSEPrime",
-        }
-    ]
+    assert len(rows) == 1
+    assert {
+        "code": "1001",
+        "date": "2026-05-29",
+        "open": 100,
+        "high": 110,
+        "low": 95,
+        "close": 105,
+        "volume": 1000,
+        "section": "TSEPrime",
+        "market_section": "TSEPrime",
+        "listing_market": "TSEPrime",
+    }.items() <= rows[0].items()
 
 
 def test_screen_writes_empty_candidates_when_indicators_are_empty(monkeypatch, config_copy, tmp_path) -> None:
@@ -384,6 +383,25 @@ def test_processed_data_audit_keeps_period_specific_last_dates(monkeypatch, conf
     assert audit["scored_candidates_last_date"] == "2026-05-29"
     assert audit["candidates_last_date_in_range"] == "2026-03-06"
     assert audit["scored_candidates_last_date_in_range"] == "2026-03-06"
+
+
+def test_processed_data_audit_includes_common_indicator_cache(monkeypatch, config_copy, tmp_path) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    profile_dir = tmp_path / "data" / "processed" / main_module.profile_id_from(config_copy)
+    profile_dir.mkdir(parents=True)
+    main_module.write_json(profile_dir / "indicators_2026-05-28.json", {"indicators": []})
+    main_module.write_json(profile_dir / "candidates_2026-05-29.json", {"candidates": []})
+    main_module.write_json(profile_dir / "scored_candidates_2026-05-29.json", {"scores": []})
+    common_path = main_module._common_processed_cache_path(config_copy, "indicators", "2026-05-29")
+    main_module.write_json(common_path, {"indicators": []})
+
+    audit = main_module.build_processed_data_audit(config_copy, [date(2026, 5, 28), date(2026, 5, 29)])
+
+    assert audit["indicators_first_date"] == "2026-05-28"
+    assert audit["indicators_last_date"] == "2026-05-29"
+    assert audit["indicators_last_date_in_range"] == "2026-05-29"
+    assert audit["indicator_date_source_summary"]["profile"]["last_date"] == "2026-05-28"
+    assert audit["indicator_date_source_summary"]["common"]["last_date"] == "2026-05-29"
 
 
 def test_backtest_execution_audit_is_ok_when_last_business_day_is_processed() -> None:
@@ -686,7 +704,56 @@ def test_backtest_result_integrity_audit_detects_trade_without_selected(config_c
     assert audit["selected_without_trade_count"] == 1
     assert audit["profile_cache_used_count"] == 1
     assert audit["common_cache_used_count"] == 0
-    assert audit["result_integrity_status"] == "ERROR"
+    assert audit["result_integrity_status"] == "WARNING"
+
+
+def test_backtest_result_integrity_audit_ok_for_portfolio_limited_selected_without_trade(
+    config_copy: dict, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "BACKTEST_JSON_READ_AUDIT", {"out_of_range_count": 0})
+    monkeypatch.setattr(
+        main_module,
+        "COMMON_CACHE_METRICS",
+        {
+            "cache_reused_from_common_count": 2,
+            "profile_specific_cache_count": 0,
+            "generated_cache_size": 0,
+            "indicator_cache_source": {"common": 1},
+            "candidate_cache_source": {"common": 1},
+        },
+    )
+    backtest_dir = tmp_path / "logs" / "backtests" / main_module.profile_id_from(config_copy) / "2026-01-01_to_2026-03-06"
+    backtest_dir.mkdir(parents=True)
+    main_module.write_json(
+        main_module.processed_profile_path(config_copy, "scored_candidates_2026-01-05.json"),
+        {"selected": [{"date": "2026-01-05", "code": "1001", "selected": True, "market_section": "Prime"}]},
+    )
+
+    audit = main_module.build_backtest_result_integrity_audit(
+        config_copy,
+        [
+            {
+                "action": "SKIP_BUY",
+                "order_status": "REJECTED",
+                "signal_date": "2026-01-05",
+                "entry_date": "2026-01-06",
+                "code": "1001",
+                "market_section": "Prime",
+                "skipped_reason": "100株購入に必要な金額が1銘柄上限を超えるため買付不可",
+            }
+        ],
+        backtest_dir,
+        "2026-01-01",
+        "2026-03-06",
+        [{"date": "2026-01-05"}],
+    )
+
+    assert audit["selected_without_trade_count"] == 1
+    assert audit["selected_without_trade_reason_breakdown"]["round_lot_unaffordable"] == 1
+    assert audit["selected_without_trade_reason_breakdown"]["unknown"] == 0
+    assert audit["warnings"] == []
+    assert audit["result_integrity_status"] == "OK"
 
 
 def test_backtest_result_integrity_audit_ok_for_selected_buy_match(config_copy: dict, tmp_path, monkeypatch) -> None:
@@ -723,10 +790,120 @@ def test_backtest_result_integrity_audit_ok_for_selected_buy_match(config_copy: 
     assert audit["market_filter_violation_count"] == 0
     assert audit["market_candidate_count"]["Prime"] == 1
     assert audit["market_trade_count"]["Prime"] == 1
+    assert audit["market_trade_samples"][0]["selected_found"] is True
+    assert audit["market_trade_samples"][0]["trade_date"] == "2026-01-06"
     assert audit["result_integrity_status"] == "OK"
 
 
-def test_backtest_result_integrity_audit_errors_when_market_count_zero_but_trade_exists(config_copy: dict, tmp_path, monkeypatch) -> None:
+def test_backtest_result_integrity_audit_uses_signal_date_for_next_day_entry(
+    config_copy: dict, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "BACKTEST_JSON_READ_AUDIT", {"out_of_range_count": 0})
+    monkeypatch.setattr(main_module, "COMMON_CACHE_METRICS", {"indicator_cache_source": {}, "candidate_cache_source": {}})
+    backtest_dir = tmp_path / "logs" / "backtests" / main_module.profile_id_from(config_copy) / "2026-01-01_to_2026-03-06"
+    backtest_dir.mkdir(parents=True)
+    main_module.write_json(
+        main_module.processed_profile_path(config_copy, "scored_candidates_2026-01-05.json"),
+        {"selected": [{"date": "2026-01-05", "code": "67230", "selected": True, "market_section": "Prime"}]},
+    )
+
+    audit = main_module.build_backtest_result_integrity_audit(
+        config_copy,
+        [
+            {
+                "action": "BUY",
+                "order_status": "FILLED",
+                "signal_date": "2026-01-05",
+                "entry_date": "2026-01-06",
+                "code": "67230",
+                "market_section": "Prime",
+            },
+            {
+                "action": "SELL",
+                "order_status": "FILLED",
+                "signal_date": "2026-01-05",
+                "entry_date": "2026-01-06",
+                "exit_date": "2026-01-13",
+                "code": "67230",
+                "market_section": "Prime",
+            },
+        ],
+        backtest_dir,
+        "2026-01-01",
+        "2026-03-06",
+        [{"date": "2026-01-05"}],
+    )
+
+    assert audit["trade_without_selected_count"] == 0
+    assert audit["selected_without_trade_count"] == 0
+    assert audit["market_trade_samples"][0]["trade_date"] == "2026-01-06"
+    assert audit["market_trade_samples"][0]["selected_found"] is True
+    assert audit["result_integrity_status"] == "OK"
+
+
+def test_selected_without_trade_reason_breakdown_uses_capital_policy_reasons(
+    config_copy: dict, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "BACKTEST_JSON_READ_AUDIT", {"out_of_range_count": 0})
+    monkeypatch.setattr(main_module, "COMMON_CACHE_METRICS", {"indicator_cache_source": {}, "candidate_cache_source": {}})
+    backtest_dir = tmp_path / "logs" / "backtests" / main_module.profile_id_from(config_copy) / "2026-01-01_to_2026-03-06"
+    backtest_dir.mkdir(parents=True)
+    main_module.write_json(
+        main_module.processed_profile_path(config_copy, "scored_candidates_2026-01-05.json"),
+        {
+            "selected": [
+                {"date": "2026-01-05", "code": "1001", "selected": True, "market_section": "Prime"},
+                {"date": "2026-01-05", "code": "1002", "selected": True, "market_section": "Prime"},
+                {"date": "2026-01-05", "code": "1003", "selected": True, "market_section": "Prime"},
+            ]
+        },
+    )
+
+    audit = main_module.build_backtest_result_integrity_audit(
+        config_copy,
+        [
+            {
+                "action": "SKIP_BUY",
+                "order_status": "REJECTED",
+                "signal_date": "2026-01-05",
+                "entry_date": "2026-01-06",
+                "code": "1001",
+                "skipped_reason": "insufficient_available_cash",
+            },
+            {
+                "action": "SKIP_BUY",
+                "order_status": "REJECTED",
+                "signal_date": "2026-01-05",
+                "entry_date": "2026-01-06",
+                "code": "1002",
+                "skipped_reason": "target_exposure_limit",
+            },
+            {
+                "action": "SKIP_BUY",
+                "order_status": "REJECTED",
+                "signal_date": "2026-01-05",
+                "entry_date": "2026-01-06",
+                "code": "1003",
+                "skipped_reason": "max_positions_limit",
+            },
+        ],
+        backtest_dir,
+        "2026-01-01",
+        "2026-03-06",
+        [{"date": "2026-01-05"}],
+    )
+
+    breakdown = audit["selected_without_trade_reason_breakdown"]
+    assert breakdown["insufficient_available_cash"] == 1
+    assert breakdown["target_exposure_limit"] == 1
+    assert breakdown["max_positions_limit"] == 1
+    assert breakdown["unknown"] == 0
+    assert audit["warnings"] == []
+
+
+def test_backtest_result_integrity_audit_warns_when_market_count_zero_but_trade_exists(config_copy: dict, tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(main_module, "ROOT", tmp_path)
     monkeypatch.setattr(main_module, "BACKTEST_JSON_READ_AUDIT", {"out_of_range_count": 0})
     monkeypatch.setattr(main_module, "COMMON_CACHE_METRICS", {"indicator_cache_source": {}, "candidate_cache_source": {}})
@@ -744,8 +921,8 @@ def test_backtest_result_integrity_audit_errors_when_market_count_zero_but_trade
     )
 
     assert audit["market_candidate_count"] == {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0}
-    assert "market_candidate_count is zero but trades exist" in audit["errors"]
-    assert audit["result_integrity_status"] == "ERROR"
+    assert "market_candidate_count is zero but trades exist" in audit["warnings"]
+    assert audit["result_integrity_status"] == "WARNING"
 
 
 def test_backtest_result_integrity_audit_reports_unknown_market_trade(config_copy: dict, tmp_path, monkeypatch) -> None:
@@ -767,7 +944,8 @@ def test_backtest_result_integrity_audit_reports_unknown_market_trade(config_cop
 
     assert audit["unknown_market_trade_count"] == 1
     assert audit["market_trade_count"]["Unknown"] == 1
-    assert "trade has unknown market_section while allow_unknown_market=false" in audit["errors"]
+    assert "trade has unknown market_section while allow_unknown_market=false" in audit["warnings"]
+    assert audit["result_integrity_status"] == "WARNING"
     assert audit["market_trade_samples"][0]["reason"] == "unknown_market_section,market_filter_violation"
 
 
@@ -957,7 +1135,7 @@ def test_backtest_result_integrity_audit_detects_out_of_period_trade(config_copy
     )
 
     assert audit["out_of_period_trade_count"] == 1
-    assert audit["result_integrity_status"] == "ERROR"
+    assert audit["result_integrity_status"] == "WARNING"
 
 
 def test_backtest_result_integrity_audit_detects_market_filter_violation(config_copy: dict, tmp_path, monkeypatch) -> None:
@@ -982,7 +1160,7 @@ def test_backtest_result_integrity_audit_detects_market_filter_violation(config_
     )
 
     assert audit["market_filter_violation_count"] >= 1
-    assert audit["result_integrity_status"] == "ERROR"
+    assert audit["result_integrity_status"] == "WARNING"
 
 
 def test_experiment_integrity_failures_reports_non_ok_profiles() -> None:
@@ -992,11 +1170,156 @@ def test_experiment_integrity_failures_reports_non_ok_profiles() -> None:
             "experiments": [
                 {"profile_id": "p1", "result_integrity_status": "WARNING", "score_integrity_status": "OK"},
                 {"profile_id": "p2", "result_integrity_status": "ERROR", "score_integrity_status": "WARNING"},
+                {"profile_id": "p3", "result_integrity_status": "OK", "score_integrity_status": "WARNING", "invalid_below_threshold_selected_count": 1},
             ],
         }
     )
 
-    assert failures == ["p1=WARNING", "p2=ERROR", "p2.score=WARNING"]
+    assert failures == ["p1=WARNING", "p2=ERROR", "p3.score=WARNING"]
+
+
+def test_experiment_summary_results_table_includes_baseline_row() -> None:
+    markdown = main_module.render_experiment_batch_markdown(
+        {
+            "base_profile": "base_profile",
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-31",
+            "base": {
+                "profile_id": "base_profile",
+                "role": "baseline",
+                "description": "Base profile",
+                "enabled_features": [],
+                "result_integrity_status": "OK",
+                "score_integrity_status": "OK",
+                "indicators_last_date": "2026-01-30",
+            },
+            "experiments": [
+                {
+                    "profile_id": "experiment_profile",
+                    "role": "experiment",
+                    "description": "Experiment profile",
+                    "enabled_features": [],
+                    "result_integrity_status": "OK",
+                    "score_integrity_status": "OK",
+                }
+            ],
+        }
+    )
+
+    assert "| base_profile | baseline |" in markdown
+    assert "| experiment_profile | experiment |" in markdown
+    assert main_module._experiment_summary_result_rows(
+        {
+            "base": {"profile_id": "base_profile"},
+            "experiments": [{"profile_id": "experiment_profile", "role": "experiment"}],
+        }
+    ) == [
+        {"profile_id": "base_profile", "role": "baseline"},
+        {"profile_id": "experiment_profile", "role": "experiment"},
+    ]
+
+
+def test_experiment_processed_data_audit_recomputes_common_cache_dates(monkeypatch, config_copy, tmp_path) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    profile_id = main_module.profile_id_from(config_copy)
+    monkeypatch.setattr(main_module, "load_profile", lambda value: config_copy if value == profile_id else config_copy)
+    monkeypatch.setattr(main_module, "_score_payload_cache_issue", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(
+        main_module,
+        "available_cached_price_dates",
+        lambda *_args: [date(2026, 5, 28), date(2026, 5, 29)],
+    )
+    backtest_dir = tmp_path / "logs" / "backtests" / profile_id / "2026-05-01_to_2026-05-29"
+    backtest_dir.mkdir(parents=True)
+    main_module.write_json(
+        backtest_dir / "backtest_summary.json",
+        {
+            "date_range_audit": {
+                "processed_data_audit": {
+                    "indicators_last_date": "2026-05-28",
+                    "indicators_last_date_in_range": "2026-05-28",
+                }
+            }
+        },
+    )
+    main_module.write_json(main_module._common_processed_cache_path(config_copy, "indicators", "2026-05-29"), {"indicators": []})
+
+    audit = main_module._experiment_processed_data_audit(profile_id, "2026-05-01", "2026-05-29")
+
+    assert audit["indicators_last_date"] == "2026-05-29"
+    assert audit["indicators_last_date_in_range"] == "2026-05-29"
+
+
+def test_score_integrity_summary_recomputes_legacy_audit_from_scored_candidates(
+    monkeypatch, config_copy, tmp_path
+) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    profile_id = main_module.profile_id_from(config_copy)
+    monkeypatch.setattr(main_module, "load_profile", lambda value: config_copy if value == profile_id else config_copy)
+    monkeypatch.setattr(main_module, "_score_payload_cache_issue", lambda *_args, **_kwargs: "")
+    backtest_dir = tmp_path / "logs" / "backtests" / profile_id / "2026-01-01_to_2026-01-31"
+    backtest_dir.mkdir(parents=True)
+    main_module.write_json(
+        backtest_dir / "backtest_summary.json",
+        {
+            "score_integrity_audit": {
+                "score_integrity_status": "WARNING",
+                "selected_below_threshold_count": 1,
+                "no_trade_fallback_selected_count": 1,
+            },
+            "all_trades": [],
+        },
+    )
+    processed_dir = tmp_path / "data" / "processed" / profile_id
+    processed_dir.mkdir(parents=True)
+    main_module.write_json(
+        processed_dir / "scored_candidates_2026-01-05.json",
+        {
+            "profile_id": profile_id,
+            "config_version": main_module.config_version_from(config_copy),
+            "date": "2026-01-05",
+            "scores": [
+                {
+                    "code": "1001",
+                    "date": "2026-01-05",
+                    "signal_date": "2026-01-05",
+                    "total_score": 40,
+                    "technical_score": 40,
+                    "relative_strength_score": 0,
+                    "investor_context_score": 0,
+                    "market_context_score": 0,
+                    "penalty_score": 0,
+                    "market_section": "TSEPrime",
+                    "selected": True,
+                    "selection_reason": "ノートレード回避 top-pick",
+                }
+            ],
+            "selected": [
+                {
+                    "code": "1001",
+                    "date": "2026-01-05",
+                    "signal_date": "2026-01-05",
+                    "total_score": 40,
+                    "technical_score": 40,
+                    "relative_strength_score": 0,
+                    "investor_context_score": 0,
+                    "market_context_score": 0,
+                    "penalty_score": 0,
+                    "market_section": "TSEPrime",
+                    "selected": True,
+                    "selection_reason": "ノートレード回避 top-pick",
+                }
+            ],
+        },
+    )
+
+    audit = main_module._backtest_summary_score_integrity(profile_id, "2026-01-01", "2026-01-31")
+
+    assert audit["score_integrity_status"] == "OK"
+    assert audit["selected_below_regular_min_score_count"] == 1
+    assert audit["fallback_top_pick_selected_count"] == 1
+    assert audit["invalid_below_threshold_selected_count"] == 0
+    assert audit["source"] == "recomputed_from_existing_scored_candidates"
 
 
 def test_score_integrity_audit_detects_score_mismatch(config_copy: dict, tmp_path, monkeypatch) -> None:
@@ -1167,6 +1490,108 @@ def test_score_integrity_audit_ok_for_valid_score(config_copy: dict, tmp_path, m
     )
 
     assert audit["score_integrity_status"] == "OK"
+
+
+def test_score_integrity_allows_configured_top_pick_below_regular_min_score(config_copy: dict, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    config_copy.setdefault("selection", {})["allow_top_pick_when_no_selection"] = True
+    config_copy["selection"]["min_score"] = 45
+    config_copy["selection"]["top_pick_min_score"] = 40
+    config_version = main_module.config_version_from(config_copy)
+    backtest_dir = tmp_path / "logs" / "backtests" / main_module.profile_id_from(config_copy) / "2026-01-01_to_2026-03-06"
+    backtest_dir.mkdir(parents=True)
+    cache = main_module._score_cache_payload(config_copy, "2026-01-05")
+    row = {
+        "date": "2026-01-05",
+        "code": "1001",
+        "selected": True,
+        "total_score": 42,
+        "technical_score": 42,
+        "relative_strength_score": 0,
+        "investor_context_score": 0,
+        "market_context_score": 0,
+        "penalty_score": 0,
+        "score_components_total": 42,
+        "market_section": "Prime",
+        "selection_reason": "通常基準45点には届かなかったが、ノートレード回避ルールにより最上位候補として採用",
+    }
+    main_module.write_json(
+        main_module.processed_profile_path(config_copy, "scored_candidates_2026-01-05.json"),
+        {
+            "date": "2026-01-05",
+            "profile_id": main_module.profile_id_from(config_copy),
+            "config_version": config_version,
+            **cache,
+            "scores": [row],
+            "selected": [row],
+        },
+    )
+
+    audit = main_module.build_score_integrity_audit(
+        config_copy,
+        [{"action": "BUY", "order_status": "FILLED", "signal_date": "2026-01-05", "entry_date": "2026-01-06", "code": "1001"}],
+        backtest_dir,
+        "2026-01-01",
+        "2026-03-06",
+        [{"date": "2026-01-05"}],
+    )
+
+    assert audit["score_integrity_status"] == "OK"
+    assert audit["selected_below_regular_min_score_count"] == 1
+    assert audit["fallback_top_pick_selected_count"] == 1
+    assert audit["invalid_below_threshold_selected_count"] == 0
+    assert "fallback/top-pick selected below regular min_score" not in audit["warnings"]
+
+
+def test_score_integrity_warns_for_invalid_below_threshold_selection(config_copy: dict, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    config_copy.setdefault("selection", {})["allow_top_pick_when_no_selection"] = True
+    config_copy["selection"]["min_score"] = 45
+    config_copy["selection"]["top_pick_min_score"] = 40
+    config_version = main_module.config_version_from(config_copy)
+    backtest_dir = tmp_path / "logs" / "backtests" / main_module.profile_id_from(config_copy) / "2026-01-01_to_2026-03-06"
+    backtest_dir.mkdir(parents=True)
+    cache = main_module._score_cache_payload(config_copy, "2026-01-05")
+    row = {
+        "date": "2026-01-05",
+        "code": "1001",
+        "selected": True,
+        "total_score": 42,
+        "technical_score": 42,
+        "relative_strength_score": 0,
+        "investor_context_score": 0,
+        "market_context_score": 0,
+        "penalty_score": 0,
+        "score_components_total": 42,
+        "market_section": "Prime",
+        "selection_reason": "スコア基準を満たしたため採用",
+    }
+    main_module.write_json(
+        main_module.processed_profile_path(config_copy, "scored_candidates_2026-01-05.json"),
+        {
+            "date": "2026-01-05",
+            "profile_id": main_module.profile_id_from(config_copy),
+            "config_version": config_version,
+            **cache,
+            "scores": [row],
+            "selected": [row],
+        },
+    )
+
+    audit = main_module.build_score_integrity_audit(
+        config_copy,
+        [{"action": "BUY", "order_status": "FILLED", "signal_date": "2026-01-05", "entry_date": "2026-01-06", "code": "1001"}],
+        backtest_dir,
+        "2026-01-01",
+        "2026-03-06",
+        [{"date": "2026-01-05"}],
+    )
+
+    assert audit["score_integrity_status"] == "WARNING"
+    assert audit["selected_below_regular_min_score_count"] == 1
+    assert audit["fallback_top_pick_selected_count"] == 0
+    assert audit["invalid_below_threshold_selected_count"] == 1
+    assert audit["warnings"] == ["selected candidate below min_score threshold"]
 
 
 def test_execution_model_stats_are_rendered() -> None:

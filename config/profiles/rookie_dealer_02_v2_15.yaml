@@ -1,0 +1,103 @@
+# AI Fund Lab profile YAML
+# rookie_dealer_02_v2_6 をベースに RSI × 出来高過熱ゾーン除外を追加した検証用profileです。
+# 秘密情報は書かず、APIキーや口座情報は .env に置きます。
+
+profile_id: rookie_dealer_02_v2_15
+profile_name: 新人ディーラー2号 v2.15
+description: RSI 60-70 × volume_ratio 3-5 過熱ゾーン除外検証
+
+character:
+  role: 新人ディーラー
+  personality:
+    - 教科書通り
+    - データ重視
+    - 損切り最優先
+    - 過熱銘柄を追わない
+    - 出来高確認を重視
+    - リスク管理重視
+  catchphrases:
+    - 過熱した銘柄は追いません
+    - 出来高2倍以上を確認します
+    - 市場平均に勝つ銘柄を優先します
+
+features:
+  market_context: true
+  sector_analysis: true
+  ai_decision: false
+  news: false
+  candlestick_analysis: true
+  relative_strength: true
+  openai_commentary: false
+
+scoring:
+  total_score_formula: technical_plus_relative_strength_market_penalty
+  use_relative_strength_score: true
+  relative_strength_score_weight: 10
+  relative_strength:
+    benchmark: topix
+    windows:
+      - 5
+      - 10
+      - 20
+    score_rules:
+      rs_5d_gt: 0.03
+      rs_5d_points: 3
+      rs_10d_gt: 0.05
+      rs_10d_points: 4
+      rs_20d_gt: 0.08
+      rs_20d_points: 3
+
+ai_decision:
+  enabled: false
+  provider: openai
+  fallback_to_rule_based: true
+  daily_call_limit: 3
+
+ai_commentary:
+  enabled: true
+  provider: rule_based
+  fallback_to_rule_based: true
+
+initial_capital: 1000000
+
+trading:
+  max_positions: 5
+  position_size_ratio: 0.20
+  stop_loss_rate: -0.03
+  take_profit_rate: 0.06
+  max_holding_days: 5
+  use_round_lot: true
+  round_lot_size: 100
+
+execution:
+  stop_loss_execution: intraday_stop
+
+selection:
+  min_score: 45
+  fallback_min_score: 40
+  min_confidence: 0.70
+  allow_top_pick_when_no_selection: true
+  top_pick_min_score: 40
+  max_selected: 5
+  max_rsi_for_new_position: 65
+  reject_overheated_rsi: true
+
+market_filter:
+  risk_off_min_score: 50
+
+volume_filter:
+  enabled: true
+  min_volume_ratio: 2.0
+
+rsi_volume_hot_zone_filter:
+  enabled: true
+  min_rsi: 60
+  min_volume_ratio: 3
+  max_volume_ratio: 5
+  reason: rsi_volume_hot_zone
+
+risk_margin:
+  max_daily_buy_amount: 300000
+  max_single_order_amount: 200000
+  stop_trading_if_daily_loss_rate_exceeds: -0.05
+  stop_trading_if_drawdown_exceeds: -0.15

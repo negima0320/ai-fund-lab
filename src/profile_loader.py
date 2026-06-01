@@ -23,6 +23,14 @@ PROFILE_ALIASES = {
     "rookie_dealer_02_v2.8": "rookie_dealer_02_v2_8",
     "rookie_dealer_02_v2.9": "rookie_dealer_02_v2_9",
     "rookie_dealer_02_v2.10": "rookie_dealer_02_v2_10",
+    "rookie_dealer_02_v2.12": "rookie_dealer_02_v2_12",
+    "rookie_dealer_02_v2.13": "rookie_dealer_02_v2_13",
+    "rookie_dealer_02_v2.14": "rookie_dealer_02_v2_14",
+    "rookie_dealer_02_v2.15": "rookie_dealer_02_v2_15",
+    "rookie_dealer_02_v2.16": "rookie_dealer_02_v2_16",
+    "rookie_dealer_02_v2.17": "rookie_dealer_02_v2_17",
+    "rookie_dealer_02_v2.18": "rookie_dealer_02_v2_18",
+    "rookie_dealer_02_v2.19": "rookie_dealer_02_v2_19",
 }
 
 
@@ -112,6 +120,9 @@ def _adapt_profile_schema(config: dict[str, Any], profile_id: str) -> dict[str, 
         risk["take_profit_pct"] = trading["take_profit_rate"]
     if "max_holding_days" in trading:
         risk["max_holding_business_days"] = trading["max_holding_days"]
+    capital_policy = config.get("capital_utilization_policy", {})
+    if isinstance(capital_policy, dict) and capital_policy.get("buy_lot_size"):
+        trading["round_lot_size"] = capital_policy["buy_lot_size"]
 
     risk_margin = config.get("risk_margin", {})
     safety = config.setdefault("safety", {})

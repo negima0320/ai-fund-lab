@@ -1,70 +1,70 @@
-# Rule-based 90d Backtest Summary 2026-01-01 to 2026-03-06
+# Rule-based 90d Backtest Summary 2021-06-01 to 2026-05-29
 
 ## 実行条件
 
-- 期間: 2026-01-01 〜 2026-03-06
-- profile: rookie_dealer_02_v2_19 新人ディーラー2号 v2.19
+- 期間: 2021-06-01 〜 2026-05-29
+- profile: rookie_dealer_02_v2_8 新人ディーラー2号 v2.8
 - provider: jquants
 - ChatGPT/OpenAI: disabled
 - broker: paper
-- config_version: cfg_3ad5dac
+- config_version: cfg_45b90cc
 
 ## Backtest Date Range Audit
 
-- requested_start_date: 2026-01-01
-- requested_end_date: 2026-03-06
-- effective_trade_start_date: 2026-01-01
-- effective_trade_end_date: 2026-03-06
-- indicator_fetch_start_date: 2025-07-05
-- price_fetch_requested_start: 2025-07-05
-- price_fetch_clamped_start: 2025-07-05
+- requested_start_date: 2021-06-01
+- requested_end_date: 2026-05-29
+- effective_trade_start_date: 2021-06-01
+- effective_trade_end_date: 2026-05-29
+- indicator_fetch_start_date: 2021-05-01
+- price_fetch_requested_start: 2021-05-01
+- price_fetch_clamped_start: 2021-05-01
 - first_fetch_attempt_date: None
-- raw_price_first_date: 2025-07-07
-- raw_price_last_date: 2026-03-06
-- first_price_date: 2025-07-07
-- last_price_date: 2026-03-06
-- first_trading_day: 2026-01-05
-- last_trading_day: 2026-03-06
-- target_trading_days: 47
+- raw_price_first_date: 2021-06-01
+- raw_price_last_date: 2026-05-29
+- first_price_date: 2021-06-01
+- last_price_date: 2026-05-29
+- first_trading_day: 2021-06-01
+- last_trading_day: 2026-05-29
+- target_trading_days: 1304
 - target_trading_days_source: raw_price_cache
-- processed_first_date: 2026-01-05
-- processed_last_date: 2026-03-05
+- processed_first_date: 2021-06-01
+- processed_last_date: 2026-05-28
 - missing_processed_dates_count: 1
-- first_missing_processed_date: 2026-03-06
-- last_missing_processed_date: 2026-03-06
-- processed_days: 41
+- first_missing_processed_date: 2026-05-29
+- last_missing_processed_date: 2026-05-29
+- processed_days: 1220
 - skipped_days: 1
-- last_processed_day: 2026-03-05
-- first_trade_date: 2026-01-06
-- last_trade_date: 2026-03-06
+- last_processed_day: 2026-05-28
+- first_trade_date: 2021-06-02
+- last_trade_date: 2026-05-29
 
 ### Data Coverage Audit
 
-- prices.requested_end_date: 2026-03-06
-- prices.latest_available_price_date: 2026-03-06
+- prices.requested_end_date: 2026-05-29
+- prices.latest_available_price_date: 2026-05-29
 - prices.coverage_ok: true
 - prices.warning: -
 
 ### Requested vs Effective Period
 
-- requested_period: 2026-01-01 to 2026-03-06
-- effective_period: 2026-01-05 to 2026-03-05
+- requested_period: 2021-06-01 to 2026-05-29
+- effective_period: 2021-06-01 to 2026-05-28
 - effective_range_warning: processed days end before requested_end_date; check latest_available_price_date and fetch-period-prices logs
 
 ### Hardcoded Date Audit
 
 - target: 2026-03-06
-- match_count: 367
+- match_count: 288
 - warning: 2026-03-06 remains in config/src/docs/reports/README
 
 ### Processed Data Audit
 
-- indicators_last_date: 2026-05-29
+- indicators_last_date: 2026-03-06
 - candidates_last_date: 2026-05-29
-- scored_candidates_last_date: 2026-03-06
-- indicators_count: 1221
+- scored_candidates_last_date: 2026-05-29
+- indicators_count: 42
 - candidates_file_count: 1221
-- scored_candidates_file_count: 42
+- scored_candidates_file_count: 1221
 - dates_with_indicators_but_no_candidates: 0
 - dates_with_candidates_but_no_scored: 0
 - match: config/provider.yaml
@@ -81,19 +81,19 @@
 ## 結果サマリ
 
 - 初期資金: 1,000,000円
-- 最終資産: 1,077,026円
-- 税引前損益: 60,526円
-- 税引後損益: 48,230円
-- 税引後損益率: 4.82%
-- 勝率: 47.62%
-- profit factor: 1.64
-- 最大ドローダウン: -5.71%
-- 総取引数: 21
-- 利確回数: 3
-- 損切り回数: 9
-- 最大保有期間売却回数: 9
-- no trade日数: 15
-- selected_count合計: 84
+- 最終資産: 1,081,236円
+- 税引前損益: 79,336円
+- 税引後損益: 63,219円
+- 税引後損益率: 6.32%
+- 勝率: 40.52%
+- profit factor: 1.08
+- 最大ドローダウン: -6.95%
+- 総取引数: 422
+- 利確回数: 51
+- 損切り回数: 202
+- 最大保有期間売却回数: 175
+- no trade日数: 524
+- selected_count合計: 1559
 
 ## 新人ディーラー1号コメント
 

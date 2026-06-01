@@ -3,9 +3,57 @@ from __future__ import annotations
 from copy import deepcopy
 
 from db import initialize_database, save_market_context, save_scoring_results, save_trades
-from feature_analysis import build_feature_analysis, render_feature_analysis_markdown
+from feature_analysis import _capital_utilization_audit, render_feature_analysis_markdown, build_feature_analysis
 from paper_trade import execute_real_data_paper_trade, initial_live_paper_state
 from profile_loader import load_profile
+
+
+def test_capital_utilization_audit_reports_target_exposure_blockers(config_copy: dict, tmp_path) -> None:
+    profile_id = config_copy["profile_id"]
+    config_copy["capital_utilization_policy"] = {
+        "enabled": True,
+        "target_exposure": 0.9,
+        "min_cash_buffer": 50000,
+        "buy_lot_size": 100,
+        "max_position_value_rate": 0.5,
+        "buy_as_much_as_possible": True,
+    }
+    log_dir = tmp_path / "logs" / "backtests" / profile_id / "2026-01-01_to_2026-01-03"
+    log_dir.mkdir(parents=True)
+    (log_dir / "summary.csv").write_text(
+        "date,total_assets,cash,positions_value,open_positions_count\n"
+        "2026-01-01,1000000,800000,200000,1\n"
+        "2026-01-02,1000000,550000,450000,2\n"
+        "2026-01-03,1000000,100000,900000,3\n",
+        encoding="utf-8",
+    )
+    backtest_summary = {
+        "all_trades": [
+            {"action": "BUY", "entry_date": "2026-01-02", "amount": 450000, "shares": 100, "allocation_reason": "capital_utilization_policy"},
+            {"action": "SKIP_BUY", "entry_date": "2026-01-02", "skipped_reason": "target_exposure_limit"},
+            {"action": "SKIP_BUY", "entry_date": "2026-01-03", "skipped_reason": "insufficient_available_cash"},
+            {"action": "SKIP_BUY", "entry_date": "2026-01-03", "skipped_reason": "round_lot_unaffordable"},
+            {"action": "NO_BUY", "entry_date": "2026-01-01", "reason": "no candidates"},
+        ]
+    }
+
+    audit = _capital_utilization_audit(
+        tmp_path,
+        profile_id,
+        "2026-01-01",
+        "2026-01-03",
+        backtest_summary,
+        config_copy,
+    )
+
+    assert audit["target_exposure_gap_average"] == 0.3833
+    assert audit["target_exposure_blocked_reason_breakdown"]["target_exposure_limit"] == 1
+    assert audit["affordable_selected_count"] == 2
+    assert audit["unaffordable_selected_count"] == 2
+    assert audit["cash_after_buy_average"] == 550000
+    assert audit["min_cash_buffer_hit_count"] == 1
+    assert audit["no_candidate_days"] == 1
+    assert audit["no_affordable_candidate_days"] == 1
 
 
 def test_feature_analysis_groups_closed_trade_results(config_copy: dict, tmp_path) -> None:
@@ -220,6 +268,8 @@ def test_feature_analysis_groups_closed_trade_results(config_copy: dict, tmp_pat
     assert "Score Component Analysis" in render_feature_analysis_markdown(analysis)
     assert "Score Formula Audit" in render_feature_analysis_markdown(analysis)
     assert "Score Effective Range Audit" in render_feature_analysis_markdown(analysis)
+    assert "API Field Usage Audit" in render_feature_analysis_markdown(analysis)
+    assert analysis["api_field_usage_audit"]["adjusted_price_usage"]["ma_basis"].startswith("close")
     assert "Backtest Result Integrity Audit" in render_feature_analysis_markdown(analysis)
     assert "Market Filter Audit" in render_feature_analysis_markdown(analysis)
     assert "Score Integrity Audit" in render_feature_analysis_markdown(analysis)

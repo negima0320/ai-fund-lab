@@ -157,6 +157,7 @@ def score_real_candidates(
     scored = []
     selection_config = _selection_config(config)
     volume_filter = _volume_filter_config(config)
+    rsi_volume_hot_zone_filter = _rsi_volume_hot_zone_filter_config(config)
     market_filter = _market_filter_config(config)
     market_regime = str((market_context or {}).get("market_regime") or "neutral")
     advance_ratio = _optional_float((market_context or {}).get("advance_ratio"))
@@ -180,6 +181,11 @@ def score_real_candidates(
         total_before_selection_adjustment = technical + relative_strength_score + investor_context_score + market_context_score
         rsi_selection = _rsi_selection_adjustment(candidate.get("rsi"), selection_config)
         volume_selection = _volume_selection_adjustment(candidate.get("volume_ratio"), volume_filter)
+        hot_zone_selection = _rsi_volume_hot_zone_adjustment(
+            candidate.get("rsi"),
+            candidate.get("volume_ratio"),
+            rsi_volume_hot_zone_filter,
+        )
         total = max(0, total_before_selection_adjustment - rsi_selection["penalty"])
         score_components = _score_components(
             technical_parts=technical_parts,
@@ -202,7 +208,12 @@ def score_real_candidates(
         if rsi_selection["excluded"]:
             score_reason = f"{score_reason}、RSI過熱のため新規買付見送り"
         if volume_selection["excluded"]:
-            score_reason = f"{score_reason}、出来高倍率が{volume_selection['threshold']:.1f}未満のため新規買付見送り"
+            if volume_selection["reason"] == "volume_ratio_above_max":
+                score_reason = f"{score_reason}、出来高倍率が{volume_selection['max_threshold']:.1f}を超えたため新規買付見送り"
+            else:
+                score_reason = f"{score_reason}、出来高倍率が{volume_selection['threshold']:.1f}未満のため新規買付見送り"
+        if hot_zone_selection["excluded"]:
+            score_reason = f"{score_reason}、RSIと出来高倍率が過熱ゾーンのため新規買付見送り"
         earnings_result = earnings_filter_result(candidate, target_date, config)
         if earnings_result["blocked"]:
             score_reason = f"{score_reason}、{EARNINGS_FILTER_REJECTED_REASON}"
@@ -218,12 +229,27 @@ def score_real_candidates(
                 "sector_rank": candidate.get("sector_rank"),
                 "sector_comment": candidate.get("sector_comment", ""),
                 "sector_score_adjustment": sector_adjustment,
+                "sector17_code": candidate.get("sector17_code"),
+                "sector17_name": candidate.get("sector17_name"),
+                "sector33_code": candidate.get("sector33_code"),
+                "sector33_name": candidate.get("sector33_name"),
+                "scale_category": candidate.get("scale_category"),
+                "margin_type": candidate.get("margin_type"),
+                "product_category": candidate.get("product_category"),
                 "date": candidate["date"],
                 "open": candidate.get("open"),
                 "high": candidate.get("high"),
                 "low": candidate.get("low"),
                 "close": candidate["close"],
                 "volume": candidate.get("volume"),
+                "adjusted_open": candidate.get("adjusted_open"),
+                "adjusted_high": candidate.get("adjusted_high"),
+                "adjusted_low": candidate.get("adjusted_low"),
+                "adjusted_close": candidate.get("adjusted_close"),
+                "adjusted_volume": candidate.get("adjusted_volume"),
+                "adjusted_price_usage": candidate.get("adjusted_price_usage"),
+                "limit_up_flag": candidate.get("limit_up_flag"),
+                "limit_down_flag": candidate.get("limit_down_flag"),
                 "ma5": candidate.get("ma5"),
                 "ma25": candidate.get("ma25"),
                 "volume_ratio": candidate.get("volume_ratio"),
@@ -237,6 +263,8 @@ def score_real_candidates(
                 "bb_position": candidate.get("bb_position"),
                 "atr": candidate.get("atr"),
                 "turnover_value": candidate.get("turnover_value"),
+                "direct_turnover_value": candidate.get("direct_turnover_value"),
+                "direct_turnover_value_source": candidate.get("direct_turnover_value_source"),
                 "five_day_volatility": candidate.get("five_day_volatility"),
                 "five_day_change_rate": candidate.get("five_day_change_rate"),
                 "stock_return_5d": candidate.get("stock_return_5d"),
@@ -293,6 +321,13 @@ def score_real_candidates(
                 "rsi_filter_threshold": rsi_selection["threshold"],
                 "volume_filter_excluded": volume_selection["excluded"],
                 "volume_filter_threshold": volume_selection["threshold"],
+                "volume_filter_max_threshold": volume_selection["max_threshold"],
+                "volume_filter_reason": volume_selection["reason"],
+                "rsi_volume_hot_zone_excluded": hot_zone_selection["excluded"],
+                "rsi_volume_hot_zone_reason": hot_zone_selection["reason"],
+                "rsi_volume_hot_zone_min_rsi": hot_zone_selection["min_rsi"],
+                "rsi_volume_hot_zone_min_volume_ratio": hot_zone_selection["min_volume_ratio"],
+                "rsi_volume_hot_zone_max_volume_ratio": hot_zone_selection["max_volume_ratio"],
                 "technical_score": technical,
                 "confidence": confidence,
                 "rank": 0,
@@ -359,6 +394,8 @@ def score_real_candidates(
             "reject_overheated_rsi": selection_config["reject_overheated_rsi"],
             "volume_filter_enabled": volume_filter["enabled"],
             "min_volume_ratio": volume_filter["min_volume_ratio"],
+            "max_volume_ratio": volume_filter["max_volume_ratio"],
+            "rsi_volume_hot_zone_filter": rsi_volume_hot_zone_filter,
         },
         "selection_config": selection_config,
         "market_context": market_context or {},
@@ -419,6 +456,9 @@ def _apply_selection_rules(
         elif item.get("earnings_filter_blocked"):
             item["rejected_reason"] = EARNINGS_FILTER_REJECTED_REASON
             item["reason"] = item["rejected_reason"]
+        elif item.get("rsi_volume_hot_zone_excluded"):
+            item["rejected_reason"] = "rsi_volume_hot_zone"
+            item["reason"] = item["rejected_reason"]
         elif _meets_regular_selection(item, {**selection_config, "min_score": min_score}) and selected_count < max_selected:
             item["selected"] = True
             reason = "スコア基準を満たしたため採用"
@@ -455,6 +495,7 @@ def _apply_selection_rules(
                 not item.get("investor_context_filter_blocked")
                 and not item.get("earnings_filter_blocked")
                 and not item.get("market_section_filter_blocked")
+                and not item.get("rsi_volume_hot_zone_excluded")
                 and _meets_top_pick_selection(item, selection_config)
                 and not _is_conditional_low_score_candidate(item, selection_config)
             ):
@@ -539,6 +580,18 @@ def _volume_filter_config(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "enabled": bool(volume_filter.get("enabled", False)),
         "min_volume_ratio": float(volume_filter.get("min_volume_ratio", 0.0)),
+        "max_volume_ratio": _optional_float(volume_filter.get("max_volume_ratio")),
+    }
+
+
+def _rsi_volume_hot_zone_filter_config(config: dict[str, Any]) -> dict[str, Any]:
+    hot_zone = config.get("rsi_volume_hot_zone_filter", {})
+    return {
+        "enabled": bool(hot_zone.get("enabled", False)) if isinstance(hot_zone, dict) else False,
+        "min_rsi": float(hot_zone.get("min_rsi", 60.0)) if isinstance(hot_zone, dict) else 60.0,
+        "min_volume_ratio": float(hot_zone.get("min_volume_ratio", 3.0)) if isinstance(hot_zone, dict) else 3.0,
+        "max_volume_ratio": float(hot_zone.get("max_volume_ratio", 5.0)) if isinstance(hot_zone, dict) else 5.0,
+        "reason": str(hot_zone.get("reason", "rsi_volume_hot_zone")) if isinstance(hot_zone, dict) else "rsi_volume_hot_zone",
     }
 
 
@@ -590,6 +643,8 @@ def _meets_regular_selection(item: dict[str, Any], selection_config: dict[str, A
         return False
     if item.get("volume_filter_excluded"):
         return False
+    if item.get("rsi_volume_hot_zone_excluded"):
+        return False
     return item["total_score"] >= selection_config["min_score"] and item["confidence"] >= selection_config["min_confidence"]
 
 
@@ -604,7 +659,11 @@ def _conditional_selection_result(item: dict[str, Any], selection_config: dict[s
     if item.get("rsi_selection_excluded"):
         return {"checked": True, "matched": False, "reason": "RSI過熱のため新規買付見送り"}
     if item.get("volume_filter_excluded"):
+        if item.get("volume_filter_reason") == "volume_ratio_above_max":
+            return {"checked": True, "matched": False, "reason": "volume_ratio_above_max"}
         return {"checked": True, "matched": False, "reason": "出来高倍率不足のため新規買付見送り"}
+    if item.get("rsi_volume_hot_zone_excluded"):
+        return {"checked": True, "matched": False, "reason": "rsi_volume_hot_zone"}
     if item["confidence"] < selection_config["min_confidence"]:
         return {"checked": True, "matched": False, "reason": "信頼度基準を満たさないため落選"}
 
@@ -658,6 +717,8 @@ def _meets_top_pick_selection(item: dict[str, Any], selection_config: dict[str, 
         return False
     if item.get("volume_filter_excluded"):
         return False
+    if item.get("rsi_volume_hot_zone_excluded"):
+        return False
     return item["total_score"] >= selection_config["top_pick_min_score"] and item["confidence"] >= selection_config["min_confidence"]
 
 
@@ -681,16 +742,46 @@ def _rsi_selection_adjustment(rsi_value: Any, selection_config: dict[str, Any]) 
 
 def _volume_selection_adjustment(volume_ratio_value: Any, volume_filter: dict[str, Any]) -> dict[str, Any]:
     threshold = volume_filter.get("min_volume_ratio")
+    max_threshold = volume_filter.get("max_volume_ratio")
     if not volume_filter.get("enabled"):
-        return {"excluded": False, "threshold": threshold}
+        return {"excluded": False, "threshold": threshold, "max_threshold": max_threshold, "reason": ""}
     try:
         volume_ratio = float(volume_ratio_value)
     except (TypeError, ValueError):
-        return {"excluded": True, "threshold": threshold}
+        return {"excluded": True, "threshold": threshold, "max_threshold": max_threshold, "reason": "volume_ratio_below_min"}
+    if volume_ratio < float(threshold):
+        return {"excluded": True, "threshold": threshold, "max_threshold": max_threshold, "reason": "volume_ratio_below_min"}
+    if max_threshold is not None and volume_ratio > float(max_threshold):
+        return {"excluded": True, "threshold": threshold, "max_threshold": max_threshold, "reason": "volume_ratio_above_max"}
     return {
-        "excluded": volume_ratio < float(threshold),
+        "excluded": False,
         "threshold": threshold,
+        "max_threshold": max_threshold,
+        "reason": "",
     }
+
+
+def _rsi_volume_hot_zone_adjustment(rsi_value: Any, volume_ratio_value: Any, hot_zone_filter: dict[str, Any]) -> dict[str, Any]:
+    min_rsi = hot_zone_filter.get("min_rsi")
+    min_volume_ratio = hot_zone_filter.get("min_volume_ratio")
+    max_volume_ratio = hot_zone_filter.get("max_volume_ratio")
+    result = {
+        "excluded": False,
+        "reason": "",
+        "min_rsi": min_rsi,
+        "min_volume_ratio": min_volume_ratio,
+        "max_volume_ratio": max_volume_ratio,
+    }
+    if not hot_zone_filter.get("enabled"):
+        return result
+    rsi = _optional_float(rsi_value)
+    volume_ratio = _optional_float(volume_ratio_value)
+    if rsi is None or volume_ratio is None:
+        return result
+    if rsi >= float(min_rsi) and volume_ratio >= float(min_volume_ratio) and volume_ratio <= float(max_volume_ratio):
+        result["excluded"] = True
+        result["reason"] = str(hot_zone_filter.get("reason") or "rsi_volume_hot_zone")
+    return result
 
 
 def _real_technical_score_parts(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -892,7 +983,11 @@ def _real_rejected_reason(
     if item.get("rsi_selection_excluded"):
         return "RSI過熱のため新規買付見送り"
     if item.get("volume_filter_excluded"):
+        if item.get("volume_filter_reason") == "volume_ratio_above_max":
+            return "volume_ratio_above_max"
         return "出来高倍率不足のため新規買付見送り"
+    if item.get("rsi_volume_hot_zone_excluded"):
+        return "rsi_volume_hot_zone"
     if item.get("investor_context_filter_blocked"):
         return str(item.get("investor_context_filter_reason") or "investor_context_negative")
     if item["confidence"] < selection_config["min_confidence"]:
