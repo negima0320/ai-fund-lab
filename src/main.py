@@ -2452,7 +2452,7 @@ def inspect_cache(target: str, date_text: str, config: dict[str, Any]) -> dict[s
     path = _inspect_cache_path(target, date_text, config)
     if path is None or not path.exists():
         raise SystemExit(f"Cache file not found for target={target} date={date_text}")
-    payload = read_json(path)
+    payload = _run_timed_backtest_phase("indicator_load", lambda: read_json(path))
     rows = _inspect_cache_rows(target, payload)
     columns = sorted({key for row in rows if isinstance(row, dict) for key in row})
     required = sorted(_inspect_required_fields(target, config))
@@ -4102,15 +4102,18 @@ def run_analyze(config: dict[str, Any], start_date: str | None = None, end_date:
     feature_markdown_path = output_dir / "feature_analysis.md"
     selection_quality_json_path = output_dir / "selection_quality.json"
     selection_quality_markdown_path = output_dir / "selection_quality.md"
-    feature_analysis = build_feature_analysis(config, ROOT, start_date, end_date)
+    feature_analysis = _run_timed_backtest_phase(
+        "feature_analysis_generation",
+        lambda: build_feature_analysis(config, ROOT, start_date, end_date),
+    )
     selection_quality_analysis = build_selection_quality_analysis(config, ROOT)
     analysis["selection_quality_analysis"] = selection_quality_analysis
-    write_json(json_path, analysis)
-    write_text(markdown_path, render_analysis_markdown(analysis))
-    write_json(feature_json_path, feature_analysis)
-    write_text(feature_markdown_path, render_feature_analysis_markdown(feature_analysis))
-    write_json(selection_quality_json_path, selection_quality_analysis)
-    write_text(selection_quality_markdown_path, render_selection_quality_markdown(selection_quality_analysis))
+    _run_timed_backtest_phase("report_write", lambda: write_json(json_path, analysis))
+    _run_timed_backtest_phase("report_write", lambda: write_text(markdown_path, render_analysis_markdown(analysis)))
+    _run_timed_backtest_phase("report_write", lambda: write_json(feature_json_path, feature_analysis))
+    _run_timed_backtest_phase("report_write", lambda: write_text(feature_markdown_path, render_feature_analysis_markdown(feature_analysis)))
+    _run_timed_backtest_phase("report_write", lambda: write_json(selection_quality_json_path, selection_quality_analysis))
+    _run_timed_backtest_phase("report_write", lambda: write_text(selection_quality_markdown_path, render_selection_quality_markdown(selection_quality_analysis)))
 
     portfolio = analysis["portfolio_analysis"]
     trades = analysis["trade_analysis"]
@@ -4399,6 +4402,7 @@ def run_experiments(
                 performance_report.setdefault("json_read_breakdown_by_profile", {})[profile_id] = _json_read_breakdown(BACKTEST_JSON_READ_AUDIT)
                 performance_report.setdefault("top_json_read_files_by_profile", {})[profile_id] = _top_json_read_files(BACKTEST_JSON_READ_AUDIT, limit=50)
                 performance_report.setdefault("json_read_scope_by_profile", {})[profile_id] = _json_read_scope_breakdown(BACKTEST_JSON_READ_AUDIT)
+                performance_report.setdefault("profile_read_reason_breakdown_by_profile", {})[profile_id] = _profile_read_reason_breakdown(BACKTEST_JSON_READ_AUDIT)
                 performance_report.setdefault("json_read_out_of_range_count_by_profile", {})[profile_id] = int(BACKTEST_JSON_READ_AUDIT.get("out_of_range_count", 0) or 0)
                 if BACKTEST_JSON_READ_AUDIT.get("out_of_range_count"):
                     performance_report.setdefault("json_read_warnings", []).append(
@@ -4419,7 +4423,14 @@ def run_experiments(
                 _merge_jquants_api_session_summary(experiment_api_summary)
                 if not skip_analyze:
                     print(f"run-experiments analyze start: {profile_id}")
+                    analyze_started = time.perf_counter()
                     run_analyze(load_config(CONFIG_PATH), start_date_text, end_date_text)
+                    analyze_seconds = round(time.perf_counter() - analyze_started, 4)
+                    performance_report.setdefault("feature_analysis_time_by_profile", {})[profile_id] = analyze_seconds
+                    performance_report["feature_analysis_generation_time"] = round(
+                        float(performance_report.get("feature_analysis_generation_time", 0.0)) + analyze_seconds,
+                        4,
+                    )
         elif not skip_analyze:
             for profile_id in profile_ids:
                 ACTIVE_PROFILE_ID = profile_id
@@ -4431,22 +4442,36 @@ def run_experiments(
             compare_paths = run_compare_profiles(profile_ids, start_date_text, end_date_text)
             if not skip_backtest:
                 performance_report["compare_profiles_time"] = round(time.perf_counter() - compare_started, 4)
+                performance_report["comparison_analysis_time"] = performance_report["compare_profiles_time"]
         except SystemExit as exc:
             print(f"run-experiments compare warning: {exc}")
         if not skip_backtest:
             performance_report["top_bottlenecks"] = _top_experiment_bottlenecks(performance_report)
+        experiment_summary_started = time.perf_counter()
         summary = build_experiment_batch_summary(
-            base,
-            runnable_experiment_ids,
-            registry,
-            start_date_text,
-            end_date_text,
-            skipped_profiles=skipped_profiles,
-            capability_warnings=capability["warnings"],
+                base,
+                runnable_experiment_ids,
+                registry,
+                start_date_text,
+                end_date_text,
+                skipped_profiles=skipped_profiles,
+                capability_warnings=capability["warnings"],
         )
+        if not skip_backtest:
+            performance_report["experiment_summary_generation_time"] = round(
+                float(performance_report.get("experiment_summary_generation_time", 0.0)) + time.perf_counter() - experiment_summary_started,
+                4,
+            )
         summary.update(experiment_api_summary)
         if not skip_backtest:
             summary["performance_report"] = performance_report
+            summary["performance_audit"] = build_experiment_performance_audit(
+                performance_report,
+                profile_ids,
+                start_date_text,
+                end_date_text,
+            )
+            summary["performance_report"]["performance_audit"] = summary["performance_audit"]
         write_experiment_batch_outputs(summary, start_date_text, end_date_text, base, compare_paths)
         if strict_integrity:
             failures = _experiment_integrity_failures(summary)
@@ -4504,11 +4529,14 @@ def prepare_run_experiments_common_stages(profile_ids: list[str], start_date_tex
         "shared_candidate_time": 0.0,
         "market_context_time": 0.0,
         "report_time": 0.0,
+        "feature_analysis_generation_time": 0.0,
+        "experiment_summary_generation_time": 0.0,
         "scoring_time": 0.0,
         "trade_time": 0.0,
         "profile_scoring_time_by_profile": {},
         "profile_trade_time_by_profile": {},
         "profile_report_time_by_profile": {},
+        "feature_analysis_time_by_profile": {},
         "profile_total_time_by_profile": {},
         "profile_phase_time_by_profile": {},
         "profile_phase_accounting_delta_by_profile": {},
@@ -4702,6 +4730,7 @@ def _experiment_scoring_signature(config: dict[str, Any]) -> str:
 
 
 def _copy_common_indicator_stage(source_profile_id: str, target_profile_id: str, target_date_text: str) -> bool:
+    started = time.perf_counter()
     source_config = load_profile(source_profile_id)
     target_config = load_profile(target_profile_id)
     source_path = processed_profile_path(source_config, f"indicators_{target_date_text}.json")
@@ -4712,10 +4741,12 @@ def _copy_common_indicator_stage(source_profile_id: str, target_profile_id: str,
         return True
     payload = read_json(source_path)
     write_json(target_path, payload)
+    _record_backtest_phase_time("cache_copy_or_write", time.perf_counter() - started)
     return True
 
 
 def _copy_common_candidate_stage(source_profile_id: str, target_profile_id: str, target_date_text: str) -> bool:
+    started = time.perf_counter()
     source_config = load_profile(source_profile_id)
     target_config = load_profile(target_profile_id)
     source_path = processed_profile_path(source_config, f"candidates_{target_date_text}.json")
@@ -4729,6 +4760,7 @@ def _copy_common_candidate_stage(source_profile_id: str, target_profile_id: str,
     target_log = ROOT / "logs" / "screening" / target_profile_id / f"screening_{target_date_text}.json"
     if source_log.exists() and not target_log.exists():
         write_json(target_log, _with_profile_metadata(read_json(source_log), target_config))
+    _record_backtest_phase_time("cache_copy_or_write", time.perf_counter() - started)
     return True
 
 
@@ -4767,6 +4799,7 @@ def _common_processed_cache_path(config: dict[str, Any], stage: str, target_date
 
 
 def _restore_common_processed_cache(config: dict[str, Any], stage: str, target_date_text: str, target_path: Path) -> bool:
+    started = time.perf_counter()
     common_path = _common_processed_cache_path(config, stage, target_date_text)
     if not common_path.exists():
         return False
@@ -4775,6 +4808,7 @@ def _restore_common_processed_cache(config: dict[str, Any], stage: str, target_d
         payload = _with_profile_metadata(payload, config)
     write_json(target_path, payload)
     COMMON_CACHE_METRICS["cache_reused_from_common_count"] = COMMON_CACHE_METRICS.get("cache_reused_from_common_count", 0) + 1
+    _record_backtest_phase_time("cache_copy_or_write", time.perf_counter() - started)
     return True
 
 
@@ -4788,6 +4822,7 @@ def _record_cache_source(stage: str, source: str) -> None:
 
 
 def _save_common_processed_cache(config: dict[str, Any], stage: str, target_date_text: str, payload: dict[str, Any]) -> None:
+    started = time.perf_counter()
     common_path = _common_processed_cache_path(config, stage, target_date_text)
     if not common_path.exists():
         write_json(common_path, payload)
@@ -4795,12 +4830,15 @@ def _save_common_processed_cache(config: dict[str, Any], stage: str, target_date
             COMMON_CACHE_METRICS["generated_cache_size"] = COMMON_CACHE_METRICS.get("generated_cache_size", 0) + common_path.stat().st_size
         except OSError:
             pass
+    _record_backtest_phase_time("cache_copy_or_write", time.perf_counter() - started)
 
 
 def _update_common_processed_cache(config: dict[str, Any], stage: str, target_date_text: str, payload: dict[str, Any]) -> None:
+    started = time.perf_counter()
     common_path = _common_processed_cache_path(config, stage, target_date_text)
     if common_path.exists():
         write_json(common_path, payload)
+    _record_backtest_phase_time("cache_copy_or_write", time.perf_counter() - started)
 
 
 def _link_profile_processed_cache_to_common(config: dict[str, Any], stage: str, target_date_text: str, profile_path: Path) -> None:
@@ -4831,9 +4869,12 @@ def print_run_experiments_performance_report(report: dict[str, Any]) -> None:
         "scoring_time",
         "trade_time",
         "report_time",
+        "feature_analysis_generation_time",
+        "experiment_summary_generation_time",
         "profile_scoring_time_by_profile",
         "profile_trade_time_by_profile",
         "profile_report_time_by_profile",
+        "feature_analysis_time_by_profile",
         "profile_total_time_by_profile",
         "profile_phase_time_by_profile",
         "profile_phase_accounting_delta_by_profile",
@@ -4847,6 +4888,7 @@ def print_run_experiments_performance_report(report: dict[str, Any]) -> None:
         "json_read_breakdown_by_profile",
         "top_json_read_files_by_profile",
         "json_read_scope_by_profile",
+        "profile_read_reason_breakdown_by_profile",
         "json_read_out_of_range_count_by_profile",
         "json_read_warnings",
         "price_fetch_skipped",
@@ -5315,9 +5357,12 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             f"- scoring_time: {performance.get('scoring_time', 0)}",
             f"- trade_time: {performance.get('trade_time', 0)}",
             f"- report_time: {performance.get('report_time', 0)}",
+            f"- feature_analysis_generation_time: {performance.get('feature_analysis_generation_time', 0)}",
+            f"- experiment_summary_generation_time: {performance.get('experiment_summary_generation_time', 0)}",
             f"- profile_scoring_time_by_profile: {_compact_json(performance.get('profile_scoring_time_by_profile', {}))}",
             f"- profile_trade_time_by_profile: {_compact_json(performance.get('profile_trade_time_by_profile', {}))}",
             f"- profile_report_time_by_profile: {_compact_json(performance.get('profile_report_time_by_profile', {}))}",
+            f"- feature_analysis_time_by_profile: {_compact_json(performance.get('feature_analysis_time_by_profile', {}))}",
             f"- profile_total_time_by_profile: {_compact_json(performance.get('profile_total_time_by_profile', {}))}",
             f"- profile_phase_time_by_profile: {_compact_json(performance.get('profile_phase_time_by_profile', {}))}",
             f"- profile_phase_accounting_delta_by_profile: {_compact_json(performance.get('profile_phase_accounting_delta_by_profile', {}))}",
@@ -5331,6 +5376,7 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             f"- json_read_breakdown_by_profile: {_compact_json(performance.get('json_read_breakdown_by_profile', {}))}",
             f"- top_json_read_files_by_profile: {_compact_json(performance.get('top_json_read_files_by_profile', {}))}",
             f"- json_read_scope_by_profile: {_compact_json(performance.get('json_read_scope_by_profile', {}))}",
+            f"- profile_read_reason_breakdown_by_profile: {_compact_json(performance.get('profile_read_reason_breakdown_by_profile', {}))}",
             f"- json_read_out_of_range_count_by_profile: {_compact_json(performance.get('json_read_out_of_range_count_by_profile', {}))}",
             f"- json_read_warnings: {_compact_json(performance.get('json_read_warnings', []))}",
             f"- price_fetch_skipped: {str(bool(performance.get('price_fetch_skipped', False))).lower()}",
@@ -5352,6 +5398,31 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             f"- skipped_profiles: {_compact_json(performance.get('skipped_profiles', []))}",
         ]
     )
+    performance_audit = summary.get("performance_audit", {}) if isinstance(summary.get("performance_audit"), dict) else {}
+    if performance_audit:
+        lines.extend(
+            [
+                "",
+                "## Performance Audit",
+                "",
+                f"- total_elapsed_sec: {performance_audit.get('total_elapsed_sec', 0)}",
+                f"- phase_elapsed_sec: {_compact_json(performance_audit.get('phase_elapsed_sec', {}))}",
+                f"- json_read_scope: {_compact_json(performance_audit.get('json_read_scope', {}))}",
+                f"- profile_read_reason_breakdown: {_compact_json(performance_audit.get('profile_read_reason_breakdown', {}))}",
+                f"- indicator_field_audit: {_compact_json(performance_audit.get('indicator_field_audit', {}))}",
+                f"- optimization_targets_top3: {_compact_json(performance_audit.get('optimization_targets_top3', []))}",
+                "",
+                "### Top JSON Read Files",
+                "",
+                "| path | scope | read_count | total_bytes | total_elapsed_sec | avg_elapsed_ms |",
+                "| --- | --- | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for item in performance_audit.get("top_json_read_files", []) or []:
+            lines.append(
+                f"| {item.get('path', '')} | {item.get('scope', '')} | {item.get('read_count', 0)} | "
+                f"{item.get('total_bytes', 0)} | {item.get('total_elapsed_sec', 0)} | {item.get('avg_elapsed_ms', 0)} |"
+            )
     lines.extend(
         [
             "",
@@ -8077,7 +8148,7 @@ def run_screen(provider_name: str, target_date_text: str) -> None:
         )
 
     config = load_config(CONFIG_PATH)
-    payload = read_json(indicators_path)
+    payload = _run_timed_backtest_phase("indicator_load", lambda: read_json(indicators_path))
     indicators = payload.get("indicators", [])
     filter_started = time.perf_counter()
     market_filtered = _apply_market_section_filter(indicators, config)
@@ -8152,7 +8223,7 @@ def run_screen(provider_name: str, target_date_text: str) -> None:
         "market_coverage": screening_log["market_coverage"],
     }
     write_json(candidates_path, candidate_payload)
-    reloaded_candidate_payload = read_json(candidates_path)
+    reloaded_candidate_payload = _run_timed_backtest_phase("candidate_load", lambda: read_json(candidates_path))
     reloaded_candidates = _fill_market_sections_from_master(reloaded_candidate_payload.get("candidates", []))
     candidate_payload["market_coverage"]["post_filter_validation"] = _candidate_market_filter_validation(reloaded_candidates, config)
     write_json(candidates_path, candidate_payload)
@@ -8278,7 +8349,7 @@ def run_score(provider_name: str, target_date_text: str) -> None:
             f"Run `python src/main.py --mode screen --provider jquants --date {target_date_text}` first."
         )
 
-    payload = read_json(candidates_path)
+    payload = _run_timed_backtest_phase("candidate_load", lambda: read_json(candidates_path))
     candidates = payload.get("candidates", [])
     market_context = load_market_context_for_date(target_date_text, provider_name)
     target_date = date.fromisoformat(target_date_text)
@@ -9502,7 +9573,10 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
                     **config,
                     "execution": {**config.get("execution", {}), "use_next_day_open_execution": False},
                 }
-                state, portfolio_summary, trades = execute_real_data_paper_trade(scored_candidates, state, trade_config, entry_date_text)
+                state, portfolio_summary, trades = _run_timed_backtest_phase(
+                    "trade_simulation",
+                    lambda: execute_real_data_paper_trade(scored_candidates, state, trade_config, entry_date_text),
+                )
                 portfolio_summary["signal_date"] = target_date_text
                 portfolio_summary["entry_date"] = entry_date_text
                 portfolio_summary["entry_price_source"] = _backtest_execution_model(config)["entry_price_source"]
@@ -9818,20 +9892,34 @@ def _record_backtest_phase_time(phase: str, elapsed: float) -> None:
         BACKTEST_PROFILE_TIMINGS[phase] = BACKTEST_PROFILE_TIMINGS.get(phase, 0.0) + elapsed
 
 
+def _run_timed_backtest_phase(phase: str, action: Any) -> Any:
+    started_at = time.perf_counter()
+    try:
+        return action()
+    finally:
+        _record_backtest_phase_time(phase, time.perf_counter() - started_at)
+
+
 def _profile_phase_time_snapshot(profile_total_seconds: float) -> dict[str, Any]:
     phases = {
-        "indicator_load": round(float(BACKTEST_PROFILE_TIMINGS.get("indicator", 0.0)), 4),
-        "candidate_load": round(float(BACKTEST_PROFILE_TIMINGS.get("screening", 0.0)), 4),
+        "indicator_load": round(float(BACKTEST_PROFILE_TIMINGS.get("indicator_load", 0.0) or BACKTEST_PROFILE_TIMINGS.get("indicator", 0.0)), 4),
+        "candidate_load": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_load", 0.0) or BACKTEST_PROFILE_TIMINGS.get("screening", 0.0)), 4),
+        "score_load": round(float(BACKTEST_PROFILE_TIMINGS.get("score_load", 0.0)), 4),
         "scoring": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring", 0.0)), 4),
         "trade": round(float(BACKTEST_PROFILE_TIMINGS.get("trading", 0.0)), 4),
-        "feature_analysis": round(float(BACKTEST_PROFILE_TIMINGS.get("feature_analysis", 0.0)), 4),
+        "trade_simulation": round(float(BACKTEST_PROFILE_TIMINGS.get("trade_simulation", 0.0)), 4),
+        "feature_analysis_generation": round(float(BACKTEST_PROFILE_TIMINGS.get("feature_analysis_generation", 0.0)), 4),
         "candidate_filter": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_filter", 0.0)), 4),
         "market_filter": round(float(BACKTEST_PROFILE_TIMINGS.get("market_filter", 0.0)), 4),
         "score_merge": round(float(BACKTEST_PROFILE_TIMINGS.get("score_merge", 0.0)), 4),
+        "score_integrity_audit": round(float(BACKTEST_PROFILE_TIMINGS.get("score_integrity_audit", 0.0)), 4),
+        "result_integrity_audit": round(float(BACKTEST_PROFILE_TIMINGS.get("result_integrity_audit", 0.0)), 4),
         "portfolio_update": round(float(BACKTEST_PROFILE_TIMINGS.get("portfolio_update", 0.0)), 4),
         "summary_generation": round(float(BACKTEST_PROFILE_TIMINGS.get("summary_generation", 0.0)), 4),
-        "compare_profiles": 0.0,
-        "report_generation": round(float(BACKTEST_PROFILE_TIMINGS.get("report", 0.0)), 4),
+        "experiment_summary_generation": round(float(BACKTEST_PROFILE_TIMINGS.get("experiment_summary_generation", 0.0)), 4),
+        "comparison_analysis": round(float(BACKTEST_PROFILE_TIMINGS.get("comparison_analysis", 0.0)), 4),
+        "report_write": round(float(BACKTEST_PROFILE_TIMINGS.get("report_write", 0.0) or BACKTEST_PROFILE_TIMINGS.get("report", 0.0)), 4),
+        "cache_copy_or_write": round(float(BACKTEST_PROFILE_TIMINGS.get("cache_copy_or_write", 0.0)), 4),
         "json_read": round(float(BACKTEST_PROFILE_TIMINGS.get("json_read", 0.0)), 4),
         "json_write": round(float(BACKTEST_PROFILE_TIMINGS.get("json_write", 0.0)), 4),
         "sqlite_access": round(float(BACKTEST_PROFILE_TIMINGS.get("sqlite_access", 0.0)), 4),
@@ -9840,9 +9928,11 @@ def _profile_phase_time_snapshot(profile_total_seconds: float) -> dict[str, Any]
     delta = round(float(profile_total_seconds) - measured_sum, 4)
     if delta >= 0:
         phases["misc"] = delta
+        phases["other_misc"] = 0.0
     else:
         phases["timing_overlap_adjustment"] = delta
-    final_delta = round(float(profile_total_seconds) - sum(float(value) for value in phases.values()), 4)
+    accounting_sum = sum(float(value) for key, value in phases.items() if key != "other_misc")
+    final_delta = round(float(profile_total_seconds) - accounting_sum, 4)
     return {"phases": phases, "accounting_delta": final_delta}
 
 
@@ -9865,6 +9955,266 @@ def _top_experiment_bottlenecks(performance_report: dict[str, Any], limit: int =
     if compare_seconds > 0:
         rows.append({"profile": "__batch__", "phase": "compare_profiles", "elapsed_seconds": round(compare_seconds, 4)})
     return sorted(rows, key=lambda item: item["elapsed_seconds"], reverse=True)[:limit]
+
+
+def build_experiment_performance_audit(
+    performance_report: dict[str, Any],
+    profile_ids: list[str],
+    start_date_text: str,
+    end_date_text: str,
+) -> dict[str, Any]:
+    phase_elapsed = _aggregate_phase_elapsed(performance_report)
+    json_scope = _aggregate_json_scope(performance_report)
+    profile_read_reasons = _aggregate_profile_read_reasons(performance_report)
+    indicator_field_audit = build_indicator_field_audit(profile_ids, start_date_text, end_date_text)
+    return {
+        "total_elapsed_sec": round(sum(float(value or 0.0) for value in (performance_report.get("profile_total_time_by_profile", {}) or {}).values()), 4),
+        "phase_elapsed_sec": phase_elapsed,
+        "json_read_scope": json_scope,
+        "top_json_read_files": _aggregate_top_json_files(performance_report, limit=20),
+        "profile_read_reason_breakdown": profile_read_reasons,
+        "indicator_field_audit": indicator_field_audit,
+        "optimization_targets_top3": _performance_optimization_targets(phase_elapsed, json_scope, profile_read_reasons, indicator_field_audit),
+    }
+
+
+def _aggregate_phase_elapsed(performance_report: dict[str, Any]) -> dict[str, float]:
+    requested_keys = [
+        "json_read",
+        "misc",
+        "candidate_load",
+        "indicator_load",
+        "score_load",
+        "market_filter",
+        "score_integrity_audit",
+        "result_integrity_audit",
+        "feature_analysis_generation",
+        "experiment_summary_generation",
+        "cache_copy_or_write",
+        "report_write",
+        "trade_simulation",
+        "comparison_analysis",
+        "other_misc",
+    ]
+    totals = {key: 0.0 for key in requested_keys}
+    phase_by_profile = performance_report.get("profile_phase_time_by_profile", {})
+    if isinstance(phase_by_profile, dict):
+        for phases in phase_by_profile.values():
+            if not isinstance(phases, dict):
+                continue
+            for key in requested_keys:
+                totals[key] += float(phases.get(key, 0.0) or 0.0)
+            if not phases.get("other_misc") and phases.get("misc"):
+                totals["other_misc"] += float(phases.get("misc", 0.0) or 0.0)
+    totals["feature_analysis_generation"] += float(performance_report.get("feature_analysis_generation_time", 0.0) or 0.0)
+    totals["experiment_summary_generation"] += float(performance_report.get("experiment_summary_generation_time", 0.0) or 0.0)
+    totals["comparison_analysis"] += float(performance_report.get("comparison_analysis_time", performance_report.get("compare_profiles_time", 0.0)) or 0.0)
+    return {key: round(value, 4) for key, value in totals.items()}
+
+
+def _aggregate_json_scope(performance_report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    aggregate: dict[str, dict[str, Any]] = {}
+    by_profile = performance_report.get("json_read_scope_by_profile", {})
+    if isinstance(by_profile, dict):
+        for scopes in by_profile.values():
+            if not isinstance(scopes, dict):
+                continue
+            for scope, item in scopes.items():
+                if not isinstance(item, dict):
+                    continue
+                target = aggregate.setdefault(str(scope), {"count": 0, "bytes": 0, "elapsed_sec": 0.0})
+                target["count"] += int(item.get("count", 0) or 0)
+                target["bytes"] += int(item.get("bytes", 0) or 0)
+                target["elapsed_sec"] += float(item.get("elapsed_sec", 0.0) or 0.0)
+    return {
+        key: {"count": value["count"], "bytes": value["bytes"], "elapsed_sec": round(value["elapsed_sec"], 6)}
+        for key, value in sorted(aggregate.items())
+    }
+
+
+def _aggregate_top_json_files(performance_report: dict[str, Any], limit: int = 20) -> list[dict[str, Any]]:
+    aggregate: dict[tuple[str, str], dict[str, Any]] = {}
+    by_profile = performance_report.get("top_json_read_files_by_profile", {})
+    if isinstance(by_profile, dict):
+        for rows in by_profile.values():
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                path = str(row.get("path") or "")
+                scope = str(row.get("scope") or "unknown")
+                item = aggregate.setdefault((path, scope), {"path": path, "scope": scope, "read_count": 0, "total_bytes": 0, "total_elapsed_sec": 0.0})
+                item["read_count"] += int(row.get("read_count", row.get("count", 0)) or 0)
+                item["total_bytes"] += int(row.get("total_bytes", row.get("bytes", 0)) or 0)
+                item["total_elapsed_sec"] += float(row.get("total_elapsed_sec", row.get("elapsed_sec", 0.0)) or 0.0)
+    rows = []
+    for item in aggregate.values():
+        count = int(item.get("read_count", 0) or 0)
+        elapsed = float(item.get("total_elapsed_sec", 0.0) or 0.0)
+        rows.append({**item, "total_elapsed_sec": round(elapsed, 6), "avg_elapsed_ms": round((elapsed / count) * 1000, 3) if count else 0.0})
+    return sorted(rows, key=lambda item: (int(item.get("total_bytes", 0) or 0), int(item.get("read_count", 0) or 0)), reverse=True)[:limit]
+
+
+def _aggregate_profile_read_reasons(performance_report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    aggregate: dict[str, dict[str, Any]] = {}
+    by_profile = performance_report.get("profile_read_reason_breakdown_by_profile", {})
+    if isinstance(by_profile, dict):
+        for reasons in by_profile.values():
+            if not isinstance(reasons, dict):
+                continue
+            for reason, item in reasons.items():
+                if not isinstance(item, dict):
+                    continue
+                target = aggregate.setdefault(str(reason), {"count": 0, "bytes": 0, "elapsed_sec": 0.0})
+                target["count"] += int(item.get("count", 0) or 0)
+                target["bytes"] += int(item.get("bytes", 0) or 0)
+                target["elapsed_sec"] += float(item.get("elapsed_sec", 0.0) or 0.0)
+    for reason in ["cache_read", "report_read", "analysis_read", "summary_read", "unknown"]:
+        aggregate.setdefault(reason, {"count": 0, "bytes": 0, "elapsed_sec": 0.0})
+    return {
+        key: {"count": value["count"], "bytes": value["bytes"], "elapsed_sec": round(value["elapsed_sec"], 6)}
+        for key, value in sorted(aggregate.items())
+    }
+
+
+def build_indicator_field_audit(profile_ids: list[str], start_date_text: str, end_date_text: str, sample_limit: int = 20) -> dict[str, Any]:
+    paths = _indicator_audit_paths(profile_ids, start_date_text, end_date_text, sample_limit)
+    all_fields: set[str] = set()
+    sample_record_size_bytes = 0
+    sample_files_read = 0
+    for path in paths:
+        try:
+            payload = read_json(path)
+        except Exception:
+            continue
+        sample_files_read += 1
+        rows = payload.get("indicators", []) if isinstance(payload, dict) else []
+        if not isinstance(rows, list):
+            continue
+        for row in rows[:5]:
+            if not isinstance(row, dict):
+                continue
+            all_fields.update(str(key) for key in row.keys())
+            if not sample_record_size_bytes:
+                sample_record_size_bytes = len(json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    used_fields = _indicator_used_fields()
+    maybe_unused = sorted(all_fields - used_fields)
+    return {
+        "source_files_read": sample_files_read,
+        "sample_files": [_relative_path_text(path) for path in paths[:sample_limit]],
+        "total_fields": len(all_fields),
+        "all_fields": sorted(all_fields),
+        "used_fields": sorted(all_fields & used_fields),
+        "configured_used_fields": sorted(used_fields),
+        "maybe_unused_fields": maybe_unused,
+        "sample_record_size_bytes": sample_record_size_bytes,
+        "estimated_reducible_fields_count": len(maybe_unused),
+    }
+
+
+def _indicator_audit_paths(profile_ids: list[str], start_date_text: str, end_date_text: str, limit: int) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for base in [
+        ROOT / "data" / "processed" / "common",
+        ROOT / "data" / "processed",
+        *[processed_profile_path(load_profile(profile_id), "_audit_placeholder.json").parent for profile_id in profile_ids],
+    ]:
+        if not base.exists():
+            continue
+        for path in sorted(base.rglob("indicators_*.json")):
+            logical_date = _date_from_path_text(path)
+            if logical_date and not (start_date_text <= logical_date.isoformat() <= end_date_text):
+                continue
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            paths.append(path)
+            if len(paths) >= limit:
+                return paths
+    return paths
+
+
+def _indicator_used_fields() -> set[str]:
+    return {
+        "atr",
+        "bb_lower",
+        "bb_middle",
+        "bb_position",
+        "bb_upper",
+        "candlestick_signals",
+        "candle_type",
+        "close",
+        "code",
+        "date",
+        "fallback",
+        "five_day_volatility",
+        "high",
+        "listing_market",
+        "low",
+        "ma5",
+        "ma25",
+        "market_section",
+        "macd",
+        "macd_hist",
+        "macd_signal",
+        "name",
+        "open",
+        "relative_strength_5d",
+        "relative_strength_10d",
+        "relative_strength_20d",
+        "relative_strength_score",
+        "rsi",
+        "sector_comment",
+        "sector_momentum_score",
+        "sector_name",
+        "sector_rank",
+        "section",
+        "turnover_value",
+        "volume",
+        "volume_ratio",
+    }
+
+
+def _performance_optimization_targets(
+    phase_elapsed: dict[str, float],
+    json_scope: dict[str, dict[str, Any]],
+    profile_read_reasons: dict[str, dict[str, Any]],
+    indicator_field_audit: dict[str, Any],
+) -> list[dict[str, Any]]:
+    candidates = [
+        {
+            "target": "json_read",
+            "reason": "JSON read elapsed is a direct measured bottleneck; inspect top_json_read_files first.",
+            "elapsed_sec": float(phase_elapsed.get("json_read", 0.0) or 0.0),
+        },
+        {
+            "target": "profile_scope_reads",
+            "reason": "Profile processed-cache reads remain high even when common cache reuse is active.",
+            "elapsed_sec": float((json_scope.get("profile", {}) or {}).get("elapsed_sec", 0.0) or 0.0),
+            "bytes": int((json_scope.get("profile", {}) or {}).get("bytes", 0) or 0),
+            "reason_breakdown": profile_read_reasons,
+        },
+        {
+            "target": "indicator_json_width",
+            "reason": "Indicator payloads are large; field audit lists candidates for a later compact schema.",
+            "elapsed_sec": float(phase_elapsed.get("indicator_load", 0.0) or 0.0),
+            "estimated_reducible_fields_count": int(indicator_field_audit.get("estimated_reducible_fields_count", 0) or 0),
+        },
+        {
+            "target": "feature_analysis_generation",
+            "reason": "Analysis output generation can reread profile results and reports.",
+            "elapsed_sec": float(phase_elapsed.get("feature_analysis_generation", 0.0) or 0.0),
+        },
+        {
+            "target": "other_misc",
+            "reason": "Unattributed time remains after the explicit phase timers.",
+            "elapsed_sec": float(phase_elapsed.get("other_misc", 0.0) or 0.0),
+        },
+    ]
+    return sorted(candidates, key=lambda item: float(item.get("elapsed_sec", 0.0) or 0.0), reverse=True)[:3]
 
 
 def _record_backtest_report_skip(*, daily_report: bool, article: bool, reflection: bool) -> None:
@@ -9909,7 +10259,7 @@ def _backtest_indicator_metrics(target_date_text: str) -> list[str]:
     path = ROOT / "data" / "processed" / f"indicators_{target_date_text}.json"
     if not path.exists():
         return ["indicators file: missing"]
-    payload = read_json(path)
+    payload = _run_timed_backtest_phase("indicator_load", lambda: read_json(path))
     return [
         f"indicators mode: {payload.get('indicator_mode', 'full')}",
         f"indicators input days: {payload.get('input_days', 'N/A')}",
@@ -10322,7 +10672,7 @@ def ensure_indicators(provider_name: str, target_date_text: str) -> None:
     if path.exists() and not BACKTEST_MODE_ACTIVE:
         return
     if path.exists() and BACKTEST_MODE_ACTIVE:
-        payload = read_json(path)
+        payload = _run_timed_backtest_phase("indicator_load", lambda: read_json(path))
         if _indicator_cache_matches_current_scoring(payload, config, indicator_mode, enable_relative_strength):
             _ensure_relative_strength_benchmark_cache(config, date.fromisoformat(target_date_text), indicator_mode, enable_relative_strength)
             _record_cache_source("indicators", "legacy")
@@ -10335,7 +10685,7 @@ def ensure_screen(provider_name: str, target_date_text: str) -> None:
     config = load_config(CONFIG_PATH)
     path = processed_profile_path(config, f"candidates_{target_date_text}.json")
     if BACKTEST_MODE_ACTIVE and _restore_common_processed_cache(config, "candidates", target_date_text, path):
-        payload = _candidate_payload_with_market_sections(read_json(path), config)
+        payload = _candidate_payload_with_market_sections(_run_timed_backtest_phase("candidate_load", lambda: read_json(path)), config)
         write_json(path, payload)
         _update_common_processed_cache(config, "candidates", target_date_text, payload)
         save_screening_results(config, ROOT, payload)
@@ -10344,7 +10694,7 @@ def ensure_screen(provider_name: str, target_date_text: str) -> None:
         return
     if path.exists():
         screening_path = ROOT / "logs" / "screening" / profile_id_from(config) / f"screening_{target_date_text}.json"
-        candidate_payload = _candidate_payload_with_market_sections(read_json(path), config)
+        candidate_payload = _candidate_payload_with_market_sections(_run_timed_backtest_phase("candidate_load", lambda: read_json(path)), config)
         write_json(path, candidate_payload)
         _update_common_processed_cache(config, "candidates", target_date_text, candidate_payload)
         payload_source = read_json(screening_path) if screening_path.exists() else candidate_payload
@@ -10365,12 +10715,12 @@ def ensure_score(provider_name: str, target_date_text: str) -> dict[str, Any]:
     path = processed_profile_path(config, f"scored_candidates_{target_date_text}.json")
     if not path.exists():
         run_score(provider_name, target_date_text)
-    payload = read_json(path)
+    payload = _run_timed_backtest_phase("score_load", lambda: read_json(path))
     stale_reason = _score_payload_cache_issue(payload, config, target_date_text)
     if stale_reason:
         print(f"{BACKTEST_DAY_LOG_PREFIX} scoring cache stale: {path.relative_to(ROOT)} reason={stale_reason}; regenerating")
         run_score(provider_name, target_date_text)
-        payload = read_json(path)
+        payload = _run_timed_backtest_phase("score_load", lambda: read_json(path))
     payload.setdefault("config_version", config_version_from(config))
     payload.setdefault("selected", [item for item in payload.get("scores", []) if item.get("selected")])
     save_scoring_results(
@@ -12027,22 +12377,28 @@ def write_backtest_summary(
         "daily_asset_curve": daily_asset_curve,
         "dealer_comment": _backtest_dealer_comment(final_assets, initial_capital, closed_trades),
     }
-    result_integrity_audit = build_backtest_result_integrity_audit(
-        config,
-        all_trades,
-        backtest_dir,
-        start_date_text,
-        end_date_text,
-        daily_summaries,
+    result_integrity_audit = _run_timed_backtest_phase(
+        "result_integrity_audit",
+        lambda: build_backtest_result_integrity_audit(
+            config,
+            all_trades,
+            backtest_dir,
+            start_date_text,
+            end_date_text,
+            daily_summaries,
+        ),
     )
     summary["backtest_result_integrity_audit"] = result_integrity_audit
-    score_integrity_audit = build_score_integrity_audit(
-        config,
-        all_trades,
-        backtest_dir,
-        start_date_text,
-        end_date_text,
-        daily_summaries,
+    score_integrity_audit = _run_timed_backtest_phase(
+        "score_integrity_audit",
+        lambda: build_score_integrity_audit(
+            config,
+            all_trades,
+            backtest_dir,
+            start_date_text,
+            end_date_text,
+            daily_summaries,
+        ),
     )
     summary["score_integrity_audit"] = score_integrity_audit
     integrity_audit = build_backtest_integrity_audit(config, all_trades, backtest_dir, date_range_audit or {})
@@ -12065,13 +12421,13 @@ def write_backtest_summary(
     summary["rule_based_90d_report_path"] = str(rule_based_90d_report_path)
     summary["log_summary_path"] = str(log_summary_path)
 
-    write_json(report_json_path, summary)
-    write_json(log_summary_path, {**summary, "all_trades": all_trades, "state": state})
-    write_text(report_md_path, render_backtest_summary_markdown(summary, config))
+    _run_timed_backtest_phase("report_write", lambda: write_json(report_json_path, summary))
+    _run_timed_backtest_phase("report_write", lambda: write_json(log_summary_path, {**summary, "all_trades": all_trades, "state": state}))
+    _run_timed_backtest_phase("report_write", lambda: write_text(report_md_path, render_backtest_summary_markdown(summary, config)))
     if _is_rule_based_backtest(config):
-        write_text(rule_based_90d_report_path, render_rule_based_90d_summary_markdown(summary))
-    write_summary_csv(backtest_dir / "summary.csv", daily_summaries)
-    write_trades_csv(backtest_dir / "trades.csv", closed_trades)
+        _run_timed_backtest_phase("report_write", lambda: write_text(rule_based_90d_report_path, render_rule_based_90d_summary_markdown(summary)))
+    _run_timed_backtest_phase("report_write", lambda: write_summary_csv(backtest_dir / "summary.csv", daily_summaries))
+    _run_timed_backtest_phase("report_write", lambda: write_trades_csv(backtest_dir / "trades.csv", closed_trades))
     return summary
 
 
@@ -14962,11 +15318,12 @@ def read_json(path: Path) -> dict[str, Any]:
         with path.open("r", encoding="utf-8") as file:
             return json.load(file)
     finally:
-        _record_json_read_audit(path)
-        _record_backtest_phase_time("json_read", time.perf_counter() - started)
+        elapsed = time.perf_counter() - started
+        _record_json_read_audit(path, elapsed)
+        _record_backtest_phase_time("json_read", elapsed)
 
 
-def _record_json_read_audit(path: Path) -> None:
+def _record_json_read_audit(path: Path, elapsed: float) -> None:
     if not BACKTEST_MODE_ACTIVE:
         return
     if not _json_read_path_relevant_for_period_warning(path):
@@ -14980,30 +15337,43 @@ def _record_json_read_audit(path: Path) -> None:
     except OSError:
         byte_size = 0
     audit["bytes"] = int(audit.get("bytes", 0) or 0) + byte_size
+    audit["elapsed_sec"] = round(float(audit.get("elapsed_sec", 0.0) or 0.0) + elapsed, 6)
     category = _json_read_category(path)
     breakdown = audit.setdefault("breakdown", {})
     if isinstance(breakdown, dict):
-        item = breakdown.setdefault(category, {"count": 0, "bytes": 0})
+        item = breakdown.setdefault(category, {"count": 0, "bytes": 0, "elapsed_sec": 0.0})
         if isinstance(item, dict):
             item["count"] = int(item.get("count", 0) or 0) + 1
             item["bytes"] = int(item.get("bytes", 0) or 0) + byte_size
+            item["elapsed_sec"] = round(float(item.get("elapsed_sec", 0.0) or 0.0) + elapsed, 6)
     scope = _json_read_scope(path)
     scope_breakdown = audit.setdefault("scope_breakdown", {})
     if isinstance(scope_breakdown, dict):
-        item = scope_breakdown.setdefault(scope, {"count": 0, "bytes": 0})
+        item = scope_breakdown.setdefault(scope, {"count": 0, "bytes": 0, "elapsed_sec": 0.0})
         if isinstance(item, dict):
             item["count"] = int(item.get("count", 0) or 0) + 1
             item["bytes"] = int(item.get("bytes", 0) or 0) + byte_size
+            item["elapsed_sec"] = round(float(item.get("elapsed_sec", 0.0) or 0.0) + elapsed, 6)
+    if scope == "profile":
+        reason = _json_read_profile_reason(path)
+        profile_reasons = audit.setdefault("profile_read_reason_breakdown", {})
+        if isinstance(profile_reasons, dict):
+            item = profile_reasons.setdefault(reason, {"count": 0, "bytes": 0, "elapsed_sec": 0.0})
+            if isinstance(item, dict):
+                item["count"] = int(item.get("count", 0) or 0) + 1
+                item["bytes"] = int(item.get("bytes", 0) or 0) + byte_size
+                item["elapsed_sec"] = round(float(item.get("elapsed_sec", 0.0) or 0.0) + elapsed, 6)
     top_files = audit.setdefault("top_files", {})
     if isinstance(top_files, dict):
         try:
             path_text = str(path.relative_to(ROOT))
         except ValueError:
             path_text = str(path)
-        item = top_files.setdefault(path_text, {"path": path_text, "count": 0, "bytes": 0})
+        item = top_files.setdefault(path_text, {"path": path_text, "scope": scope, "count": 0, "bytes": 0, "elapsed_sec": 0.0})
         if isinstance(item, dict):
             item["count"] = int(item.get("count", 0) or 0) + 1
             item["bytes"] = int(item.get("bytes", 0) or 0) + byte_size
+            item["elapsed_sec"] = round(float(item.get("elapsed_sec", 0.0) or 0.0) + elapsed, 6)
     if date_text:
         current_min = audit.get("date_min")
         current_max = audit.get("date_max")
@@ -15066,12 +15436,41 @@ def _json_read_scope(path: Path) -> str:
     return "other"
 
 
+def _json_read_profile_reason(path: Path) -> str:
+    category = _json_read_category(path)
+    name = path.name
+    if category in {"indicators", "candidates", "scored_candidates"}:
+        return "cache_read"
+    if name in {"analysis_latest.json", "feature_analysis.json", "selection_quality.json"}:
+        return "analysis_read"
+    if name in {"backtest_summary.json", "experiment_summary.json"}:
+        return "summary_read"
+    if any(part == "reports" for part in path.parts):
+        return "report_read"
+    return "unknown"
+
+
 def _top_json_read_files(audit: dict[str, Any], limit: int = 50) -> list[dict[str, Any]]:
     files = audit.get("top_files", {})
     if not isinstance(files, dict):
         return []
-    rows = [dict(item) for item in files.values() if isinstance(item, dict)]
-    return sorted(rows, key=lambda item: (int(item.get("bytes", 0) or 0), int(item.get("count", 0) or 0)), reverse=True)[:limit]
+    rows = []
+    for item in files.values():
+        if not isinstance(item, dict):
+            continue
+        count = int(item.get("count", 0) or 0)
+        elapsed = float(item.get("elapsed_sec", 0.0) or 0.0)
+        rows.append(
+            {
+                "path": item.get("path", ""),
+                "scope": item.get("scope", "unknown"),
+                "read_count": count,
+                "total_bytes": int(item.get("bytes", 0) or 0),
+                "total_elapsed_sec": round(elapsed, 6),
+                "avg_elapsed_ms": round((elapsed / count) * 1000, 3) if count else 0.0,
+            }
+        )
+    return sorted(rows, key=lambda item: (int(item.get("total_bytes", 0) or 0), int(item.get("read_count", 0) or 0)), reverse=True)[:limit]
 
 
 def _json_read_breakdown(audit: dict[str, Any]) -> dict[str, dict[str, int]]:
@@ -15093,6 +15492,7 @@ def _json_read_breakdown(audit: dict[str, Any]) -> dict[str, dict[str, int]]:
         output[category] = {
             "count": int(item.get("count", 0) or 0) if isinstance(item, dict) else 0,
             "bytes": int(item.get("bytes", 0) or 0) if isinstance(item, dict) else 0,
+            "elapsed_sec": round(float(item.get("elapsed_sec", 0.0) or 0.0), 6) if isinstance(item, dict) else 0.0,
         }
     return output
 
@@ -15106,6 +15506,20 @@ def _json_read_scope_breakdown(audit: dict[str, Any]) -> dict[str, dict[str, int
         output[scope] = {
             "count": int(item.get("count", 0) or 0) if isinstance(item, dict) else 0,
             "bytes": int(item.get("bytes", 0) or 0) if isinstance(item, dict) else 0,
+            "elapsed_sec": round(float(item.get("elapsed_sec", 0.0) or 0.0), 6) if isinstance(item, dict) else 0.0,
+        }
+    return output
+
+
+def _profile_read_reason_breakdown(audit: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw = audit.get("profile_read_reason_breakdown", {})
+    output: dict[str, dict[str, Any]] = {}
+    for reason in ["cache_read", "report_read", "analysis_read", "summary_read", "unknown"]:
+        item = raw.get(reason, {}) if isinstance(raw, dict) else {}
+        output[reason] = {
+            "count": int(item.get("count", 0) or 0) if isinstance(item, dict) else 0,
+            "bytes": int(item.get("bytes", 0) or 0) if isinstance(item, dict) else 0,
+            "elapsed_sec": round(float(item.get("elapsed_sec", 0.0) or 0.0), 6) if isinstance(item, dict) else 0.0,
         }
     return output
 
