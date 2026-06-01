@@ -2080,6 +2080,7 @@ def run_storage_audit() -> None:
 
 
 def build_storage_audit() -> dict[str, Any]:
+    snapshot = _storage_file_snapshot()
     paths = [
         ("data", ROOT / "data", "data", "no"),
         ("data/raw", ROOT / "data" / "raw", "raw_prices_and_master", "no"),
@@ -2092,16 +2093,16 @@ def build_storage_audit() -> dict[str, Any]:
     ]
     rows = []
     for label, path, category, safe in paths:
-        summary = _path_size_summary(path)
+        summary = _snapshot_path_size_summary(snapshot, path)
         rows.append({"path": label, "category": category, "safe_to_delete": safe, **summary})
-    pycache_summary = _pycache_summary()
+    pycache_summary = _snapshot_pycache_summary(snapshot)
     rows.append({"path": "__pycache__", "category": "python_cache", "safe_to_delete": "yes", **pycache_summary})
     return {
         "paths": sorted(rows, key=lambda item: item["size"], reverse=True),
-        "largest_files": _largest_files(ROOT, limit=30),
-        "file_types": _file_type_ranking(ROOT),
-        "experiments": _experiment_artifact_sizes(),
-        "cache_duplication": _processed_cache_duplication(),
+        "largest_files": _snapshot_largest_files(snapshot, limit=30),
+        "file_types": _snapshot_file_type_ranking(snapshot),
+        "experiments": _snapshot_experiment_artifact_sizes(snapshot),
+        "cache_duplication": _snapshot_processed_cache_duplication(snapshot),
         "cleanup_recommendation": _storage_cleanup_recommendations(rows),
     }
 
@@ -2641,6 +2642,195 @@ def _path_size_summary(path: Path) -> dict[str, int]:
             except OSError:
                 continue
     return {"size": size, "file_count": count}
+
+
+def _storage_file_snapshot() -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    seen_errors = 0
+    for current_root, dirs, names in os.walk(ROOT):
+        dirs[:] = [item for item in dirs if item not in {".git", ".venv"}]
+        for name in names:
+            path = Path(current_root) / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                stat = path.stat()
+                rel = path.relative_to(ROOT)
+            except OSError:
+                seen_errors += 1
+                continue
+            except ValueError:
+                continue
+            entries.append(
+                {
+                    "path": path,
+                    "relative_path": str(rel),
+                    "parts": rel.parts,
+                    "suffix": path.suffix.lower() or "(no extension)",
+                    "size": stat.st_size,
+                    "inode": (stat.st_dev, stat.st_ino),
+                }
+            )
+    if seen_errors:
+        entries.append(
+            {
+                "path": ROOT,
+                "relative_path": "__scan_errors__",
+                "parts": ("__scan_errors__",),
+                "suffix": "(no extension)",
+                "size": 0,
+                "inode": (-1, -1),
+                "scan_errors": seen_errors,
+            }
+        )
+    return entries
+
+
+def _snapshot_path_size_summary(snapshot: list[dict[str, Any]], path: Path) -> dict[str, int]:
+    if not path.exists():
+        return {"size": 0, "file_count": 0}
+    try:
+        rel = path.relative_to(ROOT)
+    except ValueError:
+        return _path_size_summary(path)
+    if path.is_file():
+        try:
+            return {"size": path.stat().st_size, "file_count": 1}
+        except OSError:
+            return {"size": 0, "file_count": 0}
+    prefix = rel.parts
+    size = 0
+    count = 0
+    seen_inodes: set[tuple[int, int]] = set()
+    for item in snapshot:
+        parts = item.get("parts", ())
+        if len(parts) < len(prefix) or parts[: len(prefix)] != prefix:
+            continue
+        inode = item["inode"]
+        count += 1
+        if inode in seen_inodes:
+            continue
+        seen_inodes.add(inode)
+        size += int(item["size"])
+    return {"size": size, "file_count": count}
+
+
+def _snapshot_pycache_summary(snapshot: list[dict[str, Any]]) -> dict[str, int]:
+    size = 0
+    count = 0
+    seen_inodes: set[tuple[int, int]] = set()
+    for item in snapshot:
+        if "__pycache__" not in item.get("parts", ()):
+            continue
+        count += 1
+        inode = item["inode"]
+        if inode in seen_inodes:
+            continue
+        seen_inodes.add(inode)
+        size += int(item["size"])
+    return {"size": size, "file_count": count}
+
+
+def _snapshot_largest_files(snapshot: list[dict[str, Any]], limit: int = 20) -> list[dict[str, Any]]:
+    files = []
+    seen_inodes: set[tuple[int, int]] = set()
+    for item in snapshot:
+        inode = item["inode"]
+        if inode in seen_inodes:
+            continue
+        seen_inodes.add(inode)
+        files.append({"path": item["relative_path"], "size": int(item["size"])})
+    return sorted(files, key=lambda row: row["size"], reverse=True)[:limit]
+
+
+def _snapshot_file_type_ranking(snapshot: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_ext: dict[str, dict[str, int]] = {}
+    seen_inodes: set[tuple[int, int]] = set()
+    for item in snapshot:
+        inode = item["inode"]
+        if inode in seen_inodes:
+            continue
+        seen_inodes.add(inode)
+        row = by_ext.setdefault(str(item["suffix"]), {"size": 0, "file_count": 0})
+        row["size"] += int(item["size"])
+        row["file_count"] += 1
+    return sorted(
+        [{"extension": ext, **values} for ext, values in by_ext.items()],
+        key=lambda row: row["size"],
+        reverse=True,
+    )
+
+
+def _snapshot_experiment_artifact_sizes(snapshot: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_experiment: dict[str, dict[str, Any]] = {}
+    seen_by_experiment: dict[str, set[tuple[int, int]]] = {}
+    prefix = ("reports", "experiments")
+    for item in snapshot:
+        parts = item.get("parts", ())
+        if len(parts) < 3 or parts[:2] != prefix:
+            continue
+        key = "/".join(parts[:3])
+        seen = seen_by_experiment.setdefault(key, set())
+        row = by_experiment.setdefault(key, {"path": key, "size": 0, "file_count": 0})
+        row["file_count"] += 1
+        inode = item["inode"]
+        if inode in seen:
+            continue
+        seen.add(inode)
+        row["size"] += int(item["size"])
+    return sorted(by_experiment.values(), key=lambda row: row["size"], reverse=True)
+
+
+def _snapshot_processed_cache_duplication(snapshot: list[dict[str, Any]]) -> dict[str, Any]:
+    processed_prefix = ("data", "processed")
+    common_prefix = ("data", "processed", "common")
+    profile_size = 0
+    common_size = 0
+    profile_indicator_dates: dict[str, int] = {}
+    profile_candidate_dates: dict[str, int] = {}
+    duplicate_groups: dict[tuple[str, str], list[tuple[int, tuple[int, int]]]] = {}
+    seen_profile_inodes: set[tuple[int, int]] = set()
+    seen_common_inodes: set[tuple[int, int]] = set()
+    for item in snapshot:
+        parts = item.get("parts", ())
+        if len(parts) < 4 or parts[:2] != processed_prefix:
+            continue
+        name = parts[-1]
+        inode = item["inode"]
+        size = int(item["size"])
+        if parts[:3] == common_prefix:
+            if inode not in seen_common_inodes:
+                seen_common_inodes.add(inode)
+                common_size += size
+            continue
+        if inode not in seen_profile_inodes:
+            seen_profile_inodes.add(inode)
+            profile_size += size
+        if name.startswith("indicators_") and name.endswith(".json"):
+            date_key = name.removeprefix("indicators_").removesuffix(".json")
+            profile_indicator_dates[date_key] = profile_indicator_dates.get(date_key, 0) + 1
+            duplicate_groups.setdefault(("indicators", date_key), []).append((size, inode))
+        elif name.startswith("candidates_") and name.endswith(".json"):
+            date_key = name.removeprefix("candidates_").removesuffix(".json")
+            profile_candidate_dates[date_key] = profile_candidate_dates.get(date_key, 0) + 1
+            duplicate_groups.setdefault(("candidates", date_key), []).append((size, inode))
+    potential_savings = 0
+    for rows in duplicate_groups.values():
+        unique_by_inode = {}
+        for size, inode in rows:
+            unique_by_inode[inode] = size
+        sizes = list(unique_by_inode.values())
+        if len(sizes) > 1:
+            potential_savings += sum(sizes) - max(sizes)
+    return {
+        "profile_processed_size": profile_size,
+        "common_processed_size": common_size,
+        "profile_indicator_files": sum(profile_indicator_dates.values()),
+        "profile_candidate_files": sum(profile_candidate_dates.values()),
+        "duplicate_indicator_dates": sum(1 for count in profile_indicator_dates.values() if count > 1),
+        "duplicate_candidate_dates": sum(1 for count in profile_candidate_dates.values() if count > 1),
+        "potential_savings": potential_savings,
+    }
 
 
 def _pycache_summary() -> dict[str, int]:
