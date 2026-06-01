@@ -16,8 +16,13 @@ def test_trades_csv_row_count_matches_database(config_copy: dict, tmp_path) -> N
             "action": "BUY",
             "code": "1001",
             "name": "Test One",
+            "signal_date": "2026-03-01",
             "date": "2026-03-02",
             "entry_price": 1000,
+            "entry_price_source": "open",
+            "signal_close_price": 990,
+            "entry_open_price": 1000,
+            "entry_gap_rate": 0.0101,
             "shares": 100,
             "order_status": "FILLED",
         },
@@ -26,9 +31,14 @@ def test_trades_csv_row_count_matches_database(config_copy: dict, tmp_path) -> N
             "action": "SELL",
             "code": "1001",
             "name": "Test One",
+            "signal_date": "2026-03-01",
             "entry_date": "2026-03-02",
             "exit_date": "2026-03-05",
             "entry_price": 1000,
+            "entry_price_source": "open",
+            "signal_close_price": 990,
+            "entry_open_price": 1000,
+            "entry_gap_rate": 0.0101,
             "exit_price": 1050,
             "shares": 100,
             "profit": 5000,
@@ -65,6 +75,13 @@ def test_trades_csv_row_count_matches_database(config_copy: dict, tmp_path) -> N
     assert db_count == actual_db_count == 2
     assert csv_count == actual_db_count
     assert count_csv_data_rows(csv_path) == actual_db_count
+    csv_text = csv_path.read_text(encoding="utf-8")
+    assert "signal_date" in csv_text.splitlines()[0]
+    assert "2026-03-01" in csv_text
+    with sqlite3.connect(config_copy["database"]["path"]) as connection:
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(trades)")]
+    assert "signal_date" in columns
+    assert "entry_price_source" in columns
 
 
 def test_profile_outputs_are_separated(tmp_path) -> None:

@@ -3,6 +3,9 @@ jquants:
   earliest_supported_date:
     free: 2024-01-01
     light: 2021-05-01
+    investor_types:
+      free: 2024-01-01
+      light: 2021-05-31
   plans:
     free:
       requests_per_minute: 5

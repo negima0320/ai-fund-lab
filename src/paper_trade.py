@@ -7,6 +7,7 @@ from typing import Any
 
 from broker import build_broker
 from commentary import generate_buy_comment, generate_no_trade_comment, generate_sell_comment
+from market_sections import market_section_allowed
 from safety import can_trade, safety_event
 from tax import calculate_period_profit_summary
 
@@ -516,6 +517,9 @@ def _technical_snapshot(item: dict[str, Any]) -> dict[str, Any]:
         "technical_score": item.get("technical_score"),
         "selected_reason": selected_reason,
         "sector_name": item.get("sector_name"),
+        "section": item.get("section"),
+        "market_section": item.get("market_section"),
+        "listing_market": item.get("listing_market"),
         "sector_momentum_score": item.get("sector_momentum_score"),
         "sector_rank": item.get("sector_rank"),
         "sector_comment": item.get("sector_comment"),
@@ -583,6 +587,9 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "technical_score",
         "selected_reason",
         "sector_name",
+        "section",
+        "market_section",
+        "listing_market",
         "sector_momentum_score",
         "sector_rank",
         "sector_comment",
@@ -662,6 +669,30 @@ def initial_live_paper_state(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _candidate_entry_price(item: dict[str, Any]) -> float:
+    value = item.get("entry_price")
+    if value is None:
+        value = item.get("close")
+    return float(value)
+
+
+def _candidate_market_price(item: dict[str, Any], fallback: float | None = None) -> float:
+    value = item.get("close")
+    if value is None:
+        value = fallback
+    return float(value)
+
+
+def _execution_timing_fields(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "signal_date": item.get("signal_date") or item.get("date"),
+        "entry_price_source": item.get("entry_price_source"),
+        "signal_close_price": item.get("signal_close_price"),
+        "entry_open_price": item.get("entry_open_price"),
+        "entry_gap_rate": item.get("entry_gap_rate"),
+    }
+
+
 def execute_real_data_paper_trade(
     scored_candidates: list[dict[str, Any]],
     state: dict[str, Any],
@@ -733,8 +764,13 @@ def execute_real_data_paper_trade(
                     "code": pending["code"],
                     "name": pending["name"],
                     "sector_name": pending.get("sector_name", ""),
+                    "signal_date": pending.get("signal_date"),
                     "entry_date": trade_date,
                     "entry_price": executed_price,
+                    "entry_price_source": pending.get("entry_price_source"),
+                    "signal_close_price": pending.get("signal_close_price"),
+                    "entry_open_price": pending.get("entry_open_price"),
+                    "entry_gap_rate": pending.get("entry_gap_rate"),
                     "current_price": executed_price,
                     "shares": int(pending["shares"]),
                     "market_value": round(amount, 2),
@@ -759,10 +795,15 @@ def execute_real_data_paper_trade(
                     **pending,
                     "trade_id": pending.get("trade_id") or pending["order_id"],
                     "action": "SELL",
+                    "signal_date": position.get("signal_date"),
                     "entry_date": position["entry_date"],
                     "exit_date": trade_date,
                     "holding_days": int(position.get("holding_days", 0)) + 1,
                     "entry_price": position["entry_price"],
+                    "entry_price_source": position.get("entry_price_source"),
+                    "signal_close_price": position.get("signal_close_price"),
+                    "entry_open_price": position.get("entry_open_price"),
+                    "entry_gap_rate": position.get("entry_gap_rate"),
                     "exit_price": executed_price,
                     "executed_price": executed_price,
                     "actual_exit_price": executed_price,
@@ -833,10 +874,15 @@ def execute_real_data_paper_trade(
                     "code": position["code"],
                     "name": position["name"],
                     "sector_name": position.get("sector_name", ""),
+                    "signal_date": position.get("signal_date"),
                     "entry_date": position["entry_date"],
                     "exit_date": trade_date,
                     "holding_days": holding_days,
                     "entry_price": position["entry_price"],
+                    "entry_price_source": position.get("entry_price_source"),
+                    "signal_close_price": position.get("signal_close_price"),
+                    "entry_open_price": position.get("entry_open_price"),
+                    "entry_gap_rate": position.get("entry_gap_rate"),
                     "exit_price": planned_exit_price,
                     "actual_exit_price": planned_exit_price,
                     "shares": position["shares"],
@@ -889,12 +935,48 @@ def execute_real_data_paper_trade(
     selected.sort(key=lambda item: (float(item["total_score"]), float(item["confidence"])), reverse=True)
     buy_candidates = []
     for item in selected:
+        if not market_section_allowed(item, config):
+            trades.append(
+                _skipped_buy_attempt(
+                    trade_id=f"{trade_date}_{item['code']}_SKIP_BUY",
+                    action="SKIP_BUY",
+                    code=item["code"],
+                    name=item["name"],
+                    trade_date=trade_date,
+                    price=_candidate_entry_price(item),
+                    allocation_limit=0,
+                    score=item.get("total_score"),
+                    reason=item.get("selection_reason") or item.get("selected_reason") or item["reason"],
+                    skipped_reason="market_filter_excluded",
+                    config=config,
+                )
+            )
+            continue
         if len(next_positions) + len(pending_buy_codes) >= max_positions:
             break
         if item["code"] in held_codes or item["code"] in pending_buy_codes:
             continue
+        if item.get("entry_price_available") is False:
+            trades.append(
+                _skipped_buy_attempt(
+                    trade_id=f"{trade_date}_{item['code']}_SKIP_BUY",
+                    action="SKIP_BUY",
+                    code=item["code"],
+                    name=item["name"],
+                    trade_date=trade_date,
+                    price=float(item.get("close") or 0),
+                    allocation_limit=0,
+                    score=item.get("total_score"),
+                    reason=item.get("selection_reason") or item.get("selected_reason") or item["reason"],
+                    skipped_reason="entry_dateの価格データがないため買付見送り",
+                    config=config,
+                )
+            )
+            continue
         allocation = min(allocation_limit, cash)
-        shares, skipped_reason = _calculate_buy_shares(float(item["close"]), allocation, config)
+        entry_price = _candidate_entry_price(item)
+        current_price = _candidate_market_price(item, entry_price)
+        shares, skipped_reason = _calculate_buy_shares(entry_price, allocation, config)
         if shares <= 0:
             trades.append(
                 _skipped_buy_attempt(
@@ -903,7 +985,7 @@ def execute_real_data_paper_trade(
                     code=item["code"],
                     name=item["name"],
                     trade_date=trade_date,
-                    price=float(item["close"]),
+                    price=entry_price,
                     allocation_limit=allocation,
                     score=item.get("total_score"),
                     reason=item.get("selection_reason") or item.get("selected_reason") or item["reason"],
@@ -912,24 +994,29 @@ def execute_real_data_paper_trade(
                 )
             )
             continue
-        amount = shares * float(item["close"])
+        amount = shares * entry_price
         buy_commission = _calculate_commission(amount, config)
         position = {
             "code": item["code"],
             "name": item["name"],
             "sector_name": item.get("sector_name", ""),
+            "signal_date": item.get("signal_date") or item.get("date"),
             "entry_date": trade_date,
-            "entry_price": float(item["close"]),
-            "current_price": float(item["close"]),
+            "entry_price": entry_price,
+            "entry_price_source": item.get("entry_price_source"),
+            "signal_close_price": item.get("signal_close_price"),
+            "entry_open_price": item.get("entry_open_price"),
+            "entry_gap_rate": item.get("entry_gap_rate"),
+            "current_price": current_price,
             "shares": shares,
-            "market_value": round(amount, 2),
+            "market_value": round(shares * current_price, 2),
             "buy_commission": buy_commission,
             "holding_days": 1,
             "score": item["total_score"],
             "reason": item.get("selection_reason") or item.get("selected_reason") or item["reason"],
             **_technical_snapshot(item),
-            "unrealized_profit": 0.0,
-            "unrealized_profit_rate": 0.0,
+            "unrealized_profit": round(shares * (current_price - entry_price), 2),
+            "unrealized_profit_rate": round((current_price - entry_price) / entry_price, 4) if entry_price else 0.0,
         }
         buy_log = {
             "trade_id": f"{trade_date}_{item['code']}_BUY",
@@ -937,8 +1024,9 @@ def execute_real_data_paper_trade(
             "code": item["code"],
             "name": item["name"],
             "sector_name": item.get("sector_name", ""),
+            **_execution_timing_fields(item),
             "entry_date": trade_date,
-            "entry_price": float(item["close"]),
+            "entry_price": entry_price,
             "shares": shares,
             "amount": round(amount, 2),
             "buy_commission": buy_commission,

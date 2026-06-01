@@ -321,6 +321,154 @@ def test_investor_types_period_preload_reused_by_daily_scoring(monkeypatch, tmp_
     assert second["metadata"]["from_preloaded"] is True
 
 
+def test_investor_types_period_preload_splits_long_range(monkeypatch, tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_8")
+    config.setdefault("jquants", {})["plan"] = "light"
+    main_module._reset_jquants_api_session()
+    calls: list[tuple[date, date]] = []
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            self.last_request_metadata = {}
+
+        def fetch_investor_types_cached(self, *_args, start_date, end_date, **_kwargs):
+            calls.append((start_date, end_date))
+            return {
+                "records": [{"Date": end_date.isoformat(), "overseas_net_buy": len(calls)}],
+                "cache_path": f"{start_date}_to_{end_date}.json",
+                "from_cache": False,
+                "saved": True,
+                "available": True,
+                "api_status": "200",
+                "reason": "",
+            }
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    payload = main_module._load_investor_types_for_period(date(2021, 5, 1), date(2026, 5, 30), config)
+
+    assert len(calls) > 1
+    assert all((end - start).days <= 364 for start, end in calls)
+    assert payload["metadata"]["chunks_total"] == len(calls)
+    assert payload["metadata"]["chunks_success"] == len(calls)
+    assert payload["metadata"]["records_loaded"] == len(calls)
+    assert main_module._jquants_api_session()["investor_types_fetch_summary"]["investor_types_chunks_total"] == len(calls)
+
+
+def test_investor_types_period_preload_clamps_to_endpoint_supported_start(monkeypatch, tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_8")
+    config.setdefault("jquants", {})["plan"] = "light"
+    config["jquants"]["earliest_supported_date"] = {
+        "light": "2021-05-01",
+        "investor_types": {"light": "2021-05-31"},
+    }
+    main_module._reset_jquants_api_session()
+    calls: list[tuple[date, date]] = []
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            self.last_request_metadata = {}
+
+        def fetch_investor_types_cached(self, *_args, start_date, end_date, **_kwargs):
+            calls.append((start_date, end_date))
+            return {
+                "records": [{"Date": end_date.isoformat(), "overseas_net_buy": 100}],
+                "cache_path": f"{start_date}_to_{end_date}.json",
+                "from_cache": False,
+                "saved": True,
+                "available": True,
+                "api_status": "200",
+                "reason": "",
+            }
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    payload = main_module._load_investor_types_for_period(date(2021, 5, 1), date(2026, 5, 30), config)
+    summary = main_module._jquants_api_session()["investor_types_fetch_summary"]
+
+    assert calls[0][0] == date(2021, 5, 31)
+    assert payload["requested_start_date"] == "2020-10-31"
+    assert payload["clamped_start_date"] == "2021-05-31"
+    assert payload["clamp_reason"] == "plan_supported_date"
+    assert summary["investor_types_fetch_requested_start"] == "2020-10-31"
+    assert summary["investor_types_fetch_clamped_start"] == "2021-05-31"
+
+
+def test_investor_types_period_preload_continues_when_one_chunk_fails(monkeypatch, tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_8")
+    config.setdefault("jquants", {})["plan"] = "light"
+    main_module._reset_jquants_api_session()
+    calls = {"count": 0}
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            self.last_request_metadata = {}
+
+        def fetch_investor_types_cached(self, *_args, start_date, end_date, **_kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return {
+                    "records": [],
+                    "cache_path": "",
+                    "from_cache": False,
+                    "saved": False,
+                    "available": False,
+                    "api_status": "bad_request",
+                    "reason": "bad_request",
+                }
+            return {
+                "records": [{"Date": end_date.isoformat(), "overseas_net_buy": 100}],
+                "cache_path": f"{start_date}_to_{end_date}.json",
+                "from_cache": False,
+                "saved": True,
+                "available": True,
+                "api_status": "200",
+                "reason": "",
+            }
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    payload = main_module._load_investor_types_for_period(date(2021, 5, 1), date(2023, 5, 30), config)
+
+    assert payload["metadata"]["available"] is True
+    assert payload["metadata"]["chunks_failed"] == 1
+    assert payload["metadata"]["chunks_success"] >= 1
+    assert main_module._jquants_api_session()["disabled_features_reason"] == {}
+
+
+def test_investor_types_period_preload_disables_only_when_all_chunks_fail(monkeypatch, tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_8")
+    config.setdefault("jquants", {})["plan"] = "light"
+    main_module._reset_jquants_api_session()
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            self.last_request_metadata = {}
+
+        def fetch_investor_types_cached(self, *_args, **_kwargs):
+            return {
+                "records": [],
+                "cache_path": "",
+                "from_cache": False,
+                "saved": False,
+                "available": False,
+                "api_status": "bad_request",
+                "reason": "bad_request",
+            }
+
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "JQuantsDataProvider", FakeProvider)
+
+    payload = main_module._load_investor_types_for_period(date(2021, 5, 1), date(2022, 5, 30), config)
+
+    assert payload["metadata"]["available"] is False
+    assert payload["metadata"]["chunks_success"] == 0
+    assert main_module._jquants_api_session()["disabled_features_reason"]["investor_types"] == "bad_request"
+
+
 def test_investor_types_rate_limit_retries_and_continues(monkeypatch, tmp_path) -> None:
     config = load_profile("rookie_dealer_02_v2_8")
     config.setdefault("jquants", {})["plan"] = "light"
@@ -466,6 +614,44 @@ def test_v2_8_adds_investor_context_score_once() -> None:
     assert item["score_components"]["investor_context_score"] == 5
     assert item["total_score"] == expected_total
     assert item["score_components"]["matches_total_score"] is True
+
+
+def test_v2_11_uses_negative_investor_context_as_filter_not_score() -> None:
+    profile = load_profile("rookie_dealer_02_v2_11")
+    profile["_investor_context"] = {**build_investor_context([], "2026-03-06"), "investor_context_score": -2}
+
+    item = score_real_candidates([_candidate()], "2026-03-06", profile, "test")["scores"][0]
+    expected_total = item["technical_score"] + item["relative_strength_score"] + item["market_context_score"] + item["penalty_score"]
+
+    assert item["investor_context_score"] == -2
+    assert item["score_components"]["investor_context_score"] == 0
+    assert item["total_score"] == expected_total
+    assert item["selected"] is False
+    assert item["rejected_reason"] == "investor_context_negative"
+
+
+def test_v2_11_allows_non_negative_investor_context() -> None:
+    profile = load_profile("rookie_dealer_02_v2_11")
+    profile["_investor_context"] = {**build_investor_context([], "2026-03-06"), "investor_context_score": 0}
+
+    item = score_real_candidates([_candidate()], "2026-03-06", profile, "test")["scores"][0]
+
+    assert item["investor_context_score"] == 0
+    assert item["rejected_reason"] != "investor_context_negative"
+
+
+def test_investor_context_filter_rejections_are_kept_when_rejected_details_disabled() -> None:
+    config = load_profile("rookie_dealer_02_v2_11")
+    config["analysis"] = {"save_rejected_candidates": False}
+    scores = [
+        {"code": "1001", "selected": True},
+        {"code": "1002", "selected": False, "rejected_reason": "investor_context_negative"},
+        {"code": "1003", "selected": False, "rejected_reason": "通常基準45点には届かないため落選"},
+    ]
+
+    stored = main_module._scores_for_storage(scores, config)
+
+    assert [item["code"] for item in stored] == ["1001", "1002"]
 
 
 def test_fast_analysis_does_not_change_investor_context_decision() -> None:

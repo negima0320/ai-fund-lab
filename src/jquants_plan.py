@@ -68,6 +68,7 @@ PROFILE_REQUIRED_CAPABILITIES: dict[str, set[str]] = {
     "rookie_dealer_02_v2_8": {"listed_info", "prices", "investor_types"},
     "rookie_dealer_02_v2_9": {"listed_info", "prices", "financial_statements"},
     "rookie_dealer_02_v2_10": {"listed_info", "prices", "earnings_calendar"},
+    "rookie_dealer_02_v2_11": {"listed_info", "prices", "investor_types"},
 }
 
 FALLBACKABLE_PROFILE_CAPABILITIES: dict[str, dict[str, str]] = {
@@ -76,6 +77,9 @@ FALLBACKABLE_PROFILE_CAPABILITIES: dict[str, dict[str, str]] = {
     },
     "rookie_dealer_02_v2_8": {
         "investor_types": "disable investor_context_score and continue with score 0",
+    },
+    "rookie_dealer_02_v2_11": {
+        "investor_types": "disable investor_context_filter and continue without filtering",
     },
 }
 

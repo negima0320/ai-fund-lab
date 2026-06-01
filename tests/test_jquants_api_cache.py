@@ -597,8 +597,10 @@ def test_jquants_smoke_trading_calendar_uses_v2_markets_calendar(monkeypatch, tm
 
     result = main_module.build_jquants_smoke_test("trading_calendar", config)
 
+    end_date = main_module._business_day_on_or_before(date.today())
+    start_date = main_module._jquants_smoke_start_date("trading_calendar", end_date)
     assert result["result"] == "OK"
-    assert calls == [("/markets/calendar", {"from": "20260429", "to": "20260529"})]
+    assert calls == [("/markets/calendar", {"from": start_date.strftime("%Y%m%d"), "to": end_date.strftime("%Y%m%d")})]
 
 
 def test_jquants_smoke_logs_result(monkeypatch, tmp_path) -> None:

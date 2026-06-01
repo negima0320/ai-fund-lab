@@ -1,0 +1,32 @@
+{
+  "prices": [
+    {
+      "start": "2021-03-22",
+      "end": "2021-03-24",
+      "reason": "bad_request_or_out_of_range",
+      "checked_at": "2026-05-31T18:18:07",
+      "source": "fetch-period-prices"
+    },
+    {
+      "start": "2021-05-03",
+      "end": "2021-05-21",
+      "reason": "bad_request_or_out_of_range",
+      "checked_at": "2026-06-01T08:07:45",
+      "source": "consecutive-400"
+    },
+    {
+      "start": "2021-05-24",
+      "end": "2021-05-28",
+      "reason": "bad_request_or_out_of_range",
+      "checked_at": "2026-06-01T08:02:17",
+      "source": "fetch-period-prices"
+    },
+    {
+      "start": "2021-05-31",
+      "end": "2021-05-31",
+      "reason": "bad_request_or_out_of_range",
+      "checked_at": "2026-06-01T08:09:19",
+      "source": "fetch-period-prices"
+    }
+  ]
+}

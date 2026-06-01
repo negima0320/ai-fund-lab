@@ -7,6 +7,7 @@ from typing import Any
 
 from candlestick import detect_candlestick_signals
 from earnings_calendar import EARNINGS_FILTER_REJECTED_REASON, earnings_filter_result
+from market_sections import allowed_market_sections, market_section_counts, market_section_from_row
 
 
 def score_candidates(screening_log: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
@@ -173,6 +174,7 @@ def score_real_candidates(
         technical_parts["sector_adjustment"] = sector_adjustment
         relative_strength_score = _relative_strength_score_for_candidate(candidate, config)
         investor_context = _investor_context_for_candidate(config)
+        investor_context_raw_score = _investor_context_raw_score_for_candidate(candidate, config, investor_context)
         investor_context_score = _investor_context_score_for_candidate(candidate, config, investor_context)
         market_context_score = 0
         total_before_selection_adjustment = technical + relative_strength_score + investor_context_score + market_context_score
@@ -193,6 +195,8 @@ def score_real_candidates(
             score_reason = f"{score_reason}、relative_strength_score={relative_strength_score}"
         if investor_context_score:
             score_reason = f"{score_reason}、investor_context_score={investor_context_score}"
+        elif investor_context_raw_score:
+            score_reason = f"{score_reason}、investor_context_score={investor_context_raw_score}"
         if rsi_selection["penalty"]:
             score_reason = f"{score_reason}、RSIが{selection_config['max_rsi_for_new_position']:.0f}を超えたため減点{rsi_selection['penalty']:.0f}点"
         if rsi_selection["excluded"]:
@@ -207,6 +211,9 @@ def score_real_candidates(
                 "code": candidate["code"],
                 "name": candidate["name"],
                 "sector_name": candidate.get("sector_name", ""),
+                "section": candidate.get("section", "Unknown"),
+                "market_section": candidate.get("market_section", candidate.get("section", "Unknown")),
+                "listing_market": candidate.get("listing_market", candidate.get("section", "Unknown")),
                 "sector_momentum_score": candidate.get("sector_momentum_score"),
                 "sector_rank": candidate.get("sector_rank"),
                 "sector_comment": candidate.get("sector_comment", ""),
@@ -261,7 +268,7 @@ def score_real_candidates(
                 "institution_net_buy": investor_context.get("institution_net_buy"),
                 "trust_bank_net_buy": investor_context.get("trust_bank_net_buy"),
                 "proprietary_net_buy": investor_context.get("proprietary_net_buy"),
-                "investor_context_score": investor_context_score,
+                "investor_context_score": investor_context_raw_score,
                 "candle_type": candidate.get("candle_type", "unknown"),
                 "candle_body_rate": candidate.get("candle_body_rate"),
                 "upper_shadow_rate": candidate.get("upper_shadow_rate"),
@@ -275,7 +282,6 @@ def score_real_candidates(
                 "volume_score": technical_parts["volume_score"],
                 "rsi_score": technical_parts["rsi_score"],
                 "market_context_score": score_components["market_context_score"],
-                "investor_context_score": score_components["investor_context_score"],
                 "sector_score": score_components["sector_score"],
                 "penalty_score": score_components["penalty_score"],
                 "score_components": score_components,
@@ -345,7 +351,7 @@ def score_real_candidates(
                 "candlestick_score": 15,
                 "sector_score": 5,
             },
-            "score_formula": "technical_score + relative_strength_score + investor_context_score + market_context_score + penalty_score",
+            "score_formula": _score_formula_label(config),
             "min_total_score_for_selection": selection_config["min_score"],
             "min_confidence_for_selection": selection_config["min_confidence"],
             "max_selected": selection_config["max_selected"],
@@ -369,6 +375,8 @@ def _apply_selection_rules(
     market_filter: dict[str, Any],
     market_regime: str,
 ) -> dict[str, Any]:
+    allowed_sections = set(market_filter.get("allowed_sections") or {"TSEPrime", "TSEStandard", "TSEGrowth"})
+    allow_unknown_market = bool(market_filter.get("allow_unknown_market", "allowed_sections" not in market_filter))
     risk_off = market_filter["enabled"] and market_regime == "risk_off"
     selected_count = 0
     max_selected = selection_config["max_selected"]
@@ -384,12 +392,31 @@ def _apply_selection_rules(
             item["market_filter_applied"] = True
             item["market_filter_reason"] = "risk_offのため買付抑制"
 
+        investor_filter_result = _investor_context_filter_result(item, selection_config)
+        item["investor_context_filter_checked"] = investor_filter_result["checked"]
+        item["investor_context_filter_blocked"] = investor_filter_result["blocked"]
+        item["investor_context_filter_reason"] = investor_filter_result["reason"]
+
         conditional_result = _conditional_selection_result(item, selection_config, market_regime)
         item["conditional_selection_checked"] = conditional_result["checked"]
         item["conditional_selection_matched"] = conditional_result["matched"]
         item["conditional_selection_reason"] = conditional_result["reason"]
+        section = market_section_from_row(item)
+        market_section_blocked = (
+            section == "Unknown" and not allow_unknown_market
+        ) or (section != "Unknown" and section not in allowed_sections)
+        item["market_section_filter_checked"] = True
+        item["market_section_filter_blocked"] = market_section_blocked
+        item["market_section_filter_reason"] = "market_filter_excluded" if market_section_blocked else ""
 
-        if item.get("earnings_filter_blocked"):
+        if market_section_blocked:
+            item["selected"] = False
+            item["rejected_reason"] = "market_filter_excluded"
+            item["reason"] = item["rejected_reason"]
+        elif investor_filter_result["blocked"]:
+            item["rejected_reason"] = investor_filter_result["reason"]
+            item["reason"] = item["rejected_reason"]
+        elif item.get("earnings_filter_blocked"):
             item["rejected_reason"] = EARNINGS_FILTER_REJECTED_REASON
             item["reason"] = item["rejected_reason"]
         elif _meets_regular_selection(item, {**selection_config, "min_score": min_score}) and selected_count < max_selected:
@@ -425,7 +452,9 @@ def _apply_selection_rules(
     if selected_count == 0 and top_pick_allowed:
         for item in scored:
             if (
-                not item.get("earnings_filter_blocked")
+                not item.get("investor_context_filter_blocked")
+                and not item.get("earnings_filter_blocked")
+                and not item.get("market_section_filter_blocked")
                 and _meets_top_pick_selection(item, selection_config)
                 and not _is_conditional_low_score_candidate(item, selection_config)
             ):
@@ -445,6 +474,11 @@ def _apply_selection_rules(
         "risk_off_max_buy_orders": market_filter["risk_off_max_buy_orders"],
         "risk_off_min_score": market_filter["risk_off_min_score"],
         "risk_off_disable_top_pick": market_filter["risk_off_disable_top_pick"],
+        "allowed_sections": sorted(allowed_sections),
+        "allow_unknown_market": allow_unknown_market,
+        "candidate_market_counts": market_section_counts(scored),
+        "selected_market_counts": market_section_counts([item for item in scored if item.get("selected")]),
+        "market_filter_excluded_count": sum(1 for item in scored if item.get("market_section_filter_blocked")),
         "reason": "risk_offのため買付抑制" if risk_off else "",
     }
 
@@ -453,6 +487,7 @@ def _selection_config(config: dict[str, Any]) -> dict[str, Any]:
     selection = config.get("selection", {})
     max_rsi = _optional_float(selection.get("max_rsi_for_new_position"))
     conditional = selection.get("conditional_selection", {})
+    investor_filter = config.get("investor_context_filter", {})
     low_score_range = conditional.get("low_score_range", {}) if isinstance(conditional, dict) else {}
     allow_if = conditional.get("allow_if", {}) if isinstance(conditional, dict) else {}
     return {
@@ -478,6 +513,11 @@ def _selection_config(config: dict[str, Any]) -> dict[str, Any]:
                 "allowed_market_regimes": list(allow_if.get("allowed_market_regimes", [])) if isinstance(allow_if, dict) else [],
             },
         },
+        "investor_context_filter": {
+            "enabled": bool(investor_filter.get("enabled", False)) if isinstance(investor_filter, dict) else False,
+            "reject_below": float(investor_filter.get("reject_below", 0)) if isinstance(investor_filter, dict) else 0.0,
+            "reason": str(investor_filter.get("reason", "investor_context_negative")) if isinstance(investor_filter, dict) else "investor_context_negative",
+        },
     }
 
 
@@ -489,6 +529,8 @@ def _market_filter_config(config: dict[str, Any]) -> dict[str, Any]:
         "risk_off_max_buy_orders": int(market_filter.get("risk_off_max_buy_orders", 1)),
         "risk_off_min_score": float(market_filter.get("risk_off_min_score", 75)),
         "risk_off_disable_top_pick": bool(market_filter.get("risk_off_disable_top_pick", True)),
+        "allowed_sections": allowed_market_sections(config),
+        "allow_unknown_market": bool(market_filter.get("allow_unknown_market", False)),
     }
 
 
@@ -542,6 +584,8 @@ def _score_components(
 
 
 def _meets_regular_selection(item: dict[str, Any], selection_config: dict[str, Any]) -> bool:
+    if item.get("investor_context_filter_blocked"):
+        return False
     if item.get("rsi_selection_excluded"):
         return False
     if item.get("volume_filter_excluded"):
@@ -553,6 +597,8 @@ def _conditional_selection_result(item: dict[str, Any], selection_config: dict[s
     conditional = selection_config.get("conditional_selection", {})
     if not conditional.get("enabled"):
         return {"checked": False, "matched": False, "reason": ""}
+    if item.get("investor_context_filter_blocked"):
+        return {"checked": True, "matched": False, "reason": str(item.get("investor_context_filter_reason") or "investor_context_negative")}
     if not _is_conditional_low_score_candidate(item, selection_config):
         return {"checked": False, "matched": False, "reason": ""}
     if item.get("rsi_selection_excluded"):
@@ -606,6 +652,8 @@ def _is_conditional_low_score_candidate(item: dict[str, Any], selection_config: 
 
 
 def _meets_top_pick_selection(item: dict[str, Any], selection_config: dict[str, Any]) -> bool:
+    if item.get("investor_context_filter_blocked"):
+        return False
     if item.get("rsi_selection_excluded"):
         return False
     if item.get("volume_filter_excluded"):
@@ -746,6 +794,16 @@ def _investor_context_for_candidate(config: dict[str, Any]) -> dict[str, Any]:
     return context if isinstance(context, dict) else {}
 
 
+def _investor_context_raw_score_for_candidate(candidate: dict[str, Any], config: dict[str, Any], context: dict[str, Any]) -> float:
+    if not config.get("features", {}).get("investor_context"):
+        return 0.0
+    raw_score = _optional_float(candidate.get("investor_context_score"))
+    if raw_score is None:
+        raw_score = _optional_float(context.get("investor_context_score"))
+    raw_score = raw_score or 0.0
+    return round(max(-3.0, min(5.0, raw_score)), 2)
+
+
 def _investor_context_score_for_candidate(candidate: dict[str, Any], config: dict[str, Any], context: dict[str, Any]) -> float:
     scoring = config.get("scoring", {})
     if not config.get("features", {}).get("investor_context"):
@@ -754,11 +812,34 @@ def _investor_context_score_for_candidate(candidate: dict[str, Any], config: dic
         return 0.0
     weight = _optional_float(scoring.get("investor_context_score_weight"))
     max_score = 5.0 if weight is None else max(0.0, min(5.0, weight))
-    raw_score = _optional_float(candidate.get("investor_context_score"))
-    if raw_score is None:
-        raw_score = _optional_float(context.get("investor_context_score"))
-    raw_score = raw_score or 0.0
+    raw_score = _investor_context_raw_score_for_candidate(candidate, config, context)
     return round(max(-3.0, min(max_score, raw_score)), 2)
+
+
+def _investor_context_filter_result(item: dict[str, Any], selection_config: dict[str, Any]) -> dict[str, Any]:
+    filter_config = selection_config.get("investor_context_filter", {})
+    if not filter_config.get("enabled"):
+        return {"checked": False, "blocked": False, "reason": ""}
+    score = _optional_float(item.get("investor_context_score"))
+    if score is None:
+        return {"checked": True, "blocked": False, "reason": ""}
+    reject_below = float(filter_config.get("reject_below", 0.0))
+    blocked = score < reject_below
+    return {
+        "checked": True,
+        "blocked": blocked,
+        "reason": str(filter_config.get("reason") or "investor_context_negative") if blocked else "",
+    }
+
+
+def _score_formula_label(config: dict[str, Any]) -> str:
+    parts = ["technical_score"]
+    if config.get("scoring", {}).get("use_relative_strength_score"):
+        parts.append("relative_strength_score")
+    if config.get("scoring", {}).get("use_investor_context_score"):
+        parts.append("investor_context_score")
+    parts.extend(["market_context_score", "penalty_score"])
+    return " + ".join(parts)
 
 
 def _real_score_reason(candidate: dict[str, Any], technical_parts: dict[str, Any], total_score: int) -> str:
@@ -812,6 +893,8 @@ def _real_rejected_reason(
         return "RSI過熱のため新規買付見送り"
     if item.get("volume_filter_excluded"):
         return "出来高倍率不足のため新規買付見送り"
+    if item.get("investor_context_filter_blocked"):
+        return str(item.get("investor_context_filter_reason") or "investor_context_negative")
     if item["confidence"] < selection_config["min_confidence"]:
         return "信頼度基準を満たさないため落選"
     if item["total_score"] < selection_config["top_pick_min_score"]:

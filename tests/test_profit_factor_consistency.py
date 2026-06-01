@@ -457,7 +457,7 @@ def test_profile_diff_analysis_compares_v2_1_and_v2_2(tmp_path) -> None:
                     "total_score": 74,
                     "selected": False,
                     "market_regime": "neutral",
-                    "rejected_reason": "上位候補だが最大採用数を超えたため落選",
+                    "rejected_reason": "investor_context_negative",
                 },
             ],
         },
@@ -481,6 +481,7 @@ def test_profile_diff_analysis_compares_v2_1_and_v2_2(tmp_path) -> None:
     assert analysis["target_risk_off_rejected_count"] == 0
     assert analysis["newly_selected_count"] == 1
     assert analysis["removed_count"] == 1
+    assert analysis["investor_filter_rejected_count"] == 1
     assert analysis["newly_selected"][0]["code"] == "1002"
     assert analysis["removed"][0]["code"] == "1003"
     assert analysis["no_practical_effect"] is False
@@ -500,6 +501,7 @@ def test_profile_diff_analysis_compares_v2_1_and_v2_2(tmp_path) -> None:
     )
     assert "## Profile Diff Analysis" in markdown
     assert "- newly selected by target: 1" in markdown
+    assert "- investor_filter_rejected_count: 1" in markdown
     assert "2026-03-06 1002 Newly Selected" in markdown
 
 

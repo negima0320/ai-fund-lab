@@ -15,6 +15,9 @@ def candidate(
     return {
         "code": code,
         "name": f"Test{code}",
+        "section": "TSEPrime",
+        "market_section": "TSEPrime",
+        "listing_market": "TSEPrime",
         "date": "2026-03-06",
         "close": 1200,
         "volume": 100000,
@@ -40,6 +43,9 @@ def scored_item(
     return {
         "code": code,
         "name": f"Test{code}",
+        "section": "TSEPrime",
+        "market_section": "TSEPrime",
+        "listing_market": "TSEPrime",
         "total_score": total_score,
         "confidence": confidence,
         "volume_ratio": volume_ratio,

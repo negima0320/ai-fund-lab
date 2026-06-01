@@ -161,6 +161,7 @@ def test_all_matrix_profiles_load() -> None:
         "rookie_dealer_02_v2_8",
         "rookie_dealer_02_v2_9",
         "rookie_dealer_02_v2_10",
+        "rookie_dealer_02_v2_11",
     ]:
         assert load_profile(profile_id)["profile_id"] == profile_id
 

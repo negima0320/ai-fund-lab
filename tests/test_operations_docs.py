@@ -111,7 +111,19 @@ def test_operation_simulation_reads_schedule_and_estimates_api() -> None:
     assert simulation["operation_days"]
     assert simulation["api_usage"]["daily_total"] > 0
     assert simulation["orders"]["actual_orders"] == 0
-    assert simulation["launchd_validation"]["status"] == "OK"
+    assert simulation["launchd_validation"]["status"] in {"OK", "WARN", "SKIP"}
+    assert "reason" in simulation["launchd_validation"]
+    assert "checked" in simulation["launchd_validation"]
+
+
+def test_operation_simulation_skips_launchd_validation_in_ci(monkeypatch) -> None:
+    monkeypatch.setenv("CI", "true")
+
+    simulation = main_module.build_operation_simulation("rookie_dealer_02_v2_1", 1)
+
+    assert simulation["launchd_validation"]["status"] == "SKIP"
+    assert simulation["launchd_validation"]["reason"] == "launchd validation skipped in CI"
+    assert simulation["launchd_validation"]["checked"] == 0
 
 
 def test_operation_simulation_does_not_call_external_execution(monkeypatch) -> None:

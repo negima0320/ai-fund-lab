@@ -96,10 +96,15 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
                 code TEXT,
                 name TEXT,
                 sector_name TEXT,
+                signal_date TEXT,
                 entry_date TEXT,
                 exit_date TEXT,
                 holding_days INTEGER,
                 entry_price REAL,
+                entry_price_source TEXT,
+                signal_close_price REAL,
+                entry_open_price REAL,
+                entry_gap_rate REAL,
                 exit_price REAL,
                 shares INTEGER,
                 amount REAL,
@@ -505,6 +510,11 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
         _add_column_if_missing(connection, "trades", "net_profit_rate", "REAL")
         _add_column_if_missing(connection, "trades", "dealer_comment", "TEXT")
         _add_column_if_missing(connection, "trades", "sector_name", "TEXT")
+        _add_column_if_missing(connection, "trades", "signal_date", "TEXT")
+        _add_column_if_missing(connection, "trades", "entry_price_source", "TEXT")
+        _add_column_if_missing(connection, "trades", "signal_close_price", "REAL")
+        _add_column_if_missing(connection, "trades", "entry_open_price", "REAL")
+        _add_column_if_missing(connection, "trades", "entry_gap_rate", "REAL")
         _add_column_if_missing(connection, "trades", "rsi", "REAL")
         _add_column_if_missing(connection, "trades", "volume_ratio", "REAL")
         _add_relative_strength_columns(connection, "trades")
@@ -808,10 +818,15 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                     trade.get("code"),
                     trade.get("name"),
                     trade.get("sector_name"),
+                    trade.get("signal_date"),
                     trade.get("entry_date") or trade.get("date"),
                     trade.get("exit_date"),
                     trade.get("holding_days"),
                     trade.get("entry_price"),
+                    trade.get("entry_price_source"),
+                    trade.get("signal_close_price"),
+                    trade.get("entry_open_price"),
+                    trade.get("entry_gap_rate"),
                     trade.get("exit_price"),
                     trade.get("shares"),
                     trade.get("amount") or trade.get("notional"),
@@ -906,8 +921,9 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
         connection.executemany(
             """
             INSERT INTO trades (
-                trade_id, profile_id, profile_name, action, code, name, sector_name, entry_date, exit_date, holding_days,
-                entry_price, exit_price, shares, amount, profit, profit_rate,
+                trade_id, profile_id, profile_name, action, code, name, sector_name, signal_date, entry_date, exit_date, holding_days,
+                entry_price, entry_price_source, signal_close_price, entry_open_price, entry_gap_rate,
+                exit_price, shares, amount, profit, profit_rate,
                 exit_reason, result, score, rsi, volume_ratio,
                 stock_return_5d, stock_return_10d, stock_return_20d,
                 benchmark_source, benchmark_return_5d, benchmark_return_10d, benchmark_return_20d,
@@ -936,7 +952,7 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                 estimated_tax, net_profit, net_profit_rate, dealer_comment,
                 broker_provider, order_status, live_trading, safety_checked,
                 config_version, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -949,7 +965,7 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
     profile_name = scoring_log.get("profile_name") or _profile_name(config)
     scores = scoring_log.get("scores", [])
     if not bool(config.get("analysis", {}).get("save_rejected_candidates", True)):
-        scores = [item for item in scores if item.get("selected")]
+        scores = [item for item in scores if item.get("selected") or str(item.get("rejected_reason") or item.get("reason") or "") == "investor_context_negative"]
     with _connect(config, root) as connection:
         connection.execute("DELETE FROM scoring_results WHERE date = ? AND profile_id = ?", (target_date, profile_id))
         connection.executemany(

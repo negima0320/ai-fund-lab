@@ -45,12 +45,18 @@ jquants:
 backtest:
   disable_news_fetch: true
   disable_openai: true
+  entry_timing: next_business_day_open
+  entry_price_source: open
   indicator_mode: fast
   indicator_min_history_days: 60
   indicator_fetch_lookback_days: 180
 
 market_filter:
   enabled: true
+  prime: true
+  standard: false
+  growth: false
+  allow_unknown_market: false
   risk_off_buy_policy: conservative
   risk_off_max_buy_orders: 1
   risk_off_min_score: 50

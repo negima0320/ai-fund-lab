@@ -71,6 +71,7 @@ def build_feature_analysis(
     profile_id = _profile_id(config)
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
+        baseline_profile_id = _baseline_profile_id(root, profile_id)
         trade_where = "profile_id = ?"
         trade_params: list[Any] = [profile_id]
         if start_date and end_date:
@@ -86,6 +87,23 @@ def build_feature_analysis(
             """,
             tuple(trade_params),
         )
+        baseline_trade_rows: list[dict[str, Any]] = []
+        if baseline_profile_id and baseline_profile_id != profile_id:
+            baseline_where = "profile_id = ?"
+            baseline_params: list[Any] = [baseline_profile_id]
+            if start_date and end_date:
+                baseline_where += " AND entry_date BETWEEN ? AND ?"
+                baseline_params.extend([start_date, end_date])
+            baseline_trade_rows = _rows(
+                connection,
+                f"""
+                SELECT *
+                FROM trades
+                WHERE {baseline_where}
+                ORDER BY entry_date, exit_date, id
+                """,
+                tuple(baseline_params),
+            )
         market_where = "profile_id = ?"
         market_params: list[Any] = [profile_id]
         if start_date and end_date:
@@ -117,8 +135,10 @@ def build_feature_analysis(
             tuple(scoring_params),
         )
     closed = [row for row in trade_rows if is_closed_trade_for_metrics(row)]
+    baseline_closed = [row for row in baseline_trade_rows if is_closed_trade_for_metrics(row)]
     market_by_date = {row.get("date"): row for row in market_rows}
     records = [_feature_record(trade, market_by_date.get(trade.get("entry_date"), {})) for trade in closed]
+    baseline_records = [_feature_record(trade, {}) for trade in baseline_closed]
     rsi_filter = _rsi_filter_rejection_summary(scoring_rows, config)
     component_validation = _score_component_validation(records, scoring_rows)
     score_formula_audit = _score_formula_audit(config, records, scoring_rows, component_validation)
@@ -129,6 +149,7 @@ def build_feature_analysis(
     feature_activation_audit = build_feature_activation_audit(config, records, scoring_rows, _registry_features(root, profile_id))
     relative_strength_debug = _relative_strength_debug(scoring_rows)
     relative_strength_pipeline = _relative_strength_pipeline(config, scoring_rows)
+    investor_context_filter = _investor_context_filter_analysis(scoring_rows, records)
 
     return {
         "profile_id": profile_id,
@@ -193,6 +214,7 @@ def build_feature_analysis(
                 RELATIVE_STRENGTH_BUCKET_ORDER,
             ),
         },
+        "relative_strength_effect_analysis": _relative_strength_effect_analysis(records, baseline_records, baseline_profile_id),
         "investor_context_analysis": {
             "investor_context_score": _group_by(
                 records,
@@ -202,7 +224,10 @@ def build_feature_analysis(
             "overseas_net_buy_4w_sum": _group_by(records, lambda item: _positive_negative_bucket(item.get("overseas_net_buy_4w_sum")), ["positive", "negative", "zero", "unknown"]),
             "overseas_net_buy_4w_trend": _group_by(records, lambda item: item.get("overseas_net_buy_4w_trend") or "unknown", ["improving", "worsening", "flat", "unknown"]),
             "investor_context_source": _group_by(records, lambda item: item.get("investor_context_source") or "unknown"),
+            "top_candidates": _top_investor_context_candidates(records),
+            "effect_analysis": _investor_context_effect_analysis(records),
         },
+        "investor_context_filter": investor_context_filter,
         "records_used": records,
     }
 
@@ -258,6 +283,10 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "",
         *_relative_strength_analysis_lines(analysis.get("relative_strength_analysis", {})),
         "",
+        "## Relative Strength Effect Analysis",
+        "",
+        *_relative_strength_effect_analysis_lines(analysis.get("relative_strength_effect_analysis", {})),
+        "",
         "## Relative Strength Debug",
         "",
         *_relative_strength_pipeline_lines(analysis.get("relative_strength_pipeline", {})),
@@ -267,6 +296,10 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "## Investor Context Analysis",
         "",
         *_investor_context_analysis_lines(analysis.get("investor_context_analysis", {})),
+        "",
+        "## Investor Context Filter",
+        "",
+        *_investor_context_filter_lines(analysis.get("investor_context_filter", {})),
         "",
         "## Earnings Calendar Exposure",
         "",
@@ -307,10 +340,14 @@ def _feature_record(trade: dict[str, Any], entry_market: dict[str, Any] | None =
     advance_ratio = _number(trade.get("advance_ratio"))
     if advance_ratio is None:
         advance_ratio = _number(entry_market.get("advance_ratio"))
+    investor_context_score_raw = _number(trade.get("investor_context_score"))
+    investor_context_score_component = _component_value(trade, score_components, "investor_context_score")
     return {
         "trade_id": trade.get("trade_id"),
         "code": trade.get("code"),
         "name": trade.get("name"),
+        "date": trade.get("signal_date") or trade.get("entry_date"),
+        "signal_date": trade.get("signal_date"),
         "entry_date": trade.get("entry_date"),
         "exit_date": trade.get("exit_date"),
         "exit_reason": trade.get("exit_reason"),
@@ -340,7 +377,7 @@ def _feature_record(trade: dict[str, Any], entry_market: dict[str, Any] | None =
         "institution_net_buy": _number(trade.get("institution_net_buy")),
         "trust_bank_net_buy": _number(trade.get("trust_bank_net_buy")),
         "proprietary_net_buy": _number(trade.get("proprietary_net_buy")),
-        "investor_context_score": _number(trade.get("investor_context_score")),
+        "investor_context_score": investor_context_score_raw,
         "market_regime": trade.get("market_regime") or entry_market.get("market_regime"),
         "advance_ratio": advance_ratio,
         "sector_name": trade.get("sector_name"),
@@ -359,7 +396,9 @@ def _feature_record(trade: dict[str, Any], entry_market: dict[str, Any] | None =
         "candlestick_score": _component_value(trade, score_components, "candlestick_score"),
         "market_context_score": _component_value(trade, score_components, "market_context_score"),
         "relative_strength_score": _component_value(trade, score_components, "relative_strength_score"),
-        "investor_context_score": _component_value(trade, score_components, "investor_context_score"),
+        "investor_context_score": investor_context_score_raw if investor_context_score_raw is not None else investor_context_score_component,
+        "investor_context_component_score": investor_context_score_component,
+        "selected": bool(trade.get("selected", True)),
         "sector_score": _component_value(trade, score_components, "sector_score"),
         "penalty_score": _component_value(trade, score_components, "penalty_score"),
         "score_components_total": _number(trade.get("score_components_total")) or _number(score_components.get("component_total")),
@@ -694,6 +733,22 @@ def _registry_features(root: Path, profile_id: str) -> dict[str, Any]:
     return features if isinstance(features, dict) else {}
 
 
+def _baseline_profile_id(root: Path, profile_id: str) -> str | None:
+    if yaml is None:
+        return "rookie_dealer_02_v2_1" if profile_id != "rookie_dealer_02_v2_1" else None
+    path = root / "config" / "profile_registry.yaml"
+    if path.exists():
+        try:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            item = (payload.get("profiles") or {}).get(profile_id, {})
+            compare_to = item.get("compare_to") if isinstance(item, dict) else None
+            if compare_to:
+                return str(compare_to)
+        except Exception:
+            pass
+    return "rookie_dealer_02_v2_1" if profile_id != "rookie_dealer_02_v2_1" else None
+
+
 def _group_by(records: list[dict[str, Any]], bucket_fn: Any, bucket_order: list[str] | None = None) -> list[dict[str, Any]]:
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
@@ -730,6 +785,85 @@ def _group_stats(name: str, items: list[dict[str, Any]]) -> dict[str, Any]:
         "average_profit_rate": _average(profit_rates),
         "total_profit": round(sum(profit_values), 2),
     }
+
+
+def _profit_factor(items: list[dict[str, Any]]) -> float | None:
+    profits = [_record_profit(item) or 0.0 for item in items]
+    gross_profit = sum(value for value in profits if value > 0)
+    gross_loss = abs(sum(value for value in profits if value < 0))
+    if gross_loss == 0:
+        return None if gross_profit == 0 else float("inf")
+    return round(gross_profit / gross_loss, 4)
+
+
+def _investor_context_effect_analysis(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups = [
+        ("investor_context_score >= 4", [record for record in records if (_number(record.get("investor_context_score")) or 0) >= 4]),
+        ("investor_context_score <= 0", [record for record in records if (_number(record.get("investor_context_score")) or 0) <= 0]),
+    ]
+    result = []
+    for name, items in groups:
+        stats = _group_stats(name, items)
+        stats["profit_factor"] = _profit_factor(items)
+        result.append(stats)
+    return result
+
+
+def _investor_context_filter_analysis(scoring_rows: list[dict[str, Any]], records: list[dict[str, Any]]) -> dict[str, Any]:
+    rejected = [
+        row for row in scoring_rows
+        if str(row.get("rejected_reason") or "") == "investor_context_negative"
+        or bool(row.get("investor_context_filter_blocked"))
+    ]
+    rejected_codes = sorted({str(row.get("code")) for row in rejected if row.get("code")})
+    profit_if_kept_values = [
+        value for value in (_profit_if_kept_value(row) for row in rejected)
+        if value is not None
+    ]
+    accepted = [
+        record for record in records
+        if (_number(record.get("investor_context_score")) is None or (_number(record.get("investor_context_score")) or 0) >= 0)
+    ]
+    return {
+        "rejected_count": len(rejected),
+        "rejected_codes": rejected_codes,
+        "rejected_profit_if_kept": round(sum(profit_if_kept_values), 2) if profit_if_kept_values else None,
+        "accepted_profit": round(sum((_record_profit(record) or 0.0) for record in accepted), 2),
+    }
+
+
+def _profit_if_kept_value(row: dict[str, Any]) -> float | None:
+    for key in ["profit_if_kept", "future_profit_if_kept", "future_profit", "future_profit_10d", "future_return_profit_10d"]:
+        value = _number(row.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _top_investor_context_candidates(records: list[dict[str, Any]], limit: int = 20) -> list[dict[str, Any]]:
+    ranked = sorted(
+        records,
+        key=lambda item: (
+            _number(item.get("investor_context_score")) if _number(item.get("investor_context_score")) is not None else -999,
+            _number(item.get("overseas_net_buy_4w_sum")) if _number(item.get("overseas_net_buy_4w_sum")) is not None else -999999999999,
+        ),
+        reverse=True,
+    )
+    rows = []
+    for item in ranked[:limit]:
+        rows.append(
+            {
+                "date": item.get("date") or item.get("entry_date") or "",
+                "code": item.get("code") or "",
+                "investor_context_score": item.get("investor_context_score"),
+                "overseas_net_buy_4w_sum": item.get("overseas_net_buy_4w_sum"),
+                "trend": item.get("overseas_net_buy_4w_trend") or "unknown",
+                "selected": bool(item.get("selected", True)),
+                "result": item.get("result") or "",
+                "profit": _record_profit(item),
+            }
+        )
+    return rows
 
 
 def score_detail_groups(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -970,6 +1104,155 @@ def _relative_strength_analysis_lines(analysis: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _relative_strength_effect_analysis(
+    records: list[dict[str, Any]],
+    baseline_records: list[dict[str, Any]],
+    baseline_profile_id: str | None,
+) -> dict[str, Any]:
+    return {
+        "buckets": _relative_strength_effect_buckets(records),
+        "top_selected_trades": _top_relative_strength_selected_trades(records),
+        "selected_vs_baseline": _relative_strength_selected_vs_baseline(records, baseline_records, baseline_profile_id),
+    }
+
+
+def _relative_strength_effect_buckets(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups = [
+        ("relative_strength_score = 0", [record for record in records if (_number(record.get("relative_strength_score")) or 0) <= 0]),
+        ("relative_strength_score 1-3", [record for record in records if 0 < (_number(record.get("relative_strength_score")) or 0) <= 3]),
+        ("relative_strength_score 4-6", [record for record in records if 3 < (_number(record.get("relative_strength_score")) or 0) <= 6]),
+        ("relative_strength_score 7-9", [record for record in records if 6 < (_number(record.get("relative_strength_score")) or 0) < 10]),
+        ("relative_strength_score 10", [record for record in records if (_number(record.get("relative_strength_score")) or 0) >= 10]),
+    ]
+    rows = []
+    for bucket, items in groups:
+        stats = _group_stats(bucket, items)
+        stats["profit_factor"] = _profit_factor(items)
+        rows.append(stats)
+    return rows
+
+
+def _top_relative_strength_selected_trades(records: list[dict[str, Any]], limit: int = 20) -> list[dict[str, Any]]:
+    ranked = sorted(
+        records,
+        key=lambda item: (
+            _number(item.get("relative_strength_score")) if _number(item.get("relative_strength_score")) is not None else -999,
+            _record_profit(item) if _record_profit(item) is not None else -999999999,
+        ),
+        reverse=True,
+    )
+    return [
+        {
+            "date": item.get("signal_date") or item.get("date") or item.get("entry_date"),
+            "code": item.get("code"),
+            "relative_strength_score": item.get("relative_strength_score"),
+            "rs5": item.get("relative_strength_5d"),
+            "rs10": item.get("relative_strength_10d"),
+            "rs20": item.get("relative_strength_20d"),
+            "selected": bool(item.get("selected", True)),
+            "result": item.get("result") or "",
+            "profit": _record_profit(item),
+        }
+        for item in ranked[:limit]
+    ]
+
+
+def _relative_strength_selected_vs_baseline(
+    records: list[dict[str, Any]],
+    baseline_records: list[dict[str, Any]],
+    baseline_profile_id: str | None,
+) -> dict[str, Any]:
+    target_by_key = {_trade_selection_key(record): record for record in records if _trade_selection_key(record)}
+    baseline_by_key = {_trade_selection_key(record): record for record in baseline_records if _trade_selection_key(record)}
+    newly_selected_keys = sorted(set(target_by_key) - set(baseline_by_key))
+    removed_keys = sorted(set(baseline_by_key) - set(target_by_key))
+    newly_selected_profit = round(sum((_record_profit(target_by_key[key]) or 0.0) for key in newly_selected_keys), 2)
+    removed_profit_if_kept = round(sum((_record_profit(baseline_by_key[key]) or 0.0) for key in removed_keys), 2)
+    return {
+        "baseline_profile_id": baseline_profile_id,
+        "newly_selected_count": len(newly_selected_keys),
+        "removed_count": len(removed_keys),
+        "newly_selected_profit": newly_selected_profit,
+        "removed_profit_if_kept": removed_profit_if_kept,
+        "net_selection_effect_profit": round(newly_selected_profit - removed_profit_if_kept, 2),
+    }
+
+
+def _trade_selection_key(record: dict[str, Any]) -> tuple[str, str] | None:
+    code = str(record.get("code") or "")
+    date_text = str(record.get("signal_date") or record.get("date") or record.get("entry_date") or "")
+    if not code or not date_text:
+        return None
+    return date_text, code
+
+
+def _relative_strength_effect_analysis_lines(analysis: dict[str, Any]) -> list[str]:
+    if not analysis:
+        return ["- データなし"]
+    lines = [
+        "| bucket | count | win_rate | avg_profit_rate | PF | total_profit |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in analysis.get("buckets", []):
+        lines.append(_effect_bucket_table_row(row))
+    lines.extend(["", "## Top Relative Strength Selected Trades", ""])
+    lines.extend(_top_relative_strength_trade_lines(analysis.get("top_selected_trades", [])))
+    comparison = analysis.get("selected_vs_baseline", {})
+    lines.extend(["", "## Relative Strength Selected vs Baseline", ""])
+    if comparison:
+        lines.extend(
+            [
+                f"- baseline_profile_id: {comparison.get('baseline_profile_id') or 'N/A'}",
+                f"- newly_selected_count: {comparison.get('newly_selected_count', 0)}",
+                f"- removed_count: {comparison.get('removed_count', 0)}",
+                f"- newly_selected_profit: {_format_yen(comparison.get('newly_selected_profit'))}",
+                f"- removed_profit_if_kept: {_format_yen(comparison.get('removed_profit_if_kept'))}",
+                f"- net_selection_effect_profit: {_format_yen(comparison.get('net_selection_effect_profit'))}",
+            ]
+        )
+    else:
+        lines.append("- データなし")
+    return lines
+
+
+def _effect_bucket_table_row(row: dict[str, Any]) -> str:
+    pf = row.get("profit_factor")
+    pf_text = "inf" if pf == float("inf") else _format_number(pf)
+    return (
+        "| "
+        f"{row.get('bucket', '')} | "
+        f"{row.get('count', 0)} | "
+        f"{_format_percent(row.get('win_rate'))} | "
+        f"{_format_percent(row.get('average_profit_rate'))} | "
+        f"{pf_text} | "
+        f"{_format_yen(row.get('total_profit'))} |"
+    )
+
+
+def _top_relative_strength_trade_lines(rows: list[dict[str, Any]]) -> list[str]:
+    lines = [
+        "| date | code | relative_strength_score | rs5 | rs10 | rs20 | selected | result | profit |",
+        "| --- | --- | ---: | ---: | ---: | ---: | --- | --- | ---: |",
+    ]
+    if not rows:
+        lines.append("| なし |  |  |  |  |  |  |  |  |")
+        return lines
+    for row in rows:
+        lines.append(
+            "| "
+            f"{row.get('date', '')} | "
+            f"{row.get('code', '')} | "
+            f"{_format_number(row.get('relative_strength_score'))} | "
+            f"{_format_percent(row.get('rs5'))} | "
+            f"{_format_percent(row.get('rs10'))} | "
+            f"{_format_percent(row.get('rs20'))} | "
+            f"{str(bool(row.get('selected'))).lower()} | "
+            f"{row.get('result', '')} | "
+            f"{_format_yen(row.get('profit'))} |"
+        )
+    return lines
+
+
 def _relative_strength_debug(scoring_rows: list[dict[str, Any]]) -> dict[str, Any]:
     rows = list(scoring_rows)
     rs_available = [
@@ -1205,7 +1488,74 @@ def _investor_context_analysis_lines(analysis: dict[str, Any]) -> list[str]:
             lines.append("")
         lines.extend([f"### {title}", ""])
         lines.extend(_group_lines(analysis.get(key, [])))
+    lines.extend(["", "### Top Investor Context Candidates", ""])
+    lines.extend(_top_investor_context_candidate_lines(analysis.get("top_candidates", [])))
+    lines.extend(["", "### Investor Context Effect Analysis", ""])
+    lines.extend(_investor_context_effect_lines(analysis.get("effect_analysis", [])))
     return lines
+
+
+def _top_investor_context_candidate_lines(rows: list[dict[str, Any]]) -> list[str]:
+    if not rows:
+        return ["- データなし"]
+    lines = [
+        "| date | code | investor_context_score | overseas_net_buy_4w_sum | trend | selected | result | profit |",
+        "| --- | --- | ---: | ---: | --- | --- | --- | ---: |",
+    ]
+    for row in rows:
+        lines.append(
+            "| "
+            f"{row.get('date', '')} | "
+            f"{row.get('code', '')} | "
+            f"{_format_number(row.get('investor_context_score'))} | "
+            f"{_format_number_with_commas(row.get('overseas_net_buy_4w_sum'))} | "
+            f"{row.get('trend', '')} | "
+            f"{str(bool(row.get('selected'))).lower()} | "
+            f"{row.get('result', '')} | "
+            f"{_format_yen(row.get('profit'))} |"
+        )
+    return lines
+
+
+def _format_number_with_commas(value: Any) -> str:
+    return "N/A" if value is None else f"{float(value):,.2f}"
+
+
+def _investor_context_effect_lines(rows: list[dict[str, Any]]) -> list[str]:
+    if not rows:
+        return ["- データなし"]
+    lines = [
+        "| bucket | count | win_rate | avg_profit_rate | PF | total_profit |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in rows:
+        pf = row.get("profit_factor")
+        pf_text = "inf" if pf == float("inf") else _format_number(pf)
+        lines.append(
+            "| "
+            f"{row.get('bucket', '')} | "
+            f"{row.get('count', 0)} | "
+            f"{_format_percent(row.get('win_rate'))} | "
+            f"{_format_percent(row.get('average_profit_rate'))} | "
+            f"{pf_text} | "
+            f"{_format_yen(row.get('total_profit'))} |"
+        )
+    return lines
+
+
+def _investor_context_filter_lines(analysis: dict[str, Any]) -> list[str]:
+    if not analysis:
+        return ["- データなし"]
+    codes = analysis.get("rejected_codes") or []
+    code_text = ", ".join(str(code) for code in codes[:30]) if codes else "なし"
+    if len(codes) > 30:
+        code_text = f"{code_text}, ... (+{len(codes) - 30})"
+    return [
+        f"- rejected_count: {analysis.get('rejected_count', 0)}",
+        f"- rejected_codes: {code_text}",
+        f"- rejected_profit_if_kept: {_format_yen(analysis.get('rejected_profit_if_kept'))}",
+        f"- accepted_profit: {_format_yen(analysis.get('accepted_profit'))}",
+    ]
 
 
 def _earnings_calendar_exposure_lines(analysis: dict[str, Any]) -> list[str]:

@@ -179,6 +179,16 @@ def test_rookie_dealer_02_v2_dot_6_alias_loads() -> None:
     assert profile["features"]["relative_strength"] is True
 
 
+def test_rookie_dealer_02_v2_11_profile_uses_investor_context_filter() -> None:
+    profile = load_profile("rookie_dealer_02_v2_11")
+
+    assert profile["profile_id"] == "rookie_dealer_02_v2_11"
+    assert profile["features"]["investor_context"] is True
+    assert profile["scoring"].get("use_investor_context_score") is False
+    assert profile["investor_context_filter"]["enabled"] is True
+    assert profile["investor_context_filter"]["reason"] == "investor_context_negative"
+
+
 def test_rookie_dealer_02_v3_profile_uses_score_and_volume_filters() -> None:
     profile = load_profile("rookie_dealer_02_v3")
 

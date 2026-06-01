@@ -17,6 +17,7 @@ def calculate_indicators(
     stock_names: dict[str, str],
     target_date: str,
     stock_sectors: dict[str, str] | None = None,
+    stock_sections: dict[str, str] | None = None,
     indicator_mode: str = "full",
     progress_callback: Callable[[int, int, str], None] | None = None,
     enable_relative_strength: bool = False,
@@ -25,6 +26,7 @@ def calculate_indicators(
 ) -> tuple[list[dict[str, Any]], int]:
     indicator_mode = indicator_mode if indicator_mode in {"full", "fast", "minimal"} else "full"
     stock_sectors = stock_sectors or {}
+    stock_sections = stock_sections or {}
     by_code: dict[str, list[dict[str, Any]]] = {}
     for row in price_rows:
         if row.get("close") is None or row.get("volume") is None:
@@ -69,6 +71,9 @@ def calculate_indicators(
             "code": code,
             "name": stock_names.get(code, ""),
             "sector_name": stock_sectors.get(code, ""),
+            "section": stock_sections.get(code, "Unknown"),
+            "market_section": stock_sections.get(code, "Unknown"),
+            "listing_market": stock_sections.get(code, "Unknown"),
             "date": target["date"],
             "open": target.get("open"),
             "high": target.get("high"),

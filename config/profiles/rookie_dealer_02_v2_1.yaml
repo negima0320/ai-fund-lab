@@ -67,6 +67,10 @@ selection:
   reject_overheated_rsi: true
 
 market_filter:
+  prime: true
+  standard: false
+  growth: false
+  allow_unknown_market: false
   risk_off_min_score: 50
 
 volume_filter:

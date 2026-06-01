@@ -195,6 +195,14 @@ python src/main.py --mode simulate-operation --days 30 --profile rookie_dealer_0
 
 `--period 6m|1y|3y|5y` を使うと期間を自動計算できます。CLIで `--start-date` / `--end-date` を指定した場合は明示日付を優先します。`--profiles rookie_dealer_02_v2_6 rookie_dealer_02_v2_8` を付けると対象実験を絞れます。`--skip-backtest` は既存DB結果を使ってanalyze/compareのみ実行し、`--skip-analyze` はanalyzeを省略してcompareのみ進めます。どちらも必要な既存結果がなければ分かりやすく停止します。実行するのはbacktest/analyze/compareのみで、実売買やbroker発注は行いません。
 
+長期検証を速く回したい場合は、対象profileを明示し、`--summary-only` を付けます。`run-experiments` は価格取得、indicator計算、candidate生成、market_context生成を共通stageとして先に1回だけ作り、profileごとにはscoring、selection、tradeを中心に実行します。feature setとselection/filter設定が同じprofileではscoring結果も再利用します。`--summary-only` は日別Markdown、記事生成、重いanalyzeを省き、比較summaryの作成に絞ります。
+
+```bash
+python src/main.py --mode run-experiments --base-profile rookie_dealer_02_v2_1 --profiles rookie_dealer_02_v2_11 --period 5y --summary-only --fast-analysis
+```
+
+`experiment_summary.md` の `Run Experiments Performance Report` には `shared_price_fetch_time`、`shared_indicator_time`、`shared_candidate_time`、`profile_scoring_time_by_profile`、`profile_trade_time_by_profile`、`reused_scoring_count`、`skipped_profiles` が出力されます。
+
 各profile実行前にregistryの `required_plan` と現在のJ-Quants planを照合します。Light専用capabilityがFree planで不足していてもfallback可能ならwarningとして実行し、fallback不可ならそのprofileを `skipped` としてsummaryに残します。J-Quants planは `config/jquants.yaml` を正とし、`--jquants-plan` は一時上書き用途だけにします。
 
 実験判定は `candidate`、`needs_review`、`rejected`、`no_practical_effect` で表示します。baseより累計利益が増え、PFがbaseの95%以上、最大DDが大きく悪化せず、取引数がbaseの50%以上で、実際の採用/除外差分があれば `candidate` です。利益は増えたがDD/PF/取引数に懸念がある場合やサンプルが少ない場合は `needs_review`、利益・PF・DDが明確に悪化した場合は `rejected`、採用/除外差分がなく主要指標も一致する場合は `no_practical_effect` です。理由は `verdict_reason` に出力します。
@@ -232,10 +240,15 @@ profileの `features.*` と `scoring.use_*` は役割が違います。`features
 - `rookie_dealer_02_v2_8`: 2号機 v2.1にJ-Quants投資部門別情報を使った市場需給スコアを追加した検証版。Light planの `/equities/investor-types` を週次データとして扱い、海外投資家の4週買い越し合計、改善/悪化トレンド、個人投資家との需給差を `investor_context_score` として -3〜+5 点で補正する。Free planではAPIを呼ばず無効化する。`rookie_dealer_02_v2.8` も互換エイリアスとして読み込める
 - `rookie_dealer_02_v2_9`: 2号機 v2.1にJ-Quants財務情報capability検証を追加した互換テスト版。`financial_statements` はFree/Light両方で利用可能な前提のため、どちらのplanでもbacktest可能。現時点ではfinancial_scoreをtotal_scoreへ加算しない。`rookie_dealer_02_v2.9` も互換エイリアスとして読み込める
 - `rookie_dealer_02_v2_10`: 2号機 v2.1に決算発表予定日フィルターだけを追加した検証版。決算予定日当日、前1営業日、後1営業日の新規買付を除外し、売却は通常通り実行する。APIエラー時は `fail_open: true` によりwarningを出して処理を継続する。`rookie_dealer_02_v2.10` も互換エイリアスとして読み込める
+- `rookie_dealer_02_v2_11`: 2号機 v2.1に投資部門別情報の除外フィルターを追加した検証版。`investor_context_score` はtotal_scoreへ加算せず、`investor_context_score < 0` の候補だけ `investor_context_negative` として除外する。Light planの `/equities/investor-types` が必要
 - `rookie_dealer_02_v3`: 2号機 v2の改善検証版。score 74〜75と出来高倍率3倍以上が好成績だったという仮説を検証するため、`selection.min_score: 74` と `volume_filter.min_volume_ratio: 3.0` を使う
 - `rookie_dealer_03`: 利確重視・短期回転型。`intraday_stop` 方式を使い、`take_profit_rate: 0.03`、`max_holding_days: 3` で早めの利確と短期回転を検証
+- `rookie_dealer_03_growth`: 2号機 v2.1をベースに、`market_filter.growth: true` かつPrime/Standardをfalseにして東証グロースだけを候補生成・スコアリング・売買直前チェックの対象にする攻撃型検証profile
+- `rookie_dealer_03_standard_growth`: 2号機 v2.1をベースに、`market_filter.allowed_sections: [TSEStandard, TSEGrowth]` で東証スタンダード + 東証グロースだけを対象にする攻撃型検証profile
 
-同じ期間で各profileのバックテストを実行すると、損切り方式、利確幅、RSI過熱フィルター、スコア閾値、条件分岐型の低スコア例外採用、Relative Strength Score、決算予定日フィルター、投資部門別情報による需給補正、出来高フィルター、risk_off時の買付抑制度合いの違いを比較できます。`rookie_dealer_02_v2`、`rookie_dealer_02_v2_1`、`rookie_dealer_02_v2_2`、`rookie_dealer_02_v2_3`、`rookie_dealer_02_v2_4`、`rookie_dealer_02_v2_6`、`rookie_dealer_02_v2_7`、`rookie_dealer_02_v2_8`、`rookie_dealer_02_v2_9`、`rookie_dealer_02_v2_10`、`rookie_dealer_02_v3` は過学習の可能性を含む仮説検証用profileです。
+市場区分は `market_filter.allowed_sections` または `market_filter.prime` / `standard` / `growth` で指定します。`TSEPrime`、`TSEStandard`、`TSEGrowth` を正規値として扱い、不明な市場区分は `allow_unknown_market: false` なら除外します。このフィルターは候補生成だけでなく、scoring後の最終選定とpaper trade直前の安全チェックでも再確認され、除外理由は `market_filter_excluded` として保存されます。
+
+同じ期間で各profileのバックテストを実行すると、損切り方式、利確幅、RSI過熱フィルター、スコア閾値、条件分岐型の低スコア例外採用、Relative Strength Score、決算予定日フィルター、投資部門別情報による需給補正/除外、出来高フィルター、市場区分フィルター、risk_off時の買付抑制度合いの違いを比較できます。`rookie_dealer_02_v2`、`rookie_dealer_02_v2_1`、`rookie_dealer_02_v2_2`、`rookie_dealer_02_v2_3`、`rookie_dealer_02_v2_4`、`rookie_dealer_02_v2_6`、`rookie_dealer_02_v2_7`、`rookie_dealer_02_v2_8`、`rookie_dealer_02_v2_9`、`rookie_dealer_02_v2_10`、`rookie_dealer_02_v2_11`、`rookie_dealer_02_v3`、`rookie_dealer_03_growth`、`rookie_dealer_03_standard_growth` は過学習の可能性を含む仮説検証用profileです。
 
 ```bash
 python src/main.py --mode backtest --provider jquants --profile rookie_dealer_01 --start-date YYYY-MM-DD --end-date YYYY-MM-DD
@@ -250,9 +263,12 @@ python src/main.py --mode backtest --provider jquants --profile rookie_dealer_02
 python src/main.py --mode backtest --provider jquants --jquants-plan light --profile rookie_dealer_02_v2_8 --start-date 2024-09-01 --end-date 2026-03-06 --fast-analysis
 python src/main.py --mode backtest --provider jquants --profile rookie_dealer_02_v2_9 --start-date 2024-09-01 --end-date 2026-03-06 --fast-analysis
 python src/main.py --mode backtest --provider jquants --profile rookie_dealer_02_v2_10 --start-date 2024-09-01 --end-date 2026-03-06 --fast-analysis
+python src/main.py --mode backtest --provider jquants --jquants-plan light --profile rookie_dealer_02_v2_11 --start-date 2026-01-01 --end-date 2026-03-06 --fast-analysis
 python src/main.py --mode backtest --provider jquants --profile rookie_dealer_02_v3 --start-date YYYY-MM-DD --end-date YYYY-MM-DD
 python src/main.py --mode backtest --provider jquants --profile rookie_dealer_03 --start-date YYYY-MM-DD --end-date YYYY-MM-DD
-python src/main.py --mode compare-profiles --profiles rookie_dealer_02 rookie_dealer_02_v2 rookie_dealer_02_v2_1 rookie_dealer_02_v2_2 rookie_dealer_02_v2_3 rookie_dealer_02_v2_4 rookie_dealer_02_v2_6 rookie_dealer_02_v2_7 rookie_dealer_02_v2_8 rookie_dealer_02_v2_9 rookie_dealer_02_v2_10 rookie_dealer_02_v3 rookie_dealer_03 --start-date YYYY-MM-DD --end-date YYYY-MM-DD
+python src/main.py --mode backtest --provider jquants --profile rookie_dealer_03_growth --start-date YYYY-MM-DD --end-date YYYY-MM-DD
+python src/main.py --mode backtest --provider jquants --profile rookie_dealer_03_standard_growth --start-date YYYY-MM-DD --end-date YYYY-MM-DD
+python src/main.py --mode compare-profiles --profiles rookie_dealer_02 rookie_dealer_02_v2 rookie_dealer_02_v2_1 rookie_dealer_02_v2_2 rookie_dealer_02_v2_3 rookie_dealer_02_v2_4 rookie_dealer_02_v2_6 rookie_dealer_02_v2_7 rookie_dealer_02_v2_8 rookie_dealer_02_v2_9 rookie_dealer_02_v2_10 rookie_dealer_02_v2_11 rookie_dealer_02_v3 rookie_dealer_03 rookie_dealer_03_growth rookie_dealer_03_standard_growth --start-date YYYY-MM-DD --end-date YYYY-MM-DD
 python src/main.py --mode analyze --profile rookie_dealer_02_v2_6
 python src/main.py --mode compare-profiles --profiles rookie_dealer_02_v2_1 rookie_dealer_02_v2_6 --start-date YYYY-MM-DD --end-date YYYY-MM-DD
 python src/main.py --mode backtest --provider jquants --jquants-plan light --profile rookie_dealer_02_v2_6 --start-date 2024-09-01 --end-date 2026-03-06 --fast-analysis
@@ -442,10 +458,18 @@ screening結果、scoring結果、AI Decision結果、trade結果、portfolio sn
 約定シミュレーションは、引け後判断、翌営業日の寄り付き約定を基本とします。
 
 ```yaml
+backtest:
+  entry_timing: next_business_day_open
+  entry_price_source: open
+
 execution:
   use_next_day_open_execution: true
   stop_loss_execution: next_day_open
 ```
+
+バックテストでは `signal_date` と `entry_date` を分離します。`signal_date` は当日終値ベースで indicators / candidates / scoring / selected を作る日、`entry_date` は翌営業日に買付を約定する日です。デフォルトは `next_business_day_open` で、買値は `entry_date` の `open` を使います。比較用に `--entry-timing same-day-close` を指定すると旧来に近い同日終値約定で検証できます。
+
+取引ログと `trades.csv` には `signal_date`、`entry_date`、`entry_price_source`、`signal_close_price`、`entry_open_price`、`entry_gap_rate` を保存します。バックテストレポートには `Backtest Execution Model` として、現在の約定モデルを出力します。
 
 `true` の場合、新人ディーラー1号は Day N の引け後にBUY/SELL判断を行い、注文は `pending_orders` として保存され、Day N+1 の `open` 価格で約定します。想定価格と約定価格の差は `slippage_amount` / `slippage_rate` として保存します。`false` の場合は従来通り、判断日の価格で即時約定する仮想売買になります。
 
@@ -1223,7 +1247,7 @@ J-Quants APIはv2 endpointのみを利用します。旧v1 endpoint（例: `/pri
 | 財務サマリー | `/fins/summary` |
 | 取引カレンダー | `/markets/calendar` |
 
-投資部門別情報はLight planの `/equities/investor-types` から取得し、`data/cache/jquants/investor_types/YYYY-MM-DD_to_YYYY-MM-DD.json` に保存します。v2.8では週次データとして扱い、海外投資家の買い越し/売り越し、4週合計、改善/悪化トレンド、個人投資家との需給差を市場地合い補正として `investor_context_score` に変換します。個別銘柄のAI判断ではなく、ルールベースの市場コンテキストです。
+投資部門別情報はLight planの `/equities/investor-types` から取得し、`data/cache/jquants/investor_types/YYYY-MM-DD_to_YYYY-MM-DD.json` に保存します。v2.8では週次データとして扱い、海外投資家の買い越し/売り越し、4週合計、改善/悪化トレンド、個人投資家との需給差を市場地合い補正として `investor_context_score` に変換し、total_scoreへ加算します。v2.11では同じ `investor_context_score` を加点には使わず、0未満の候補だけを `investor_context_negative` として除外します。個別銘柄のAI判断ではなく、ルールベースの市場コンテキストです。
 
 決算発表予定日は Free / Light の両方で使える `/equities/earnings-calendar` から取得します。取得結果は `data/cache/jquants/earnings_calendar/YYYY-MM-DD.json` に保存し、同一日はキャッシュを優先します。再取得したい場合は `--force-refresh` を付けます。APIエラー時に同日のキャッシュがあればfallbackし、キャッシュもない場合は `earnings_filter.fail_open: true` のprofileではwarningを出して決算フィルターを無効扱いにします。`rookie_dealer_02_v2_10` はv2.1をベースに、この決算予定日前後の新規買付除外だけを追加した検証profileです。
 
@@ -1509,9 +1533,18 @@ reporting:
 
 ```bash
 python src/main.py --mode backtest --provider jquants --profile rookie_dealer_02_v2_1 --start-date YYYY-MM-DD --end-date YYYY-MM-DD --fast-analysis
+python src/main.py --mode run-experiments --base-profile rookie_dealer_02_v2_1 --period 5y --fast-analysis --storage-mode compact
 ```
 
-`--fast-analysis` は通常の売買結果を変えず、分析用の重い詳細ログを減らします。内部的には `analysis.save_rejected_candidates=false`、`analysis.save_selection_quality_detail=false`、`analysis.save_replay_detail=false`、`analysis.save_recovery_detail=false`、`analysis.save_score_audit_detail=false`、`analysis.save_backtest_daily_reports=false`、`reporting.generate_articles_in_backtest=false`、`reporting.generate_daily_markdown_in_backtest=false` として扱います。通常backtestでも記事生成はOFFなので、長期検証で `reports/articles` が増え続けることはありません。
+`--fast-analysis` は通常の売買結果を変えず、分析用の重い詳細ログを減らします。内部的には `analysis.save_rejected_candidates=false`、`analysis.save_selection_quality_detail=false`、`analysis.save_replay_detail=false`、`analysis.save_recovery_detail=false`、`analysis.save_score_audit_detail=false`、`analysis.save_backtest_daily_reports=false`、`reporting.generate_articles_in_backtest=false`、`reporting.generate_daily_markdown_in_backtest=false`、`storage.save_mode=compact` として扱います。通常backtestでも記事生成はOFFなので、長期検証で `reports/articles` が増え続けることはありません。
+
+保存データの粒度は `--storage-mode` で一時指定できます。
+
+- `full_debug`: 従来相当。score/tradeの詳細列、pipeline/cache情報、中間計算値を保存します。問題調査用です。
+- `analysis`: 分析に必要な特徴量は残し、debug専用のpipeline詳細や重い中間列を削ります。
+- `compact`: runtimeに必要なselected行と重要rejectだけを最小列で保存します。通常の長期 `run-experiments --fast-analysis` 向けです。
+
+売買判定は保存前のfull rowで実行し、保存時だけ粒度を落とします。そのため `compact` は売買結果を変えず、ディスクI/OとDB保存量を減らします。
 
 ### Clean Commands
 
@@ -1528,6 +1561,27 @@ python src/main.py --mode clean-articles --older-than-days 7 --yes
 ```
 
 `latest` を含むファイル名はデフォルト保持します。`analysis_latest.md/json` なども削除したい場合だけ `--include-latest` を付けます。詳細な対象ファイルを見たい場合は `--verbose` を使います。
+
+### Storage Audit / Cleanup
+
+長期 `run-experiments` で容量が増えた場合は、まず全体の内訳を確認します。`storage-audit` は削除しません。
+
+```bash
+python src/main.py --mode storage-audit
+python src/main.py --mode performance-audit
+python src/main.py --mode cleanup-storage --dry-run --include-logs --include-reports
+python src/main.py --mode cleanup-storage --apply --include-logs --include-reports --keep-days 30
+python src/main.py --mode compact-processed-cache
+python src/main.py --mode compact-processed-cache --apply
+```
+
+`storage-audit` は容量と重複の診断、`performance-audit` はbacktest実行時間に効きやすいJSON読み込み・parseコストの診断です。`performance-audit` は `processed_indicator_total_size`、`processed_candidate_total_size`、`scored_candidate_total_size`、`logs_total_size`、`reports_total_size`、largest files、sample load/parse time、最適化候補を出します。
+
+`cleanup-storage` もデフォルトはdry-runです。実削除は `--apply` が必要です。`data/raw/prices_*.json`、`data/raw/listed_stocks_jquants.json`、`data/cache/jquants/*`、`storage/ai_fund_lab.sqlite3` は通常保持します。profile別の `indicators_YYYY-MM-DD.json` / `candidates_YYYY-MM-DD.json` は再生成可能ですが、削除対象に含めるには明示的に `--include-processed` を指定します。
+
+`run-experiments` では、profile差分がない `indicators` / `candidates` を `data/processed/common/` に共通cacheとして保存し、同じ `market_filter` / indicator設定 / candidate設定のprofileでは再利用します。profile固有に残すのは `scored_candidates`、scoring logs、trades、reportsです。
+
+既存のprofile別 processed cache を整理する場合は `compact-processed-cache` を使います。dry-runで推定削減量を確認し、`--apply` を付けた時だけ `data/processed/common/` へ移し、profile別ファイルはhardlinkで共通実体を参照します。これにより既存のprofile別パス互換を保ったまま、重複した実体サイズを減らします。
 
 OpenAI / ChatGPT APIを使わず、新人ディーラー1号のルールベースのみで90日バックテストする場合は、profileを以下の状態にします。
 

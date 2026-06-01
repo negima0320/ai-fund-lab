@@ -25,11 +25,12 @@ J-Quants連携はv2 endpointだけを使います。旧v1 endpoint（`/listed/in
 | rookie_dealer_02_v2_8 | - | - | required | - | OK: investor_context_scoreを0にして無効化 | OK: investor_types利用 |
 | rookie_dealer_02_v2_9 | - | - | - | required | OK | OK |
 | rookie_dealer_02_v2_10 | required | - | - | - | OK | OK |
+| rookie_dealer_02_v2_11 | - | - | required | - | OK: investor_context_filterを無効化 | OK: investor_types利用 |
 
 ## Fallback Policy
 
 - `topix_prices` がないFree planで `rookie_dealer_02_v2_6` を使う場合、TOPIX APIは呼ばず、Prime市場平均または候補中央値をbenchmarkにします。fallbackも使えない場合はRelative Strengthを0点扱いにします。
-- `investor_types` がないFree planで `rookie_dealer_02_v2_8` を使う場合、投資部門別APIは呼ばず、`investor_context_score=0` として処理を継続します。
+- `investor_types` がないFree planで `rookie_dealer_02_v2_8` を使う場合、投資部門別APIは呼ばず、`investor_context_score=0` として処理を継続します。`rookie_dealer_02_v2_11` では `investor_context_filter` を無効化し、除外なしで処理します。
 - `earnings_calendar` と `financial_statements` はFree / Lightの両方で利用可能なcapabilityとして扱います。
 - capability不足はpreflightでwarning表示し、fallback可能な不足は `can_run_backtest: true` / `can_run_live/paper: true` のままにします。
 
@@ -64,3 +65,4 @@ can_run_live/paper: true
 | rookie_dealer_02_v2_8 | Light | investor_typesがLight専用 |
 | rookie_dealer_02_v2_9 | Free | financial_statementsはFree/Light両対応 |
 | rookie_dealer_02_v2_10 | Free | earnings_calendarはFree/Light両対応 |
+| rookie_dealer_02_v2_11 | Light | investor_typesを除外フィルターとして検証できる |

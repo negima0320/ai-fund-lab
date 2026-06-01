@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import calendar
+import hashlib
 import json
 import os
 import plistlib
@@ -60,6 +61,14 @@ from db import (
 from feature_analysis import build_feature_analysis, render_feature_analysis_markdown, score_detail_groups
 from indicators import calculate_indicators
 from investor_context import INVESTOR_CONTEXT_EMPTY, build_investor_context
+from market_sections import (
+    allowed_market_sections,
+    attach_market_section_fields,
+    market_section_allowed,
+    market_section_counts,
+    market_section_from_row,
+    normalize_market_section,
+)
 from jquants_plan import (
     DISPLAY_CAPABILITIES,
     PlanResolution,
@@ -98,13 +107,23 @@ ACTIVE_PROFILE_ID = DEFAULT_PROFILE_ID
 BACKTEST_MODE_ACTIVE = False
 BACKTEST_DAY_LOG_PREFIX = ""
 FAST_ANALYSIS_ACTIVE = False
+SUMMARY_ONLY_ACTIVE = False
 JQUANTS_PLAN_OVERRIDE: str | None = None
 FORCE_REFRESH_ACTIVE = False
+STORAGE_MODE_OVERRIDE: str | None = None
 BACKTEST_PROFILE_TIMINGS: dict[str, float] = {}
 RUNTIME_SETTINGS: dict[str, Any] = {}
+RUN_EXPERIMENTS_SHARED_STAGE_ACTIVE = False
+RUN_EXPERIMENTS_SCORING_REUSE_SOURCE_BY_PROFILE: dict[str, str] = {}
+RUN_EXPERIMENTS_PERFORMANCE_REPORT: dict[str, Any] = {}
+COMMON_CACHE_METRICS: dict[str, int] = {
+    "cache_reused_from_common_count": 0,
+    "profile_specific_cache_count": 0,
+    "generated_cache_size": 0,
+}
 LIGHT_API_CALL_LIMITS = {
     "topix_prices": 4,
-    "investor_types": 3,
+    "investor_types": 12,
     "earnings_calendar": 3,
     "financial_statements": 3,
 }
@@ -112,14 +131,16 @@ JQUANTS_API_SESSION: dict[str, Any] = {}
 
 
 def main() -> None:
-    global ACTIVE_PROFILE_ID, FAST_ANALYSIS_ACTIVE, JQUANTS_PLAN_OVERRIDE, FORCE_REFRESH_ACTIVE, RUNTIME_SETTINGS
+    global ACTIVE_PROFILE_ID, FAST_ANALYSIS_ACTIVE, SUMMARY_ONLY_ACTIVE, JQUANTS_PLAN_OVERRIDE, FORCE_REFRESH_ACTIVE, STORAGE_MODE_OVERRIDE, RUNTIME_SETTINGS
     _enable_line_buffered_output()
     args = parse_args()
     RUNTIME_SETTINGS = resolve_runtime_settings(args)
     ACTIVE_PROFILE_ID = RUNTIME_SETTINGS["profile_id"]
     FAST_ANALYSIS_ACTIVE = bool(args.fast_analysis)
+    SUMMARY_ONLY_ACTIVE = bool(args.summary_only)
     JQUANTS_PLAN_OVERRIDE = args.jquants_plan
     FORCE_REFRESH_ACTIVE = bool(args.force_refresh)
+    STORAGE_MODE_OVERRIDE = args.storage_mode
     provider_name = RUNTIME_SETTINGS["provider"]
     if args.mode == "help":
         run_help()
@@ -153,6 +174,31 @@ def main() -> None:
         return
     if args.mode == "validate-config":
         run_validate_config(args.profile, args.strict)
+        return
+    if args.mode == "storage-audit":
+        run_storage_audit()
+        return
+    if args.mode == "cleanup-storage":
+        run_cleanup_storage(
+            apply=args.apply,
+            keep_latest_experiments=args.keep_latest_experiments,
+            keep_days=args.keep_days,
+            include_reports=args.include_reports,
+            include_logs=args.include_logs,
+            include_processed=args.include_processed,
+            exclude_raw_prices=args.exclude_raw_prices,
+            exclude_jquants_cache=args.exclude_jquants_cache,
+            verbose=args.verbose,
+        )
+        return
+    if args.mode == "compact-processed-cache":
+        run_compact_processed_cache(apply=args.apply, verbose=args.verbose)
+        return
+    if args.mode == "inspect-cache":
+        run_inspect_cache(args.target, args.date)
+        return
+    if args.mode == "performance-audit":
+        run_performance_audit()
         return
     if args.mode in {"clean-reports", "clean-experiments", "clean-cache", "clean-articles"}:
         run_clean_command(
@@ -371,6 +417,11 @@ def parse_args() -> Any:
             "jquants-api-summary",
             "jquants-smoke-test",
             "validate-config",
+            "storage-audit",
+            "cleanup-storage",
+            "compact-processed-cache",
+            "inspect-cache",
+            "performance-audit",
             "clean-reports",
             "clean-experiments",
             "clean-cache",
@@ -432,6 +483,12 @@ def parse_args() -> Any:
         help="Target date in YYYY-MM-DD format for fetch-prices mode.",
     )
     parser.add_argument(
+        "--target",
+        choices=["indicators", "candidates", "market_context"],
+        default="indicators",
+        help="Cache target for inspect-cache.",
+    )
+    parser.add_argument(
         "--start-date",
         help="Backtest start date in YYYY-MM-DD format.",
     )
@@ -469,6 +526,23 @@ def parse_args() -> Any:
         help="Reduce heavy backtest analysis logs without changing trading results.",
     )
     parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="Skip daily markdown/articles and heavy analyze steps for experiment/backtest summary generation.",
+    )
+    parser.add_argument(
+        "--storage-mode",
+        choices=["full_debug", "analysis", "compact"],
+        default=None,
+        help="Saved JSON/DB detail level. full_debug keeps all fields, analysis prunes debug-only fields, compact saves minimal runtime rows.",
+    )
+    parser.add_argument(
+        "--entry-timing",
+        choices=["same-day-close", "next-business-day-open", "next-business-day-close"],
+        default=None,
+        help="Temporary backtest execution timing override. Config default is next_business_day_open.",
+    )
+    parser.add_argument(
         "--force-refresh",
         action="store_true",
         help="Refresh cached provider data such as J-Quants earnings calendar.",
@@ -489,6 +563,11 @@ def parse_args() -> Any:
         help="Actually delete files for clean modes. Without this flag clean modes are dry-run.",
     )
     parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually delete cleanup-storage targets. Without this flag cleanup-storage is dry-run.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Explicit dry-run for clean modes. This is the default unless --yes is specified.",
@@ -498,6 +577,45 @@ def parse_args() -> Any:
         type=int,
         default=None,
         help="Clean only files older than N days.",
+    )
+    parser.add_argument(
+        "--keep-days",
+        type=int,
+        default=30,
+        help="Keep cleanup-storage files newer than N days.",
+    )
+    parser.add_argument(
+        "--keep-latest-experiments",
+        type=int,
+        default=3,
+        help="Keep the newest N experiment result directories in cleanup-storage.",
+    )
+    parser.add_argument(
+        "--include-reports",
+        action="store_true",
+        help="Include old safe report artifacts in cleanup-storage.",
+    )
+    parser.add_argument(
+        "--include-logs",
+        action="store_true",
+        help="Include old safe log artifacts in cleanup-storage.",
+    )
+    parser.add_argument(
+        "--include-processed",
+        action="store_true",
+        help="Include profile-specific processed indicators/candidates in cleanup-storage.",
+    )
+    parser.add_argument(
+        "--exclude-raw-prices",
+        action="store_true",
+        default=True,
+        help="Keep J-Quants raw price files in cleanup-storage. This is the default.",
+    )
+    parser.add_argument(
+        "--exclude-jquants-cache",
+        action="store_true",
+        default=True,
+        help="Keep data/cache/jquants in cleanup-storage. This is the default.",
     )
     parser.add_argument(
         "--include-latest",
@@ -547,7 +665,7 @@ def parse_args() -> Any:
     _apply_jquants_supported_date_limits(args)
     if args.days < 1:
         parser.error("--days must be 1 or greater.")
-    if args.mode in {"fetch-prices", "calculate-indicators", "screen", "score", "trade", "preview-orders", "publish-article", "run-daily"} and not args.date:
+    if args.mode in {"fetch-prices", "calculate-indicators", "screen", "score", "trade", "preview-orders", "publish-article", "run-daily", "inspect-cache"} and not args.date:
         parser.error(f"--date YYYY-MM-DD is required for {args.mode} mode.")
     if args.mode == "publish-article" and not args.note_url:
         parser.error("--note-url URL is required for publish-article mode.")
@@ -717,6 +835,7 @@ def resolve_runtime_settings(args: Any, provider_config: dict[str, Any] | None =
         "provider": str(provider_name),
         "jquants_plan": plan_resolution.plan,
         "jquants_plan_resolution": plan_resolution,
+        "entry_timing": getattr(args, "entry_timing", None),
         "broker_mode": str(broker_mode),
         "auto_order_enabled": bool(auto_order_enabled),
         "date_resolution": {
@@ -849,6 +968,13 @@ def expected_operation_files(profile_id: str, config: dict[str, Any]) -> dict[st
 
 
 def validate_launchd_files() -> dict[str, Any]:
+    if str(os.environ.get("CI", "")).lower() == "true":
+        return {
+            "status": "SKIP",
+            "reason": "launchd validation skipped in CI",
+            "checked": 0,
+            "checks": [],
+        }
     launchd_dir = ROOT / "docs" / "launchd"
     plist_paths = sorted(launchd_dir.glob("*.plist")) if launchd_dir.exists() else []
     checks = []
@@ -880,6 +1006,8 @@ def validate_launchd_files() -> dict[str, Any]:
         )
     return {
         "status": "OK" if checks and all(item["status"] == "OK" for item in checks) else "ERROR" if checks else "WARN",
+        "reason": "checked launchd plist files" if checks else "no launchd plist files found",
+        "checked": len(checks),
         "checks": checks,
     }
 
@@ -935,7 +1063,7 @@ def render_operation_simulation(simulation: dict[str, Any]) -> str:
             lines.append("- none")
         lines.append("")
     launchd = simulation["launchd_validation"]
-    lines.extend(["## launchd validation", "", launchd["status"], ""])
+    lines.extend(["## launchd validation", "", launchd["status"], f"reason: {launchd.get('reason', '')}", f"checked: {launchd.get('checked', 0)}", ""])
     for check in launchd["checks"]:
         lines.append(f"- {check['path']}: {check['message']}")
     lines.extend(["", "## Orders", "", f"- actual_orders: {simulation['orders']['actual_orders']}", "- broker/API execution: not_called"])
@@ -1906,6 +2034,1011 @@ def _format_bytes(size: int) -> str:
         value /= 1024
 
 
+def run_storage_audit() -> None:
+    audit = build_storage_audit()
+    print("## Storage Audit")
+    print()
+    print("| path | size | file_count | category | safe_to_delete |")
+    print("| --- | ---: | ---: | --- | --- |")
+    for row in audit["paths"]:
+        print(
+            f"| {row['path']} | {_format_bytes(row['size'])} | {row['file_count']} | "
+            f"{row['category']} | {row['safe_to_delete']} |"
+        )
+    print()
+    print("## Largest Files")
+    for item in audit["largest_files"][:20]:
+        print(f"- {item['path']}: {_format_bytes(item['size'])}")
+    print()
+    print("## File Type Ranking")
+    for item in audit["file_types"][:20]:
+        print(f"- {item['extension']}: {_format_bytes(item['size'])} ({item['file_count']} files)")
+    print()
+    print("## Old Experiment Artifacts")
+    for item in audit["experiments"][:20]:
+        print(f"- {item['path']}: {_format_bytes(item['size'])} ({item['file_count']} files)")
+    print()
+    print("## Cache Duplication")
+    duplication = audit["cache_duplication"]
+    for key in [
+        "profile_processed_size",
+        "common_processed_size",
+        "profile_indicator_files",
+        "profile_candidate_files",
+        "duplicate_indicator_dates",
+        "duplicate_candidate_dates",
+        "potential_savings",
+    ]:
+        value = duplication.get(key)
+        if isinstance(value, int) and (key.endswith("_size") or key == "potential_savings"):
+            value = _format_bytes(value)
+        print(f"- {key}: {value}")
+    print()
+    print("## Cleanup Recommendation")
+    for item in audit["cleanup_recommendation"]:
+        print(f"- {item}")
+
+
+def build_storage_audit() -> dict[str, Any]:
+    paths = [
+        ("data", ROOT / "data", "data", "no"),
+        ("data/raw", ROOT / "data" / "raw", "raw_prices_and_master", "no"),
+        ("data/processed", ROOT / "data" / "processed", "processed_cache", "partial"),
+        ("data/cache", ROOT / "data" / "cache", "provider_cache", "caution"),
+        ("reports", ROOT / "reports", "reports", "partial"),
+        ("logs", ROOT / "logs", "logs", "yes"),
+        ("storage", ROOT / "storage", "database", "no"),
+        (".pytest_cache", ROOT / ".pytest_cache", "test_cache", "yes"),
+    ]
+    rows = []
+    for label, path, category, safe in paths:
+        summary = _path_size_summary(path)
+        rows.append({"path": label, "category": category, "safe_to_delete": safe, **summary})
+    pycache_summary = _pycache_summary()
+    rows.append({"path": "__pycache__", "category": "python_cache", "safe_to_delete": "yes", **pycache_summary})
+    return {
+        "paths": sorted(rows, key=lambda item: item["size"], reverse=True),
+        "largest_files": _largest_files(ROOT, limit=30),
+        "file_types": _file_type_ranking(ROOT),
+        "experiments": _experiment_artifact_sizes(),
+        "cache_duplication": _processed_cache_duplication(),
+        "cleanup_recommendation": _storage_cleanup_recommendations(rows),
+    }
+
+
+def run_cleanup_storage(
+    *,
+    apply: bool = False,
+    keep_latest_experiments: int = 3,
+    keep_days: int = 30,
+    include_reports: bool = False,
+    include_logs: bool = False,
+    include_processed: bool = False,
+    exclude_raw_prices: bool = True,
+    exclude_jquants_cache: bool = True,
+    verbose: bool = False,
+) -> None:
+    plan = build_cleanup_storage_plan(
+        keep_latest_experiments=keep_latest_experiments,
+        keep_days=keep_days,
+        include_reports=include_reports,
+        include_logs=include_logs,
+        include_processed=include_processed,
+        exclude_raw_prices=exclude_raw_prices,
+        exclude_jquants_cache=exclude_jquants_cache,
+    )
+    result = execute_cleanup_storage_plan(plan, apply=apply)
+    print(f"Cleanup Storage {'Apply' if apply else 'Dry Run'}")
+    print(f"- files: {plan['file_count']}")
+    print(f"- total_size: {_format_bytes(plan['total_size'])}")
+    print(f"- keep_days: {keep_days}")
+    print(f"- keep_latest_experiments: {keep_latest_experiments}")
+    print(f"- deleted_count: {result['deleted_count']}")
+    if verbose:
+        for item in plan["targets"]:
+            print(f"- {item['relative_path']} ({_format_bytes(item['size'])}) reason={item['reason']}")
+    if not apply:
+        print("- dry-run only; use --apply to delete")
+
+
+def run_compact_processed_cache(apply: bool = False, verbose: bool = False) -> None:
+    plan = build_compact_processed_cache_plan()
+    result = execute_compact_processed_cache_plan(plan, apply=apply, verbose=verbose)
+    print(f"Compact Processed Cache {'Apply' if apply else 'Dry Run'}")
+    print(f"- candidate_files: {plan['file_count']}")
+    print(f"- estimated_savings: {_format_bytes(plan['estimated_savings'])}")
+    print(f"- common_targets: {plan['common_target_count']}")
+    print(f"- compacted_count: {result['compacted_count']}")
+    print(f"- skipped_count: {result['skipped_count']}")
+    print(f"- saved_size: {_format_bytes(result['saved_size'])}")
+    if result.get("skip_reasons"):
+        print(f"- skip_reasons: {_compact_json(result['skip_reasons'])}")
+    if verbose:
+        for item in plan["targets"][:200]:
+            print(f"- {item['relative_path']} -> {item['common_relative_path']} ({_format_bytes(item['size'])})")
+    if not apply:
+        print("- dry-run only; use --apply to compact")
+
+
+def run_inspect_cache(target: str, date_text: str) -> None:
+    inspection = inspect_cache(target, date_text, load_config(CONFIG_PATH))
+    print(f"## Cache Inspection: {target} {date_text}")
+    print()
+    print(f"- path: {inspection.get('path') or '-'}")
+    print(f"- row_count: {inspection['row_count']}")
+    print(f"- column_count: {inspection['column_count']}")
+    print(f"- file_size: {_format_bytes(inspection['file_size'])}")
+    print()
+    print("## Largest Fields")
+    for item in inspection["largest_fields"][:20]:
+        print(f"- {item['field']}: {_format_bytes(item['size'])} ({item['non_null_count']} non-null)")
+    print()
+    print("## Required Fields")
+    for field in inspection["required_fields"]:
+        print(f"- {field}")
+    print()
+    print("## Removable Fields")
+    for field in inspection["removable_fields"]:
+        print(f"- {field}")
+
+
+def run_performance_audit() -> None:
+    audit = build_performance_audit()
+    print("## Performance Audit")
+    print()
+    for key in [
+        "processed_indicator_total_size",
+        "processed_candidate_total_size",
+        "scored_candidate_total_size",
+        "logs_total_size",
+        "reports_total_size",
+    ]:
+        print(f"- {key}: {_format_bytes(audit[key])}")
+    print()
+    print("## Hot Files")
+    for section in [
+        "largest_indicator_files",
+        "largest_candidate_files",
+        "largest_scored_candidate_files",
+        "largest_log_files",
+    ]:
+        print(f"### {section}")
+        for item in audit[section]:
+            print(f"- {item['path']}: {_format_bytes(item['size'])}")
+    print()
+    print("## Runtime Cost Estimate")
+    for key, value in audit["runtime_cost_estimate"].items():
+        print(f"- {key}: {value}")
+    print()
+    print("## Optimization Recommendation")
+    for item in audit["optimization_recommendation"]:
+        print(f"- {item}")
+
+
+def build_performance_audit() -> dict[str, Any]:
+    indicator_files = _find_named_json_files(ROOT / "data" / "processed", "indicators_*.json")
+    candidate_files = _find_named_json_files(ROOT / "data" / "processed", "candidates_*.json")
+    scored_files = _find_named_json_files(ROOT / "data" / "processed", "scored_candidates_*.json")
+    log_files = _files_under(ROOT / "logs")
+    report_files = _files_under(ROOT / "reports")
+    samples = {
+        "indicator_load_time_sample": _json_load_sample(indicator_files),
+        "candidate_load_time_sample": _json_load_sample(candidate_files),
+        "scoring_load_time_sample": _json_load_sample(scored_files),
+        "json_parse_time_sample": _json_parse_sample(indicator_files + candidate_files + scored_files),
+    }
+    return {
+        "processed_indicator_total_size": _unique_file_size_sum(indicator_files),
+        "processed_candidate_total_size": _unique_file_size_sum(candidate_files),
+        "scored_candidate_total_size": _unique_file_size_sum(scored_files),
+        "logs_total_size": _unique_file_size_sum(log_files),
+        "reports_total_size": _unique_file_size_sum(report_files),
+        "largest_indicator_files": _largest_from_paths(indicator_files),
+        "largest_candidate_files": _largest_from_paths(candidate_files),
+        "largest_scored_candidate_files": _largest_from_paths(scored_files),
+        "largest_log_files": _largest_from_paths(log_files),
+        "runtime_cost_estimate": samples,
+        "optimization_recommendation": _performance_recommendations(indicator_files, candidate_files, scored_files, log_files),
+    }
+
+
+def _find_named_json_files(root: Path, pattern: str) -> list[Path]:
+    if not root.exists():
+        return []
+    return [path for path in root.rglob(pattern) if path.is_file() and not path.is_symlink()]
+
+
+def _files_under(root: Path) -> list[Path]:
+    if not root.exists():
+        return []
+    return [path for path in root.rglob("*") if path.is_file() and not path.is_symlink()]
+
+
+def _unique_file_size_sum(paths: list[Path]) -> int:
+    total = 0
+    seen: set[tuple[int, int]] = set()
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        inode = (stat.st_dev, stat.st_ino)
+        if inode in seen:
+            continue
+        seen.add(inode)
+        total += stat.st_size
+    return total
+
+
+def _largest_from_paths(paths: list[Path], limit: int = 10) -> list[dict[str, Any]]:
+    rows = []
+    seen: set[tuple[int, int]] = set()
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        inode = (stat.st_dev, stat.st_ino)
+        if inode in seen:
+            continue
+        seen.add(inode)
+        rows.append({"path": str(path.relative_to(ROOT)) if _is_relative_to(path, ROOT) else str(path), "size": stat.st_size})
+    return sorted(rows, key=lambda item: item["size"], reverse=True)[:limit]
+
+
+def _sample_paths(paths: list[Path], limit: int = 5) -> list[Path]:
+    if not paths:
+        return []
+    largest = [Path(item["path"]) for item in _largest_from_paths(paths, limit=limit)]
+    resolved = []
+    for item in largest:
+        resolved.append(ROOT / item if not item.is_absolute() else item)
+    return resolved
+
+
+def _json_load_sample(paths: list[Path], limit: int = 5) -> dict[str, Any]:
+    samples = []
+    for path in _sample_paths(paths, limit):
+        started = time.perf_counter()
+        try:
+            payload = read_json(path)
+            elapsed = time.perf_counter() - started
+            rows = 0
+            if isinstance(payload, dict):
+                for key in ["indicators", "candidates", "scores", "trades"]:
+                    value = payload.get(key)
+                    if isinstance(value, list):
+                        rows = len(value)
+                        break
+            samples.append(
+                {
+                    "path": str(path.relative_to(ROOT)) if _is_relative_to(path, ROOT) else str(path),
+                    "size": path.stat().st_size,
+                    "seconds": round(elapsed, 4),
+                    "rows": rows,
+                }
+            )
+        except Exception as exc:
+            samples.append({"path": str(path), "error": str(exc)})
+    avg = sum(float(item.get("seconds", 0)) for item in samples) / len(samples) if samples else 0.0
+    return {
+        "sample_count": len(samples),
+        "avg_seconds": round(avg, 4),
+        "samples": samples,
+    }
+
+
+def _json_parse_sample(paths: list[Path], limit: int = 5) -> dict[str, Any]:
+    samples = []
+    for path in _sample_paths(paths, limit):
+        try:
+            text = path.read_text(encoding="utf-8")
+            started = time.perf_counter()
+            json.loads(text)
+            elapsed = time.perf_counter() - started
+            samples.append(
+                {
+                    "path": str(path.relative_to(ROOT)) if _is_relative_to(path, ROOT) else str(path),
+                    "size": path.stat().st_size,
+                    "seconds": round(elapsed, 4),
+                }
+            )
+        except Exception as exc:
+            samples.append({"path": str(path), "error": str(exc)})
+    avg = sum(float(item.get("seconds", 0)) for item in samples) / len(samples) if samples else 0.0
+    return {"sample_count": len(samples), "avg_seconds": round(avg, 4), "samples": samples}
+
+
+def _performance_recommendations(indicators: list[Path], candidates: list[Path], scored: list[Path], logs: list[Path]) -> list[str]:
+    recs = []
+    indicator_size = _unique_file_size_sum(indicators)
+    scored_size = _unique_file_size_sum(scored)
+    log_size = _unique_file_size_sum(logs)
+    if indicator_size > 1024**3:
+        recs.append("common cache: keep indicators/candidates in data/processed/common and hardlink profile paths.")
+        recs.append("compact cache: prune indicators to profile-required fields; avoid debug-only MACD/BB/ATR in fast mode.")
+    if scored_size > 512 * 1024**2:
+        recs.append("compact storage: use --storage-mode compact for run-experiments --fast-analysis.")
+    if log_size > 1024**3:
+        recs.append("debug log削減: avoid full_debug except while investigating a specific failure.")
+    recs.extend(
+        [
+            "gzip/zstd compression: consider compressing cold JSON artifacts after experiments finish.",
+            "SQLite/parquet検討: large score matrices are better stored column-wise for analysis scans.",
+        ]
+    )
+    return recs
+
+
+def inspect_cache(target: str, date_text: str, config: dict[str, Any]) -> dict[str, Any]:
+    path = _inspect_cache_path(target, date_text, config)
+    if path is None or not path.exists():
+        raise SystemExit(f"Cache file not found for target={target} date={date_text}")
+    payload = read_json(path)
+    rows = _inspect_cache_rows(target, payload)
+    columns = sorted({key for row in rows if isinstance(row, dict) for key in row})
+    required = sorted(_inspect_required_fields(target, config))
+    removable = sorted(set(columns) - set(required))
+    return {
+        "target": target,
+        "date": date_text,
+        "path": str(path.relative_to(ROOT)) if _is_relative_to(path, ROOT) else str(path),
+        "row_count": len(rows),
+        "column_count": len(columns),
+        "file_size": path.stat().st_size,
+        "largest_fields": _largest_row_fields(rows),
+        "required_fields": required,
+        "removable_fields": removable,
+    }
+
+
+def _inspect_cache_path(target: str, date_text: str, config: dict[str, Any]) -> Path | None:
+    if target == "indicators":
+        candidates = [
+            _common_processed_cache_path(config, "indicators", date_text),
+            processed_profile_path(config, f"indicators_{date_text}.json"),
+            ROOT / "data" / "processed" / f"indicators_{date_text}.json",
+        ]
+    elif target == "candidates":
+        candidates = [
+            _common_processed_cache_path(config, "candidates", date_text),
+            processed_profile_path(config, f"candidates_{date_text}.json"),
+        ]
+    elif target == "market_context":
+        candidates = [ROOT / "data" / "processed" / f"market_context_{date_text}.json"]
+    else:
+        raise SystemExit(f"Unsupported inspect-cache target: {target}")
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0] if candidates else None
+
+
+def _inspect_cache_rows(target: str, payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    if target == "indicators":
+        rows = payload.get("indicators", [])
+    elif target == "candidates":
+        rows = payload.get("candidates", [])
+    else:
+        rows = [payload]
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _inspect_required_fields(target: str, config: dict[str, Any]) -> set[str]:
+    if target == "market_context":
+        return {"date", "market_regime", "advance_ratio", "decline_ratio"}
+    if target == "candidates":
+        return _candidate_required_fields(config)
+    if target != "indicators":
+        return set()
+    required = {
+        "code",
+        "name",
+        "sector_name",
+        "section",
+        "market_section",
+        "listing_market",
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "ma5",
+        "ma25",
+        "rsi",
+        "volume_ratio",
+        "turnover_value",
+        "five_day_volatility",
+        "five_day_change_rate",
+        "previous_close",
+        "previous_ma5",
+        "previous_ma25",
+        "candle_type",
+        "candle_body_rate",
+        "upper_shadow_rate",
+        "lower_shadow_rate",
+        "close_position_in_range",
+        "gap_rate",
+        "candlestick_signals",
+        "candlestick_score",
+        "trend_score",
+        "volume_score",
+        "rsi_score",
+    }
+    if bool(config.get("features", {}).get("sector_analysis", True)):
+        required.update({"sector_momentum_score", "sector_rank", "sector_comment"})
+    if bool(config.get("features", {}).get("relative_strength")) or bool(config.get("scoring", {}).get("use_relative_strength_score")):
+        required.update(
+            {
+                "stock_return_5d",
+                "stock_return_10d",
+                "stock_return_20d",
+                "benchmark_source",
+                "benchmark_return_5d",
+                "benchmark_return_10d",
+                "benchmark_return_20d",
+                "relative_strength_5d",
+                "relative_strength_10d",
+                "relative_strength_20d",
+                "relative_strength_score",
+                "topix_records_loaded",
+                "topix_api_calls",
+            }
+        )
+    if _backtest_indicator_mode(config) == "full":
+        required.update({"macd", "macd_signal", "macd_hist", "bb_upper", "bb_middle", "bb_lower", "bb_position", "atr"})
+    return required
+
+
+def _candidate_required_fields(config: dict[str, Any]) -> set[str]:
+    required = {
+        "code",
+        "name",
+        "sector_name",
+        "section",
+        "market_section",
+        "listing_market",
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "ma5",
+        "ma25",
+        "volume_ratio",
+        "rsi",
+        "turnover_value",
+        "five_day_volatility",
+        "five_day_change_rate",
+        "candle_type",
+        "candle_body_rate",
+        "upper_shadow_rate",
+        "lower_shadow_rate",
+        "close_position_in_range",
+        "gap_rate",
+        "candlestick_signals",
+        "candlestick_score",
+        "trend_score",
+        "volume_score",
+        "rsi_score",
+        "fallback",
+        "pass_reason",
+        "ma_spread",
+    }
+    if bool(config.get("features", {}).get("sector_analysis", True)):
+        required.update({"sector_momentum_score", "sector_rank", "sector_comment"})
+    if bool(config.get("features", {}).get("relative_strength")) or bool(config.get("scoring", {}).get("use_relative_strength_score")):
+        required.update(
+            {
+                "stock_return_5d",
+                "stock_return_10d",
+                "stock_return_20d",
+                "benchmark_source",
+                "benchmark_return_5d",
+                "benchmark_return_10d",
+                "benchmark_return_20d",
+                "relative_strength_5d",
+                "relative_strength_10d",
+                "relative_strength_20d",
+                "relative_strength_score",
+                "topix_records_loaded",
+                "topix_api_calls",
+            }
+        )
+    return required
+
+
+def _largest_row_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    field_sizes: dict[str, int] = {}
+    non_null: dict[str, int] = {}
+    for row in rows:
+        for key, value in row.items():
+            encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            field_sizes[key] = field_sizes.get(key, 0) + len(encoded.encode("utf-8"))
+            if value is not None:
+                non_null[key] = non_null.get(key, 0) + 1
+    return [
+        {"field": key, "size": size, "non_null_count": non_null.get(key, 0)}
+        for key, size in sorted(field_sizes.items(), key=lambda item: item[1], reverse=True)
+    ]
+
+
+def build_cleanup_storage_plan(
+    *,
+    keep_latest_experiments: int = 3,
+    keep_days: int = 30,
+    include_reports: bool = False,
+    include_logs: bool = False,
+    include_processed: bool = False,
+    exclude_raw_prices: bool = True,
+    exclude_jquants_cache: bool = True,
+) -> dict[str, Any]:
+    cutoff = (datetime.now() - timedelta(days=max(0, keep_days))).timestamp()
+    targets: list[dict[str, Any]] = []
+    targets.extend(_cleanup_pycache_targets(cutoff))
+    targets.extend(_cleanup_pytest_cache_targets(cutoff))
+    if include_logs:
+        targets.extend(_cleanup_files_under(ROOT / "logs" / "backtests", cutoff, "old_backtest_logs"))
+        targets.extend(_cleanup_files_under(ROOT / "logs" / "scoring", cutoff, "old_scoring_logs"))
+    if include_reports:
+        targets.extend(_cleanup_files_under(ROOT / "reports" / "articles" / "backtests", cutoff, "old_backtest_articles"))
+        targets.extend(_cleanup_matching_files(ROOT / "reports" / "backtests", cutoff, "day_*.md", "old_backtest_day_reports"))
+        targets.extend(_cleanup_old_experiment_targets(cutoff, keep_latest_experiments))
+    if include_processed:
+        targets.extend(_cleanup_processed_profile_targets(cutoff))
+    if not exclude_jquants_cache:
+        targets.extend(_cleanup_files_under(ROOT / "data" / "cache" / "jquants" / "unsupported_ranges.json", cutoff, "old_unsupported_cache"))
+    if not exclude_raw_prices:
+        targets.extend(_cleanup_files_under(ROOT / "data" / "raw", cutoff, "raw_prices_explicitly_included"))
+    deduped = {item["path"]: item for item in targets if _cleanup_storage_path_allowed(Path(item["path"]))}
+    ordered = sorted(deduped.values(), key=lambda item: item["relative_path"])
+    return {
+        "targets": ordered,
+        "file_count": len(ordered),
+        "total_size": sum(int(item["size"]) for item in ordered),
+    }
+
+
+def execute_cleanup_storage_plan(plan: dict[str, Any], apply: bool = False) -> dict[str, Any]:
+    deleted = []
+    if apply:
+        for item in plan.get("targets", []):
+            path = Path(item["path"])
+            if path.is_symlink() or not path.is_file() or not _cleanup_storage_path_allowed(path):
+                continue
+            path.unlink()
+            deleted.append(str(path))
+    return {"dry_run": not apply, "deleted_count": len(deleted), "deleted": deleted}
+
+
+def _path_size_summary(path: Path) -> dict[str, int]:
+    if not path.exists():
+        return {"size": 0, "file_count": 0}
+    if path.is_file():
+        return {"size": path.stat().st_size, "file_count": 1}
+    size = 0
+    count = 0
+    seen_inodes: set[tuple[int, int]] = set()
+    for root, dirs, files in os.walk(path):
+        dirs[:] = [item for item in dirs if item not in {".git", ".venv"}]
+        for name in files:
+            file_path = Path(root) / name
+            if file_path.is_symlink():
+                continue
+            try:
+                stat = file_path.stat()
+                inode = (stat.st_dev, stat.st_ino)
+                if inode in seen_inodes:
+                    count += 1
+                    continue
+                seen_inodes.add(inode)
+                size += stat.st_size
+                count += 1
+            except OSError:
+                continue
+    return {"size": size, "file_count": count}
+
+
+def _pycache_summary() -> dict[str, int]:
+    size = 0
+    count = 0
+    for path in ROOT.rglob("__pycache__"):
+        if ".venv" in path.parts:
+            continue
+        summary = _path_size_summary(path)
+        size += summary["size"]
+        count += summary["file_count"]
+    return {"size": size, "file_count": count}
+
+
+def _largest_files(root: Path, limit: int = 20) -> list[dict[str, Any]]:
+    files = []
+    seen_inodes: set[tuple[int, int]] = set()
+    for current_root, dirs, names in os.walk(root):
+        dirs[:] = [item for item in dirs if item not in {".git", ".venv"}]
+        for name in names:
+            path = Path(current_root) / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                stat = path.stat()
+                inode = (stat.st_dev, stat.st_ino)
+                if inode in seen_inodes:
+                    continue
+                seen_inodes.add(inode)
+                files.append({"path": str(path.relative_to(ROOT)), "size": stat.st_size})
+            except OSError:
+                continue
+    return sorted(files, key=lambda item: item["size"], reverse=True)[:limit]
+
+
+def _file_type_ranking(root: Path) -> list[dict[str, Any]]:
+    by_ext: dict[str, dict[str, int]] = {}
+    seen_inodes: set[tuple[int, int]] = set()
+    for current_root, dirs, names in os.walk(root):
+        dirs[:] = [item for item in dirs if item not in {".git", ".venv"}]
+        for name in names:
+            path = Path(current_root) / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            ext = path.suffix.lower() or "(no extension)"
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            inode = (stat.st_dev, stat.st_ino)
+            if inode in seen_inodes:
+                continue
+            seen_inodes.add(inode)
+            row = by_ext.setdefault(ext, {"size": 0, "file_count": 0})
+            row["size"] += stat.st_size
+            row["file_count"] += 1
+    return sorted(
+        [{"extension": ext, **values} for ext, values in by_ext.items()],
+        key=lambda item: item["size"],
+        reverse=True,
+    )
+
+
+def _experiment_artifact_sizes() -> list[dict[str, Any]]:
+    root = ROOT / "reports" / "experiments"
+    if not root.exists():
+        return []
+    items = []
+    for path in root.iterdir():
+        if not path.is_dir():
+            continue
+        summary = _path_size_summary(path)
+        items.append({"path": str(path.relative_to(ROOT)), **summary})
+    return sorted(items, key=lambda item: item["size"], reverse=True)
+
+
+def _processed_cache_duplication() -> dict[str, Any]:
+    processed = ROOT / "data" / "processed"
+    common = processed / "common"
+    profile_size = 0
+    profile_indicator_dates: dict[str, int] = {}
+    profile_candidate_dates: dict[str, int] = {}
+    if processed.exists():
+        seen_inodes: set[tuple[int, int]] = set()
+        for profile_dir in processed.iterdir():
+            if not profile_dir.is_dir() or profile_dir.name == "common":
+                continue
+            for path in profile_dir.glob("*.json"):
+                try:
+                    stat = path.stat()
+                    inode = (stat.st_dev, stat.st_ino)
+                    if inode not in seen_inodes:
+                        seen_inodes.add(inode)
+                        profile_size += stat.st_size
+                except OSError:
+                    continue
+                if path.name.startswith("indicators_"):
+                    profile_indicator_dates[path.name.removeprefix("indicators_").removesuffix(".json")] = profile_indicator_dates.get(path.name.removeprefix("indicators_").removesuffix(".json"), 0) + 1
+                if path.name.startswith("candidates_"):
+                    profile_candidate_dates[path.name.removeprefix("candidates_").removesuffix(".json")] = profile_candidate_dates.get(path.name.removeprefix("candidates_").removesuffix(".json"), 0) + 1
+    return {
+        "profile_processed_size": profile_size,
+        "common_processed_size": _path_size_summary(common)["size"],
+        "profile_indicator_files": sum(profile_indicator_dates.values()),
+        "profile_candidate_files": sum(profile_candidate_dates.values()),
+        "duplicate_indicator_dates": sum(1 for count in profile_indicator_dates.values() if count > 1),
+        "duplicate_candidate_dates": sum(1 for count in profile_candidate_dates.values() if count > 1),
+        "potential_savings": _processed_cache_potential_savings(),
+    }
+
+
+def _processed_cache_potential_savings() -> int:
+    groups: dict[tuple[str, str], list[int]] = {}
+    processed = ROOT / "data" / "processed"
+    if not processed.exists():
+        return 0
+    for profile_dir in processed.iterdir():
+        if not profile_dir.is_dir() or profile_dir.name == "common":
+            continue
+        for stage in ["indicators", "candidates"]:
+            for path in profile_dir.glob(f"{stage}_*.json"):
+                try:
+                    config = load_profile(profile_dir.name)
+                    common_path = _common_processed_cache_path(
+                        config,
+                        stage,
+                        path.stem.removeprefix(f"{stage}_"),
+                    )
+                    if _same_inode(path, common_path):
+                        continue
+                except Exception:
+                    pass
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    continue
+                groups.setdefault((stage, path.name), []).append(size)
+    savings = 0
+    for sizes in groups.values():
+        if len(sizes) > 1:
+            savings += sum(sizes) - max(sizes)
+    return savings
+
+
+def build_compact_processed_cache_plan() -> dict[str, Any]:
+    targets = []
+    common_targets: set[str] = set()
+    processed = ROOT / "data" / "processed"
+    if not processed.exists():
+        return {"targets": [], "file_count": 0, "estimated_savings": 0, "common_target_count": 0}
+    for profile_dir in processed.iterdir():
+        if not profile_dir.is_dir() or profile_dir.name == "common":
+            continue
+        profile_id = profile_dir.name
+        try:
+            config = load_profile(profile_id)
+        except Exception:
+            continue
+        for stage in ["indicators", "candidates"]:
+            for path in sorted(profile_dir.glob(f"{stage}_*.json")):
+                target_date_text = path.stem.removeprefix(f"{stage}_")
+                common_path = _common_processed_cache_path(config, stage, target_date_text)
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                if _same_inode(path, common_path):
+                    continue
+                common_targets.add(str(common_path))
+                targets.append(
+                    {
+                        "profile_id": profile_id,
+                        "stage": stage,
+                        "date": target_date_text,
+                        "path": str(path),
+                        "relative_path": str(path.relative_to(ROOT)),
+                        "common_path": str(common_path),
+                        "common_relative_path": str(common_path.relative_to(ROOT)),
+                        "size": stat.st_size,
+                    }
+                )
+    estimated_savings = _estimate_compact_savings(targets)
+    return {
+        "targets": targets,
+        "file_count": len(targets),
+        "estimated_savings": estimated_savings,
+        "common_target_count": len(common_targets),
+    }
+
+
+def execute_compact_processed_cache_plan(plan: dict[str, Any], apply: bool = False, verbose: bool = False) -> dict[str, Any]:
+    compacted = 0
+    skipped = 0
+    saved_size = 0
+    skip_reasons: dict[str, int] = {}
+    if not apply:
+        return {
+            "dry_run": True,
+            "compacted_count": 0,
+            "skipped_count": 0,
+            "saved_size": 0,
+            "skip_reasons": {},
+        }
+    for item in plan.get("targets", []):
+        path = Path(item["path"])
+        common_path = Path(item["common_path"])
+        result = _compact_one_processed_file(path, common_path)
+        if result["status"] == "compacted":
+            compacted += 1
+            saved_size += int(item.get("size", 0))
+            if verbose:
+                print(f"compacted: {item['relative_path']} -> {item['common_relative_path']}")
+        else:
+            skipped += 1
+            reason = result.get("reason", "unknown")
+            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+            if verbose:
+                print(f"skipped: {item['relative_path']} reason={reason}")
+    return {
+        "dry_run": False,
+        "compacted_count": compacted,
+        "skipped_count": skipped,
+        "saved_size": saved_size,
+        "skip_reasons": skip_reasons,
+    }
+
+
+def _estimate_compact_savings(targets: list[dict[str, Any]]) -> int:
+    groups: dict[str, list[int]] = {}
+    for item in targets:
+        groups.setdefault(str(item["common_path"]), []).append(int(item.get("size", 0)))
+    savings = 0
+    for sizes in groups.values():
+        if len(sizes) > 1:
+            savings += sum(sizes) - max(sizes)
+    return savings
+
+
+def _compact_one_processed_file(path: Path, common_path: Path) -> dict[str, str]:
+    if path.is_symlink() or not path.is_file():
+        return {"status": "skipped", "reason": "invalid_source"}
+    if not _is_relative_to(path.resolve(), (ROOT / "data" / "processed").resolve()):
+        return {"status": "skipped", "reason": "outside_processed"}
+    if _same_inode(path, common_path):
+        return {"status": "skipped", "reason": "already_compacted"}
+    common_path.parent.mkdir(parents=True, exist_ok=True)
+    if not common_path.exists():
+        try:
+            path.replace(common_path)
+            os.link(common_path, path)
+            return {"status": "compacted", "reason": "moved_to_common"}
+        except OSError as exc:
+            return {"status": "skipped", "reason": f"link_failed:{exc.__class__.__name__}"}
+    if not common_path.is_file():
+        return {"status": "skipped", "reason": "common_not_file"}
+    try:
+        if path.stat().st_size != common_path.stat().st_size:
+            return {"status": "skipped", "reason": "content_mismatch"}
+        if _file_sha1(path) != _file_sha1(common_path):
+            return {"status": "skipped", "reason": "content_mismatch"}
+        path.unlink()
+        os.link(common_path, path)
+        return {"status": "compacted", "reason": "linked_to_common"}
+    except OSError as exc:
+        return {"status": "skipped", "reason": f"link_failed:{exc.__class__.__name__}"}
+
+
+def _same_inode(left: Path, right: Path) -> bool:
+    try:
+        return left.exists() and right.exists() and left.stat().st_ino == right.stat().st_ino and left.stat().st_dev == right.stat().st_dev
+    except OSError:
+        return False
+
+
+def _file_sha1(path: Path) -> str:
+    digest = hashlib.sha1()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _storage_cleanup_recommendations(rows: list[dict[str, Any]]) -> list[str]:
+    recs = [
+        "Run `python src/main.py --mode cleanup-storage --dry-run --include-logs --include-reports` to inspect safe log/report cleanup.",
+        "Keep `data/raw/prices_*.json`, `data/cache/jquants/*`, and `storage/ai_fund_lab.sqlite3` unless explicitly rebuilding data.",
+    ]
+    processed = next((row for row in rows if row["path"] == "data/processed"), None)
+    if processed and processed["size"] > 5 * 1024**3:
+        recs.append("`data/processed` is large; enable common processed cache and consider `--include-processed` after confirming raw prices are preserved.")
+    return recs
+
+
+def _cleanup_pycache_targets(cutoff: float) -> list[dict[str, Any]]:
+    targets = []
+    for directory in ROOT.rglob("__pycache__"):
+        if ".venv" in directory.parts:
+            continue
+        targets.extend(_cleanup_files_under(directory, cutoff, "python_bytecode_cache"))
+    return targets
+
+
+def _cleanup_pytest_cache_targets(cutoff: float) -> list[dict[str, Any]]:
+    return _cleanup_files_under(ROOT / ".pytest_cache", cutoff, "pytest_cache")
+
+
+def _cleanup_files_under(root: Path, cutoff: float, reason: str) -> list[dict[str, Any]]:
+    if not root.exists():
+        return []
+    paths = [root] if root.is_file() else list(root.rglob("*"))
+    targets = []
+    for path in paths:
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if stat.st_mtime > cutoff:
+            continue
+        targets.append(_cleanup_target(path, stat.st_size, reason))
+    return targets
+
+
+def _cleanup_matching_files(root: Path, cutoff: float, pattern: str, reason: str) -> list[dict[str, Any]]:
+    if not root.exists():
+        return []
+    targets = []
+    for path in root.rglob(pattern):
+        if path.is_symlink() or not path.is_file():
+            continue
+        stat = path.stat()
+        if stat.st_mtime <= cutoff:
+            targets.append(_cleanup_target(path, stat.st_size, reason))
+    return targets
+
+
+def _cleanup_old_experiment_targets(cutoff: float, keep_latest: int) -> list[dict[str, Any]]:
+    root = ROOT / "reports" / "experiments"
+    if not root.exists():
+        return []
+    dirs = sorted(
+        [path for path in root.rglob("*") if path.is_dir()],
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+    keep = set(dirs[: max(0, keep_latest)])
+    targets = []
+    for directory in dirs:
+        if directory in keep:
+            continue
+        targets.extend(_cleanup_files_under(directory, cutoff, "old_experiment_artifact"))
+    return targets
+
+
+def _cleanup_processed_profile_targets(cutoff: float) -> list[dict[str, Any]]:
+    root = ROOT / "data" / "processed"
+    if not root.exists():
+        return []
+    targets = []
+    for profile_dir in root.iterdir():
+        if not profile_dir.is_dir() or profile_dir.name == "common":
+            continue
+        for pattern in ["indicators_*.json", "candidates_*.json"]:
+            targets.extend(_cleanup_matching_files(profile_dir, cutoff, pattern, "profile_processed_cache_rebuildable"))
+    return targets
+
+
+def _cleanup_target(path: Path, size: int, reason: str) -> dict[str, Any]:
+    return {
+        "path": str(path),
+        "relative_path": str(path.relative_to(ROOT)) if _is_relative_to(path, ROOT) else str(path),
+        "size": int(size),
+        "reason": reason,
+    }
+
+
+def _cleanup_storage_path_allowed(path: Path) -> bool:
+    if path.is_symlink() or not _is_relative_to(path.resolve(), ROOT.resolve()):
+        return False
+    forbidden = [ROOT / "src", ROOT / "config", ROOT / "docs", ROOT / ".git", ROOT / ".venv"]
+    if any(_is_relative_to(path.resolve(), item.resolve()) for item in forbidden if item.exists()):
+        return False
+    allowed = [
+        ROOT / ".pytest_cache",
+        ROOT / "logs" / "backtests",
+        ROOT / "logs" / "scoring",
+        ROOT / "reports" / "articles" / "backtests",
+        ROOT / "reports" / "backtests",
+        ROOT / "reports" / "experiments",
+        ROOT / "data" / "processed",
+        ROOT / "data" / "cache" / "jquants" / "unsupported_ranges.json",
+    ]
+    if path.name.endswith((".pyc", ".pyo")) and "__pycache__" in path.parts and ".venv" not in path.parts:
+        return True
+    return any(_is_relative_to(path.resolve(), item.resolve()) for item in allowed if item.exists())
+
+
 def _is_relative_to(path: Path, base: Path) -> bool:
     try:
         path.relative_to(base)
@@ -2378,7 +3511,7 @@ def run_experiments(
     skip_backtest: bool = False,
     skip_analyze: bool = False,
 ) -> None:
-    global ACTIVE_PROFILE_ID
+    global ACTIVE_PROFILE_ID, RUN_EXPERIMENTS_SHARED_STAGE_ACTIVE, RUN_EXPERIMENTS_SCORING_REUSE_SOURCE_BY_PROFILE, RUN_EXPERIMENTS_PERFORMANCE_REPORT
     registry = load_profile_registry()
     base = base_profile_id or _registry_baseline_profile_id(registry)
     experiment_ids = select_experiment_profiles(base, registry, requested_profiles)
@@ -2410,18 +3543,41 @@ def run_experiments(
         "api_retry_count": {},
         "api_retry_success_count": {},
         "disabled_features_reason": {},
+        "investor_types_chunks_total": 0,
+        "investor_types_chunks_success": 0,
+        "investor_types_chunks_failed": 0,
+        "investor_types_records_loaded": 0,
+        "investor_types_fetch_requested_start": "",
+        "investor_types_fetch_clamped_start": "",
+        "investor_types_fetch_start": "",
+        "investor_types_fetch_end": "",
+        "investor_types_disabled_reason": "",
     }
     try:
         if not skip_backtest:
+            performance_report = prepare_run_experiments_common_stages(profile_ids, start_date_text, end_date_text)
+            performance_report["skipped_profiles"] = [item.get("profile_id") for item in skipped_profiles]
+            RUN_EXPERIMENTS_PERFORMANCE_REPORT = performance_report
+            RUN_EXPERIMENTS_SCORING_REUSE_SOURCE_BY_PROFILE = _experiment_scoring_reuse_sources(profile_ids)
+            RUN_EXPERIMENTS_SHARED_STAGE_ACTIVE = True
             for profile_id in profile_ids:
                 ACTIVE_PROFILE_ID = profile_id
                 print(f"run-experiments backtest start: {profile_id}")
+                profile_started = time.perf_counter()
                 run_backtest("jquants", start_date_text, end_date_text)
+                profile_total = round(time.perf_counter() - profile_started, 4)
+                scoring_seconds = round(float(BACKTEST_PROFILE_TIMINGS.get("scoring", 0.0)), 4)
+                trade_seconds = round(float(BACKTEST_PROFILE_TIMINGS.get("trading", 0.0)), 4)
+                performance_report["scoring_time"] = round(float(performance_report.get("scoring_time", 0.0)) + scoring_seconds, 4)
+                performance_report["trade_time"] = round(float(performance_report.get("trade_time", 0.0)) + trade_seconds, 4)
+                performance_report.setdefault("profile_scoring_time_by_profile", {})[profile_id] = scoring_seconds
+                performance_report.setdefault("profile_trade_time_by_profile", {})[profile_id] = trade_seconds
+                performance_report.setdefault("profile_total_time_by_profile", {})[profile_id] = profile_total
                 _merge_jquants_api_session_summary(experiment_api_summary)
-                if not skip_analyze:
+                if not skip_analyze and not SUMMARY_ONLY_ACTIVE:
                     print(f"run-experiments analyze start: {profile_id}")
                     run_analyze(load_config(CONFIG_PATH), start_date_text, end_date_text)
-        elif not skip_analyze:
+        elif not skip_analyze and not SUMMARY_ONLY_ACTIVE:
             for profile_id in profile_ids:
                 ACTIVE_PROFILE_ID = profile_id
                 print(f"run-experiments analyze start: {profile_id}")
@@ -2441,8 +3597,13 @@ def run_experiments(
             capability_warnings=capability["warnings"],
         )
         summary.update(experiment_api_summary)
+        if not skip_backtest:
+            summary["performance_report"] = performance_report
         write_experiment_batch_outputs(summary, start_date_text, end_date_text, base, compare_paths)
     finally:
+        RUN_EXPERIMENTS_SHARED_STAGE_ACTIVE = False
+        RUN_EXPERIMENTS_SCORING_REUSE_SOURCE_BY_PROFILE = {}
+        RUN_EXPERIMENTS_PERFORMANCE_REPORT = {}
         ACTIVE_PROFILE_ID = previous_profile
 
 
@@ -2473,6 +3634,324 @@ def resolve_experiment_capabilities(experiment_ids: list[str], current_plan: str
             )
         runnable.append({"profile_id": profile_id, "compatibility": compatibility})
     return {"runnable": runnable, "skipped": skipped, "warnings": warnings}
+
+
+def prepare_run_experiments_common_stages(profile_ids: list[str], start_date_text: str, end_date_text: str) -> dict[str, Any]:
+    global ACTIVE_PROFILE_ID, BACKTEST_MODE_ACTIVE, BACKTEST_DAY_LOG_PREFIX
+    global COMMON_CACHE_METRICS
+    started = time.perf_counter()
+    previous_profile = ACTIVE_PROFILE_ID
+    previous_backtest_mode = BACKTEST_MODE_ACTIVE
+    report: dict[str, Any] = {
+        "price_fetch_time": 0.0,
+        "shared_price_fetch_time": 0.0,
+        "indicator_time": 0.0,
+        "shared_indicator_time": 0.0,
+        "candidate_time": 0.0,
+        "shared_candidate_time": 0.0,
+        "market_context_time": 0.0,
+        "scoring_time": 0.0,
+        "trade_time": 0.0,
+        "profile_scoring_time_by_profile": {},
+        "profile_trade_time_by_profile": {},
+        "profile_total_time_by_profile": {},
+        "reused_indicator_count": 0,
+        "reused_candidate_count": 0,
+        "reused_scoring_count": 0,
+        "cache_reused_from_common_count": 0,
+        "profile_specific_cache_count": 0,
+        "generated_cache_size": 0,
+        "cleanup_hint": "",
+        "skipped_profiles": [],
+        "stage_groups": [],
+    }
+    if not profile_ids:
+        return report
+    end_date = date.fromisoformat(end_date_text)
+    groups = _experiment_common_stage_groups(profile_ids)
+    try:
+        COMMON_CACHE_METRICS = {
+            "cache_reused_from_common_count": 0,
+            "profile_specific_cache_count": 0,
+            "generated_cache_size": 0,
+        }
+        BACKTEST_MODE_ACTIVE = True
+        price_start = time.perf_counter()
+        indicator_fetch_start_dates = []
+        trade_start_dates = []
+        for group in groups:
+            config = load_profile(group["representative"])
+            parsed_start = date.fromisoformat(start_date_text)
+            trade_start = max(parsed_start, jquants_earliest_supported_date(config, "prices") or parsed_start)
+            trade_start_dates.append(trade_start)
+            indicator_fetch_start_dates.append(_indicator_fetch_start_date(trade_start, config))
+        fetch_start = min(indicator_fetch_start_dates) if indicator_fetch_start_dates else date.fromisoformat(start_date_text)
+        trade_start = min(trade_start_dates) if trade_start_dates else date.fromisoformat(start_date_text)
+        ACTIVE_PROFILE_ID = groups[0]["representative"]
+        ensure_price_history_for_backtest("jquants", fetch_start, end_date, trade_start)
+        trading_dates = available_cached_price_dates(trade_start, end_date)
+        report["price_fetch_time"] = round(time.perf_counter() - price_start, 4)
+        report["shared_price_fetch_time"] = report["price_fetch_time"]
+        report["target_trading_days"] = len(trading_dates)
+        for group in groups:
+            representative = group["representative"]
+            group_profiles = group["profiles"]
+            ACTIVE_PROFILE_ID = representative
+            config = load_config(CONFIG_PATH)
+            parsed_start = date.fromisoformat(start_date_text)
+            group_trade_start = max(parsed_start, jquants_earliest_supported_date(config, "prices") or parsed_start)
+            indicator_fetch_start = _indicator_fetch_start_date(group_trade_start, config)
+            group_dates = [item for item in trading_dates if item >= group_trade_start]
+            _preload_light_api_context(config, group_trade_start, end_date, indicator_fetch_start_date=indicator_fetch_start)
+            group_report = {
+                "signature": group["signature"],
+                "representative": representative,
+                "profiles": group_profiles,
+                "trading_days": len(group_dates),
+                "indicator_generated_or_reused": 0,
+                "candidate_generated_or_reused": 0,
+                "copied_indicator_count": 0,
+                "copied_candidate_count": 0,
+            }
+            for index, trading_date in enumerate(group_dates, start=1):
+                target_date_text = trading_date.isoformat()
+                BACKTEST_DAY_LOG_PREFIX = f"[common {representative} {index}/{len(group_dates)}] {target_date_text}"
+                indicator_start = time.perf_counter()
+                ensure_indicators("jquants", target_date_text)
+                report["indicator_time"] += time.perf_counter() - indicator_start
+                group_report["indicator_generated_or_reused"] += 1
+                market_start = time.perf_counter()
+                ensure_market_context("jquants", target_date_text)
+                report["market_context_time"] += time.perf_counter() - market_start
+                candidate_start = time.perf_counter()
+                ensure_screen("jquants", target_date_text)
+                report["candidate_time"] += time.perf_counter() - candidate_start
+                group_report["candidate_generated_or_reused"] += 1
+                for profile_id in group_profiles:
+                    if profile_id == representative:
+                        continue
+                    copied_indicator = _copy_common_indicator_stage(representative, profile_id, target_date_text)
+                    copied_candidate = _copy_common_candidate_stage(representative, profile_id, target_date_text)
+                    if copied_indicator:
+                        report["reused_indicator_count"] += 1
+                        group_report["copied_indicator_count"] += 1
+                    if copied_candidate:
+                        report["reused_candidate_count"] += 1
+                        group_report["copied_candidate_count"] += 1
+            report["stage_groups"].append(group_report)
+        report["indicator_time"] = round(float(report["indicator_time"]), 4)
+        report["candidate_time"] = round(float(report["candidate_time"]), 4)
+        report["shared_indicator_time"] = report["indicator_time"]
+        report["shared_candidate_time"] = report["candidate_time"]
+        report["market_context_time"] = round(float(report["market_context_time"]), 4)
+        report.update(COMMON_CACHE_METRICS)
+        report["cleanup_hint"] = (
+            "Run `python src/main.py --mode storage-audit` and "
+            "`python src/main.py --mode cleanup-storage --dry-run --include-logs --include-reports` "
+            "when repeated experiments grow logs/reports."
+        )
+        report["total_common_stage_time"] = round(time.perf_counter() - started, 4)
+        print_run_experiments_performance_report(report)
+        return report
+    finally:
+        ACTIVE_PROFILE_ID = previous_profile
+        BACKTEST_MODE_ACTIVE = previous_backtest_mode
+        BACKTEST_DAY_LOG_PREFIX = ""
+
+
+def _experiment_common_stage_groups(profile_ids: list[str]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[str]] = {}
+    for profile_id in profile_ids:
+        signature = _experiment_common_stage_signature(load_profile(profile_id))
+        grouped.setdefault(signature, []).append(profile_id)
+    return [
+        {"signature": signature, "representative": profiles[0], "profiles": profiles}
+        for signature, profiles in grouped.items()
+    ]
+
+
+def _experiment_common_stage_signature(config: dict[str, Any]) -> str:
+    return json.dumps(
+        {
+            "provider": "jquants",
+            "indicator_mode": _backtest_indicator_mode(config),
+            "relative_strength": _relative_strength_enabled_for_indicators(config),
+            "sector_analysis": bool(config.get("features", {}).get("sector_analysis", True)),
+            "market_filter": {
+                "allowed_sections": sorted(allowed_market_sections(config)),
+                "allow_unknown_market": bool(config.get("market_filter", {}).get("allow_unknown_market", False)),
+            },
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _experiment_scoring_reuse_sources(profile_ids: list[str]) -> dict[str, str]:
+    source_by_signature: dict[str, str] = {}
+    reuse: dict[str, str] = {}
+    for profile_id in profile_ids:
+        signature = _experiment_scoring_signature(load_profile(profile_id))
+        source = source_by_signature.get(signature)
+        if source:
+            reuse[profile_id] = source
+        else:
+            source_by_signature[signature] = profile_id
+    return reuse
+
+
+def _experiment_scoring_signature(config: dict[str, Any]) -> str:
+    keys = {
+        "features": config.get("features", {}),
+        "scoring": config.get("scoring", {}),
+        "selection": config.get("selection", {}),
+        "volume_filter": config.get("volume_filter", {}),
+        "market_filter": {
+            "allowed_sections": sorted(allowed_market_sections(config)),
+            "allow_unknown_market": bool(config.get("market_filter", {}).get("allow_unknown_market", False)),
+            "risk_off_buy_policy": config.get("market_filter", {}).get("risk_off_buy_policy"),
+            "risk_off_max_buy_orders": config.get("market_filter", {}).get("risk_off_max_buy_orders"),
+            "risk_off_min_score": config.get("market_filter", {}).get("risk_off_min_score"),
+            "risk_off_disable_top_pick": config.get("market_filter", {}).get("risk_off_disable_top_pick"),
+        },
+        "earnings_filter": config.get("earnings_filter", {}),
+        "investor_context_filter": config.get("investor_context_filter", {}),
+    }
+    return json.dumps(keys, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _copy_common_indicator_stage(source_profile_id: str, target_profile_id: str, target_date_text: str) -> bool:
+    source_config = load_profile(source_profile_id)
+    target_config = load_profile(target_profile_id)
+    source_path = processed_profile_path(source_config, f"indicators_{target_date_text}.json")
+    target_path = processed_profile_path(target_config, f"indicators_{target_date_text}.json")
+    if not source_path.exists():
+        return False
+    if target_path.exists():
+        return True
+    payload = read_json(source_path)
+    write_json(target_path, payload)
+    return True
+
+
+def _copy_common_candidate_stage(source_profile_id: str, target_profile_id: str, target_date_text: str) -> bool:
+    source_config = load_profile(source_profile_id)
+    target_config = load_profile(target_profile_id)
+    source_path = processed_profile_path(source_config, f"candidates_{target_date_text}.json")
+    target_path = processed_profile_path(target_config, f"candidates_{target_date_text}.json")
+    if not source_path.exists():
+        return False
+    if not target_path.exists():
+        payload = _with_profile_metadata(read_json(source_path), target_config)
+        write_json(target_path, payload)
+    source_log = ROOT / "logs" / "screening" / source_profile_id / f"screening_{target_date_text}.json"
+    target_log = ROOT / "logs" / "screening" / target_profile_id / f"screening_{target_date_text}.json"
+    if source_log.exists() and not target_log.exists():
+        write_json(target_log, _with_profile_metadata(read_json(source_log), target_config))
+    return True
+
+
+def _with_profile_metadata(payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(payload)
+    updated["profile_id"] = profile_id_from(config)
+    updated["profile_name"] = profile_name_from(config)
+    updated["config_version"] = config_version_from(config)
+    return updated
+
+
+def _common_processed_cache_key(config: dict[str, Any], stage: str) -> str:
+    if stage == "indicators":
+        signature = _experiment_common_stage_signature(config)
+    elif stage == "candidates":
+        signature = json.dumps(
+            {
+                "common_stage": _experiment_common_stage_signature(config),
+                "candidate_settings": {
+                    "screening": config.get("screening", {}),
+                    "features": {"sector_analysis": bool(config.get("features", {}).get("sector_analysis", True))},
+                },
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    else:
+        signature = stage
+    return hashlib.sha1(signature.encode("utf-8")).hexdigest()[:16]
+
+
+def _common_processed_cache_path(config: dict[str, Any], stage: str, target_date_text: str) -> Path:
+    filename = f"{stage}_{target_date_text}.json"
+    return ROOT / "data" / "processed" / "common" / stage / _common_processed_cache_key(config, stage) / filename
+
+
+def _restore_common_processed_cache(config: dict[str, Any], stage: str, target_date_text: str, target_path: Path) -> bool:
+    common_path = _common_processed_cache_path(config, stage, target_date_text)
+    if not common_path.exists():
+        return False
+    payload = read_json(common_path)
+    if stage == "candidates":
+        payload = _with_profile_metadata(payload, config)
+    write_json(target_path, payload)
+    COMMON_CACHE_METRICS["cache_reused_from_common_count"] = COMMON_CACHE_METRICS.get("cache_reused_from_common_count", 0) + 1
+    return True
+
+
+def _save_common_processed_cache(config: dict[str, Any], stage: str, target_date_text: str, payload: dict[str, Any]) -> None:
+    common_path = _common_processed_cache_path(config, stage, target_date_text)
+    if not common_path.exists():
+        write_json(common_path, payload)
+        try:
+            COMMON_CACHE_METRICS["generated_cache_size"] = COMMON_CACHE_METRICS.get("generated_cache_size", 0) + common_path.stat().st_size
+        except OSError:
+            pass
+
+
+def _link_profile_processed_cache_to_common(config: dict[str, Any], stage: str, target_date_text: str, profile_path: Path) -> None:
+    common_path = _common_processed_cache_path(config, stage, target_date_text)
+    if not common_path.exists() or not profile_path.exists() or _same_inode(profile_path, common_path):
+        return
+    try:
+        if profile_path.stat().st_size != common_path.stat().st_size:
+            return
+        if _file_sha1(profile_path) != _file_sha1(common_path):
+            return
+        profile_path.unlink()
+        os.link(common_path, profile_path)
+    except OSError:
+        return
+
+
+def print_run_experiments_performance_report(report: dict[str, Any]) -> None:
+    print("Run Experiments Performance Report")
+    for key in [
+        "shared_price_fetch_time",
+        "shared_indicator_time",
+        "shared_candidate_time",
+        "price_fetch_time",
+        "indicator_time",
+        "candidate_time",
+        "market_context_time",
+        "scoring_time",
+        "trade_time",
+        "profile_scoring_time_by_profile",
+        "profile_trade_time_by_profile",
+        "reused_scoring_count",
+        "reused_indicator_count",
+        "reused_candidate_count",
+        "cache_reused_from_common_count",
+        "profile_specific_cache_count",
+        "generated_cache_size",
+        "cleanup_hint",
+        "skipped_profiles",
+        "target_trading_days",
+        "total_common_stage_time",
+    ]:
+        value = report.get(key, 0)
+        if isinstance(value, (dict, list)):
+            value = _compact_json(value)
+        print(f"- {key}: {value}")
 
 
 def _ensure_experiment_db_rows(profile_ids: list[str], start_date_text: str, end_date_text: str) -> None:
@@ -2537,14 +4016,19 @@ def build_experiment_batch_summary(
         for profile_id in [base_profile_id, *experiment_ids]:
             rows_by_profile[profile_id] = _profile_compare_row(load_profile(profile_id), db_path, start_date_text, end_date_text)
     base_row = rows_by_profile.get(base_profile_id, {})
+    base_date_audit = _experiment_date_range_audit(base_profile_id, start_date_text, end_date_text)
     experiment_rows = []
     for profile_id in experiment_ids:
         registry_item = profiles[profile_id]
         row = rows_by_profile.get(profile_id, {"profile_id": profile_id})
+        row_market_coverage = row.get("market_coverage", {}) if isinstance(row.get("market_coverage"), dict) else {}
         diff = _experiment_diff(base_profile_id, profile_id, db_path, start_date_text, end_date_text) if db_path.exists() else {}
         feature_analysis = _experiment_feature_analysis(load_profile(profile_id), start_date_text, end_date_text) if db_path.exists() else {}
         activation = feature_analysis.get("feature_activation_audit", {})
         earnings_debug = feature_analysis.get("earnings_filter_debug", {})
+        processed_audit = _experiment_processed_data_audit(profile_id, start_date_text, end_date_text)
+        date_audit = _experiment_date_range_audit(profile_id, start_date_text, end_date_text)
+        coverage_audit = date_audit.get("backtest_coverage_audit", {}) if isinstance(date_audit, dict) else {}
         if "selection_diff_count" in diff:
             selection_diff_count = int(diff.get("selection_diff_count") or 0)
         else:
@@ -2568,6 +4052,11 @@ def build_experiment_batch_summary(
                 "total_trades": row.get("total_trades"),
                 "newly_selected_count": diff.get("newly_selected_count", 0),
                 "removed_count": diff.get("removed_count", 0),
+                "investor_filter_rejected_count": diff.get("investor_filter_rejected_count", 0),
+                "market_filter": row.get("market_filter", {}),
+                "market_candidate_count": row_market_coverage.get("candidate_count", {}),
+                "market_selected_count": row_market_coverage.get("selected_count", {}),
+                "market_filter_excluded_count": row_market_coverage.get("market_filter_excluded_count", 0),
                 "selection_diff_count": selection_diff_count,
                 "outcome_diff_count": outcome_diff_count,
                 "feature_data_enabled": activation.get("feature_data_enabled", {}),
@@ -2576,6 +4065,21 @@ def build_experiment_batch_summary(
                 "earnings_calendar_records": earnings_debug.get("earnings_calendar_records", 0),
                 "earnings_filter_rejected_count": earnings_debug.get("earnings_filter_rejected_count", 0),
                 "earnings_filter_status": earnings_debug.get("status", ""),
+                "processed_data_audit": processed_audit,
+                "backtest_coverage_audit": coverage_audit,
+                "first_price_date": coverage_audit.get("first_price_date"),
+                "last_price_date": coverage_audit.get("last_price_date"),
+                "first_candidate_date": coverage_audit.get("first_candidate_date"),
+                "last_candidate_date": coverage_audit.get("last_candidate_date"),
+                "first_trade_date": coverage_audit.get("first_trade_date"),
+                "last_trade_date": coverage_audit.get("last_trade_date"),
+                "candidate_days": coverage_audit.get("candidate_days"),
+                "trade_days": coverage_audit.get("trade_days"),
+                "coverage_ratio": coverage_audit.get("coverage_ratio"),
+                "coverage_warning": coverage_audit.get("coverage_warning", ""),
+                "indicators_last_date": processed_audit.get("indicators_last_date"),
+                "candidates_last_date": processed_audit.get("candidates_last_date"),
+                "scored_candidates_last_date": processed_audit.get("scored_candidates_last_date"),
                 "feature_status": {
                     name: item.get("status")
                     for name, item in (activation.get("features", {}) or {}).items()
@@ -2608,11 +4112,16 @@ def build_experiment_batch_summary(
                 "candidate": "no",
             }
         )
+    batch_date_resolution = _date_resolution_with_coverage(
+        _runtime_date_resolution(start_date_text, end_date_text),
+        base_date_audit,
+    )
     return {
         "base_profile": base_profile_id,
         "start_date": start_date_text,
         "end_date": end_date_text,
-        "date_resolution": _runtime_date_resolution(start_date_text, end_date_text),
+        "date_resolution": batch_date_resolution,
+        "backtest_coverage_audit": base_date_audit.get("backtest_coverage_audit", {}) if isinstance(base_date_audit, dict) else {},
         "profiles": [base_profile_id, *experiment_ids],
         "base": {
             "profile_id": base_profile_id,
@@ -2620,6 +4129,7 @@ def build_experiment_batch_summary(
             "required_plan": profiles.get(base_profile_id, {}).get("required_plan", ""),
             "role": profiles.get(base_profile_id, {}).get("role", ""),
             "enabled_features": _enabled_registry_features(profiles.get(base_profile_id, {})),
+            "backtest_coverage_audit": base_date_audit.get("backtest_coverage_audit", {}) if isinstance(base_date_audit, dict) else {},
             **base_row,
         },
         "experiments": experiment_rows,
@@ -2627,6 +4137,29 @@ def build_experiment_batch_summary(
         "capability_warnings": capability_warnings or [],
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
+
+
+def _experiment_date_range_audit(profile_id: str, start_date_text: str, end_date_text: str) -> dict[str, Any]:
+    summary_path = ROOT / "logs" / "backtests" / profile_id / f"{start_date_text}_to_{end_date_text}" / "backtest_summary.json"
+    if not summary_path.exists():
+        return {}
+    try:
+        summary = read_json(summary_path)
+    except Exception:
+        return {}
+    audit = summary.get("date_range_audit", {})
+    return audit if isinstance(audit, dict) else {}
+
+
+def _experiment_processed_data_audit(profile_id: str, start_date_text: str, end_date_text: str) -> dict[str, Any]:
+    audit = _experiment_date_range_audit(profile_id, start_date_text, end_date_text).get("processed_data_audit", {})
+    if isinstance(audit, dict) and audit:
+        return audit
+    try:
+        trading_dates = available_cached_price_dates(date.fromisoformat(start_date_text), date.fromisoformat(end_date_text))
+    except Exception:
+        trading_dates = []
+    return build_processed_data_audit(load_profile(profile_id), trading_dates)
 
 
 def _experiment_diff(base_profile_id: str, target_profile_id: str, db_path: Path, start_date_text: str, end_date_text: str) -> dict[str, Any]:
@@ -2775,6 +4308,52 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
         lines.extend(["", "## Capability Warnings", ""])
         for warning in summary.get("capability_warnings", []):
             lines.append(f"- {warning.get('profile_id')}: {warning.get('warning')}")
+    lines.extend(["", "## Backtest Coverage Audit", ""])
+    base_coverage = summary.get("backtest_coverage_audit", {}) if isinstance(summary.get("backtest_coverage_audit"), dict) else {}
+    if base_coverage:
+        lines.extend(["### Base", ""])
+        lines.extend(_backtest_coverage_audit_lines(base_coverage))
+        lines.append("")
+    lines.extend(
+        [
+            "| profile_id | first_price_date | last_price_date | first_candidate_date | last_candidate_date | first_trade_date | last_trade_date | candidate_days | trade_days | coverage_ratio | coverage_warning |",
+            "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for row in summary.get("experiments", []):
+        lines.append(
+            f"| {row.get('profile_id')} | {row.get('first_price_date', '')} | {row.get('last_price_date', '')} | "
+            f"{row.get('first_candidate_date', '')} | {row.get('last_candidate_date', '')} | "
+            f"{row.get('first_trade_date', '')} | {row.get('last_trade_date', '')} | "
+            f"{row.get('candidate_days', 0)} | {row.get('trade_days', 0)} | "
+            f"{_format_optional_percent(row.get('coverage_ratio'))} | {row.get('coverage_warning') or '-'} |"
+        )
+    performance = summary.get("performance_report", {}) if isinstance(summary.get("performance_report"), dict) else {}
+    lines.extend(
+        [
+            "",
+            "## Run Experiments Performance Report",
+            "",
+            f"- shared_price_fetch_time: {performance.get('shared_price_fetch_time', performance.get('price_fetch_time', 0))}",
+            f"- shared_indicator_time: {performance.get('shared_indicator_time', performance.get('indicator_time', 0))}",
+            f"- shared_candidate_time: {performance.get('shared_candidate_time', performance.get('candidate_time', 0))}",
+            f"- price_fetch_time: {performance.get('price_fetch_time', 0)}",
+            f"- indicator_time: {performance.get('indicator_time', 0)}",
+            f"- candidate_time: {performance.get('candidate_time', 0)}",
+            f"- scoring_time: {performance.get('scoring_time', 0)}",
+            f"- trade_time: {performance.get('trade_time', 0)}",
+            f"- profile_scoring_time_by_profile: {_compact_json(performance.get('profile_scoring_time_by_profile', {}))}",
+            f"- profile_trade_time_by_profile: {_compact_json(performance.get('profile_trade_time_by_profile', {}))}",
+            f"- reused_indicator_count: {performance.get('reused_indicator_count', 0)}",
+            f"- reused_candidate_count: {performance.get('reused_candidate_count', 0)}",
+            f"- reused_scoring_count: {performance.get('reused_scoring_count', 0)}",
+            f"- cache_reused_from_common_count: {performance.get('cache_reused_from_common_count', 0)}",
+            f"- profile_specific_cache_count: {performance.get('profile_specific_cache_count', 0)}",
+            f"- generated_cache_size: {_format_bytes(int(performance.get('generated_cache_size', 0) or 0))}",
+            f"- cleanup_hint: {performance.get('cleanup_hint', '-')}",
+            f"- skipped_profiles: {_compact_json(performance.get('skipped_profiles', []))}",
+        ]
+    )
     lines.extend(
         [
             "",
@@ -2785,6 +4364,15 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             f"- api_retry_count: {_compact_json(summary.get('api_retry_count', {}))}",
             f"- api_retry_success_count: {_compact_json(summary.get('api_retry_success_count', {}))}",
             f"- disabled_features_reason: {_compact_json(summary.get('disabled_features_reason', {}))}",
+            f"- investor_types_chunks_total: {summary.get('investor_types_chunks_total', 0)}",
+            f"- investor_types_chunks_success: {summary.get('investor_types_chunks_success', 0)}",
+            f"- investor_types_chunks_failed: {summary.get('investor_types_chunks_failed', 0)}",
+            f"- investor_types_records_loaded: {summary.get('investor_types_records_loaded', 0)}",
+            f"- investor_types_fetch_requested_start: {summary.get('investor_types_fetch_requested_start') or '-'}",
+            f"- investor_types_fetch_clamped_start: {summary.get('investor_types_fetch_clamped_start') or '-'}",
+            f"- investor_types_fetch_start: {summary.get('investor_types_fetch_start') or '-'}",
+            f"- investor_types_fetch_end: {summary.get('investor_types_fetch_end') or '-'}",
+            f"- investor_types_disabled_reason: {summary.get('investor_types_disabled_reason') or '-'}",
         ]
     )
     lines.extend(
@@ -2792,8 +4380,8 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             "",
             "## Results",
             "",
-            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | selection_diff_count | outcome_diff_count | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | earnings_calendar_records | earnings_filter_rejected_count | earnings_filter_status | practical_effect | effect_reason | verdict | verdict_reason |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | investor_filter_rejected_count | market_filter | market_candidate_count | market_selected_count | market_filter_excluded_count | selection_diff_count | outcome_diff_count | indicators_last_date | candidates_last_date | scored_candidates_last_date | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | earnings_calendar_records | earnings_filter_rejected_count | earnings_filter_status | practical_effect | effect_reason | verdict | verdict_reason |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for row in summary.get("experiments", []):
@@ -2808,8 +4396,11 @@ def _experiment_summary_table_row(row: dict[str, Any]) -> str:
         f"{_format_optional_number(row.get('final_assets'))} | {_format_optional_number(row.get('net_cumulative_profit'))} | "
         f"{_format_optional_percent(row.get('win_rate'))} | {_format_optional_number(row.get('profit_factor'))} | "
         f"{_format_optional_percent(row.get('expectancy'))} | {_format_optional_percent(row.get('max_drawdown'))} | "
-        f"{row.get('total_trades')} | {row.get('newly_selected_count')} | {row.get('removed_count')} | "
+        f"{row.get('total_trades')} | {row.get('newly_selected_count')} | {row.get('removed_count')} | {row.get('investor_filter_rejected_count', 0)} | "
+        f"{_compact_json(row.get('market_filter', {}))} | {_compact_json(row.get('market_candidate_count', {}))} | "
+        f"{_compact_json(row.get('market_selected_count', {}))} | {row.get('market_filter_excluded_count', 0)} | "
         f"{row.get('selection_diff_count')} | {row.get('outcome_diff_count')} | "
+        f"{row.get('indicators_last_date', '')} | {row.get('candidates_last_date', '')} | {row.get('scored_candidates_last_date', '')} | "
         f"{_compact_json(row.get('feature_data_enabled', {}))} | {_compact_json(row.get('feature_scoring_enabled', {}))} | "
         f"{_compact_json(row.get('feature_trigger_count', {}))} | "
         f"{row.get('earnings_calendar_records', 0)} | {row.get('earnings_filter_rejected_count', 0)} | {row.get('earnings_filter_status', '')} | "
@@ -2825,8 +4416,7 @@ def _compact_json(value: Any) -> str:
 
 
 def render_experiment_profile_markdown(row: dict[str, Any]) -> str:
-    return "\n".join(
-        [
+    lines = [
             f"# {row.get('profile_id')}",
             "",
             f"- role: {row.get('role', '')}",
@@ -2844,8 +4434,16 @@ def render_experiment_profile_markdown(row: dict[str, Any]) -> str:
             f"- total_trades: {row.get('total_trades')}",
             f"- newly_selected_count: {row.get('newly_selected_count', 0)}",
             f"- removed_count: {row.get('removed_count', 0)}",
+            f"- investor_filter_rejected_count: {row.get('investor_filter_rejected_count', 0)}",
+            f"- market_filter: {_compact_json(row.get('market_filter', {}))}",
+            f"- market_candidate_count: {_compact_json(row.get('market_candidate_count', {}))}",
+            f"- market_selected_count: {_compact_json(row.get('market_selected_count', {}))}",
+            f"- market_filter_excluded_count: {row.get('market_filter_excluded_count', 0)}",
             f"- selection_diff_count: {row.get('selection_diff_count', 0)}",
             f"- outcome_diff_count: {row.get('outcome_diff_count', 0)}",
+            f"- indicators_last_date: {row.get('indicators_last_date', '-')}",
+            f"- candidates_last_date: {row.get('candidates_last_date', '-')}",
+            f"- scored_candidates_last_date: {row.get('scored_candidates_last_date', '-')}",
             f"- feature_data_enabled: {_compact_json(row.get('feature_data_enabled', {}))}",
             f"- feature_scoring_enabled: {_compact_json(row.get('feature_scoring_enabled', {}))}",
             f"- feature_trigger_count: {_compact_json(row.get('feature_trigger_count', {}))}",
@@ -2857,7 +4455,11 @@ def render_experiment_profile_markdown(row: dict[str, Any]) -> str:
             f"- verdict_reason: {row.get('verdict_reason', ', '.join(row.get('judgement_reasons') or []) or '-')}",
             f"- candidate: {row.get('candidate', 'no')}",
         ]
-    )
+    coverage = row.get("backtest_coverage_audit", {}) if isinstance(row.get("backtest_coverage_audit"), dict) else {}
+    if coverage:
+        lines.extend(["", "## Backtest Coverage Audit", ""])
+        lines.extend(_backtest_coverage_audit_lines(coverage))
+    return "\n".join(lines)
 
 
 def _registry_baseline_profile_id(registry: dict[str, Any]) -> str:
@@ -3010,6 +4612,11 @@ def _profile_compare_row(config: dict[str, Any], db_path: Path, start_date_text:
     return {
         "profile_id": profile_id,
         "profile_name": profile_name_from(config),
+        "market_filter": {
+            "allowed_sections": sorted(allowed_market_sections(config)),
+            "allow_unknown_market": bool(config.get("market_filter", {}).get("allow_unknown_market", False)),
+        },
+        "market_coverage": _backtest_summary_market_coverage(profile_id, start_date_text, end_date_text),
         "stop_loss_execution": config.get("execution", {}).get("stop_loss_execution", "next_day_open"),
         "final_assets": latest.get("total_assets"),
         "net_cumulative_profit": latest.get("net_cumulative_profit"),
@@ -3036,6 +4643,18 @@ def _profile_compare_row(config: dict[str, Any], db_path: Path, start_date_text:
         "conditional_rejected_count": _conditional_rejected_count(scoring_rows),
         "score_detail": score_detail_groups(closed),
     }
+
+
+def _backtest_summary_market_coverage(profile_id: str, start_date_text: str, end_date_text: str) -> dict[str, Any]:
+    path = ROOT / "logs" / "backtests" / profile_id / f"{start_date_text}_to_{end_date_text}" / "backtest_summary.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = read_json(path)
+    except Exception:
+        return {}
+    coverage = payload.get("market_coverage", {})
+    return coverage if isinstance(coverage, dict) else {}
 
 
 def build_profile_diff_analysis(
@@ -3089,6 +4708,7 @@ def _build_profile_diff_analysis_for_pair(
         _profile_compare_row(base_config, db_path, start_date_text, end_date_text),
         _profile_compare_row(target_config, db_path, start_date_text, end_date_text),
     )
+    target_market_coverage = _backtest_summary_market_coverage(target_profile_id, start_date_text, end_date_text)
     selection_diff_count = len(newly_selected_keys) + len(removed_keys)
     outcome_diff_count = outcome_diff["outcome_diff_count"]
     practical_effect = _profile_practical_effect(selection_diff_count, outcome_diff_count)
@@ -3107,6 +4727,14 @@ def _build_profile_diff_analysis_for_pair(
         "target_conditional_selected_count": _conditional_selected_count(target_rows),
         "base_conditional_rejected_count": _conditional_rejected_count(base_rows),
         "target_conditional_rejected_count": _conditional_rejected_count(target_rows),
+        "investor_filter_rejected_count": _investor_filter_rejected_count(target_rows),
+        "market_filter": {
+            "base_allowed_sections": sorted(allowed_market_sections(base_config)),
+            "target_allowed_sections": sorted(allowed_market_sections(target_config)),
+        },
+        "market_candidate_count": target_market_coverage.get("candidate_count", {}),
+        "market_selected_count": target_market_coverage.get("selected_count", {}),
+        "market_filter_excluded_count": target_market_coverage.get("market_filter_excluded_count", 0),
         "newly_selected_count": len(newly_selected_keys),
         "removed_count": len(removed_keys),
         "selection_diff_count": selection_diff_count,
@@ -3129,6 +4757,10 @@ def _profile_diff_pair(configs: list[dict[str, Any]]) -> tuple[dict[str, Any], d
     if len(configs) >= 2:
         return configs[0], configs[1]
     return None
+
+
+def _investor_filter_rejected_count(rows: list[dict[str, Any]]) -> int:
+    return sum(1 for row in rows if str(row.get("rejected_reason") or "") == "investor_context_negative")
 
 
 def _load_scoring_rows_for_profile(db_path: Path, profile_id: str, start_date_text: str, end_date_text: str) -> list[dict[str, Any]]:
@@ -3539,6 +5171,11 @@ def _profile_diff_analysis_lines(analysis: dict[str, Any]) -> list[str]:
         f"- target conditional selected count: {analysis.get('target_conditional_selected_count')}",
         f"- base conditional rejected count: {analysis.get('base_conditional_rejected_count')}",
         f"- target conditional rejected count: {analysis.get('target_conditional_rejected_count')}",
+        f"- investor_filter_rejected_count: {analysis.get('investor_filter_rejected_count', 0)}",
+        f"- market_filter: {_compact_json(analysis.get('market_filter', {}))}",
+        f"- market_candidate_count: {_compact_json(analysis.get('market_candidate_count', {}))}",
+        f"- market_selected_count: {_compact_json(analysis.get('market_selected_count', {}))}",
+        f"- market_filter_excluded_count: {analysis.get('market_filter_excluded_count', 0)}",
         f"- newly selected by target: {analysis.get('newly_selected_count')}",
         f"- removed by target: {analysis.get('removed_count')}",
         f"- selection_diff_count: {analysis.get('selection_diff_count')}",
@@ -3799,6 +5436,8 @@ def build_full_paper_run_summary(
     gross_profit = sum(float(trade.get("gross_profit", trade.get("profit", 0)) or 0) for trade in closed_trades)
     net_profit = sum(float(trade.get("net_profit", trade.get("profit", 0)) or 0) for trade in closed_trades)
 
+    execution_model = _backtest_execution_model(config)
+    execution_model.update(_backtest_execution_model_stats(all_trades, execution_model))
     summary = {
         "start_date": start_date_text,
         "end_date": end_date_text,
@@ -4615,6 +6254,43 @@ def _merge_jquants_api_session_summary(target: dict[str, Any]) -> None:
             merged[endpoint] = int(merged.get(endpoint, 0) or 0) + int(count or 0)
     disabled = target.setdefault("disabled_features_reason", {})
     disabled.update(session.get("disabled_features_reason", {}))
+    investor_summary = session.get("investor_types_fetch_summary")
+    if isinstance(investor_summary, dict):
+        _merge_investor_types_fetch_summary(target, investor_summary)
+
+
+def _merge_investor_types_fetch_summary(target: dict[str, Any], summary: dict[str, Any]) -> None:
+    target["investor_types_chunks_total"] = int(target.get("investor_types_chunks_total") or 0) + int(summary.get("investor_types_chunks_total") or 0)
+    target["investor_types_chunks_success"] = int(target.get("investor_types_chunks_success") or 0) + int(summary.get("investor_types_chunks_success") or 0)
+    target["investor_types_chunks_failed"] = int(target.get("investor_types_chunks_failed") or 0) + int(summary.get("investor_types_chunks_failed") or 0)
+    target["investor_types_records_loaded"] = int(target.get("investor_types_records_loaded") or 0) + int(summary.get("investor_types_records_loaded") or 0)
+    requested_starts = [
+        value
+        for value in [target.get("investor_types_fetch_requested_start"), summary.get("investor_types_fetch_requested_start")]
+        if value
+    ]
+    clamped_starts = [
+        value
+        for value in [target.get("investor_types_fetch_clamped_start"), summary.get("investor_types_fetch_clamped_start")]
+        if value
+    ]
+    starts = [value for value in [target.get("investor_types_fetch_start"), summary.get("investor_types_fetch_start")] if value]
+    ends = [value for value in [target.get("investor_types_fetch_end"), summary.get("investor_types_fetch_end")] if value]
+    disabled_reasons = [
+        str(value)
+        for value in [target.get("investor_types_disabled_reason"), summary.get("investor_types_disabled_reason")]
+        if value
+    ]
+    if requested_starts:
+        target["investor_types_fetch_requested_start"] = min(str(value) for value in requested_starts)
+    if clamped_starts:
+        target["investor_types_fetch_clamped_start"] = min(str(value) for value in clamped_starts)
+    if starts:
+        target["investor_types_fetch_start"] = min(str(value) for value in starts)
+    if ends:
+        target["investor_types_fetch_end"] = max(str(value) for value in ends)
+    if disabled_reasons:
+        target["investor_types_disabled_reason"] = ", ".join(sorted(set(disabled_reasons)))
 
 
 def _check_jquants_plan_capabilities(results: list[dict[str, Any]], config: dict[str, Any]) -> None:
@@ -4962,10 +6638,23 @@ def run_list_stocks(provider_name: str) -> None:
             max_parallel_requests=_jquants_max_parallel_requests(config),
         )
         listed_stocks = provider.get_listed_stocks()
-        prime_stocks = [_normalize_prime_stock(record) for record in listed_stocks if _is_prime_stock(record)]
+        normalized_stocks = [_normalize_listed_stock(record) for record in listed_stocks]
+        prime_stocks = [stock for stock in normalized_stocks if stock.get("section") == "TSEPrime"]
     except RuntimeError as exc:
         print(f"J-Quants listed stocks fetch failed: {exc}")
         raise SystemExit(1) from exc
+
+    listed_output_path = ROOT / "data" / "raw" / "listed_stocks_jquants.json"
+    write_json(
+        listed_output_path,
+        {
+            "provider": "jquants",
+            "source": "listed stocks",
+            "total_count": len(listed_stocks),
+            "market_counts": market_section_counts(normalized_stocks),
+            "stocks": normalized_stocks,
+        },
+    )
 
     output_path = ROOT / "data" / "raw" / "prime_stocks_jquants.json"
     write_json(
@@ -4981,6 +6670,7 @@ def run_list_stocks(provider_name: str) -> None:
 
     print(f"all listed stocks: {len(listed_stocks)}")
     print(f"prime stocks: {len(prime_stocks)}")
+    print(f"listed saved: {listed_output_path.relative_to(ROOT)}")
     print(f"saved: {output_path.relative_to(ROOT)}")
 
 
@@ -4993,16 +6683,13 @@ def run_fetch_prices(provider_name: str, target_date_text: str) -> None:
     except ValueError as exc:
         raise SystemExit("--date must be in YYYY-MM-DD format.") from exc
 
-    prime_path = ROOT / "data" / "raw" / "prime_stocks_jquants.json"
-    if not prime_path.exists():
-        raise SystemExit("Prime stock list not found. Run `python src/main.py --mode list-stocks --provider jquants` first.")
-
-    prime_payload = read_json(prime_path)
-    prime_codes = {stock["code"] for stock in prime_payload.get("stocks", [])}
-    if not prime_codes:
-        raise SystemExit("Prime stock list is empty. Re-run list-stocks and check the result.")
-
     config = load_config(CONFIG_PATH)
+    listed_stock_by_code = {str(stock["code"]): stock for stock in _listed_stock_master() if stock.get("code")}
+    allowed_codes = set(_allowed_stock_master_by_code(config))
+    if not listed_stock_by_code:
+        raise SystemExit("Listed stock master is empty. Re-run list-stocks.")
+    if not allowed_codes:
+        raise SystemExit(_market_filter_empty_message(config))
     try:
         provider = JQuantsDataProvider(
             ROOT / ".env",
@@ -5019,9 +6706,13 @@ def run_fetch_prices(provider_name: str, target_date_text: str) -> None:
     if not daily_prices:
         raise SystemExit(f"No daily price data found for {target_date_text}. The date may be weekend, holiday, or not updated yet.")
 
-    prime_prices = [_normalize_daily_price(record) for record in daily_prices if _get_first(record, ["code", "Code", "LocalCode"]) in prime_codes]
-    if not prime_prices:
-        raise SystemExit(f"No Tokyo Prime daily price data found for {target_date_text}. The date may be weekend, holiday, or not updated yet.")
+    listed_prices = [
+        _normalize_daily_price_with_market(record, listed_stock_by_code)
+        for record in daily_prices
+        if _get_first(record, ["code", "Code", "LocalCode"]) in listed_stock_by_code
+    ]
+    if not listed_prices:
+        raise SystemExit(f"No listed stock daily price data found for {target_date_text}. The date may be weekend, holiday, or not updated yet.")
 
     output_path = ROOT / "data" / "raw" / f"prices_{target_date_text}.json"
     write_json(
@@ -5030,14 +6721,17 @@ def run_fetch_prices(provider_name: str, target_date_text: str) -> None:
             "provider": "jquants",
             "date": target_date_text,
             "total_count": len(daily_prices),
-            "prime_count": len(prime_prices),
-            "prices": prime_prices,
+            "listed_count": len(listed_prices),
+            "allowed_count": sum(1 for item in listed_prices if item.get("code") in allowed_codes),
+            "market_counts": market_section_counts(listed_prices),
+            "prices": listed_prices,
         },
     )
 
     print(f"date: {target_date_text}")
     print(f"all prices: {len(daily_prices)}")
-    print(f"prime prices: {len(prime_prices)}")
+    print(f"listed prices: {len(listed_prices)}")
+    print(f"allowed prices: {sum(1 for item in listed_prices if item.get('code') in allowed_codes)}")
     print(f"saved: {output_path.relative_to(ROOT)}")
 
 
@@ -5050,19 +6744,14 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
     except ValueError as exc:
         raise SystemExit("--date must be in YYYY-MM-DD format.") from exc
 
-    prime_path = ROOT / "data" / "raw" / "prime_stocks_jquants.json"
-    if not prime_path.exists():
-        raise SystemExit("Prime stock list not found. Run `python src/main.py --mode list-stocks --provider jquants` first.")
-
-    prime_payload = read_json(prime_path)
-    prime_stocks = prime_payload.get("stocks", [])
-    prime_codes = {stock["code"] for stock in prime_stocks}
-    stock_names = {stock["code"]: stock["name"] for stock in prime_stocks}
-    stock_sectors = {stock["code"]: stock.get("sector_name", "") for stock in prime_stocks}
-    if not prime_codes:
-        raise SystemExit("Prime stock list is empty. Re-run list-stocks and check the result.")
-
     config = load_config(CONFIG_PATH)
+    stock_by_code = _allowed_stock_master_by_code(config)
+    prime_codes = set(stock_by_code)
+    stock_names = {code: stock.get("name", "") for code, stock in stock_by_code.items()}
+    stock_sectors = {code: stock.get("sector_name", "") for code, stock in stock_by_code.items()}
+    stock_sections = {code: stock.get("section", "Unknown") for code, stock in stock_by_code.items()}
+    if not prime_codes:
+        raise SystemExit(_market_filter_empty_message(config))
     indicator_mode = _backtest_indicator_mode(config) if BACKTEST_MODE_ACTIVE else "full"
     enable_relative_strength = _relative_strength_enabled_for_indicators(config)
     output_path = ROOT / "data" / "processed" / f"indicators_{target_date_text}.json"
@@ -5072,6 +6761,8 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
         if _indicator_cache_matches_current_scoring(cached_payload, config, indicator_mode, enable_relative_strength):
             _ensure_relative_strength_benchmark_cache(config, target_date, indicator_mode, enable_relative_strength)
             write_json(output_path, cached_payload)
+            _save_common_processed_cache(config, "indicators", target_date_text, cached_payload)
+            _link_profile_processed_cache_to_common(config, "indicators", target_date_text, profile_output_path)
             print(f"{BACKTEST_DAY_LOG_PREFIX} indicators cache hit: {profile_output_path.relative_to(ROOT)}")
             return
 
@@ -5080,7 +6771,25 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
     if BACKTEST_MODE_ACTIVE:
         price_rows = load_cached_price_history(fetch_dates)
         if not price_rows:
-            raise SystemExit(f"No cached price history found for {target_date_text}. Run fetch-period-prices first.")
+            fetch_start = fetch_dates[0] if fetch_dates else target_date
+            print(
+                f"{BACKTEST_DAY_LOG_PREFIX} warning: cached price history missing for indicators; "
+                f"attempting backtest price fetch from {fetch_start.isoformat()} to {target_date_text}."
+            )
+            ensure_price_history_for_backtest("jquants", fetch_start, target_date, fetch_start)
+            price_rows = load_cached_price_history(fetch_dates)
+        if not price_rows:
+            missing_dates = [
+                item.isoformat()
+                for item in fetch_dates
+                if load_cached_prime_prices(item) is None
+            ]
+            sample = ", ".join(missing_dates[:5])
+            detail = f" missing_dates_sample=[{sample}]" if sample else ""
+            raise SystemExit(
+                f"No cached price history found for {target_date_text} after fetch attempt. "
+                f"Run fetch-period-prices first.{detail}"
+            )
     else:
         try:
             provider = JQuantsDataProvider(
@@ -5135,6 +6844,7 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
             stock_names,
             target_date_text,
             stock_sectors,
+            stock_sections=stock_sections,
             indicator_mode=indicator_mode,
             progress_callback=progress_callback if BACKTEST_MODE_ACTIVE else None,
             enable_relative_strength=enable_relative_strength,
@@ -5184,6 +6894,8 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
             }
             write_json(output_path, payload)
             write_json(profile_output_path, payload)
+            _save_common_processed_cache(config, "indicators", target_date_text, payload)
+            _link_profile_processed_cache_to_common(config, "indicators", target_date_text, profile_output_path)
             return
         raise SystemExit(f"No indicators calculated for {target_date_text}. Price history may be insufficient or target date may have no data.")
 
@@ -5205,6 +6917,8 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
     write_json(output_path, payload)
     if BACKTEST_MODE_ACTIVE:
         write_json(profile_output_path, payload)
+        _save_common_processed_cache(config, "indicators", target_date_text, payload)
+        _link_profile_processed_cache_to_common(config, "indicators", target_date_text, profile_output_path)
 
     print(f"date: {target_date_text}")
     print(f"indicator mode: {indicator_mode}")
@@ -5236,11 +6950,24 @@ def run_screen(provider_name: str, target_date_text: str) -> None:
     config = load_config(CONFIG_PATH)
     payload = read_json(indicators_path)
     indicators = payload.get("indicators", [])
-    if not indicators:
-        raise SystemExit(f"No indicators found in {indicators_path.relative_to(ROOT)}.")
+    market_filtered = _apply_market_section_filter(indicators, config)
+    indicators = market_filtered["allowed"]
 
-    indicators = enrich_indicators_with_sector_momentum(indicators, target_date_text, provider_name)
-    result = screen_candidates(indicators, target_count=50)
+    if indicators:
+        indicators = enrich_indicators_with_sector_momentum(indicators, target_date_text, provider_name)
+        result = screen_candidates(indicators, target_count=50)
+    else:
+        result = {
+            "candidates": [],
+            "conditions": [],
+            "strict_passed_count": 0,
+            "fallback_used": False,
+            "fallback_passed_count": 0,
+            "excluded_summary": {
+                "reason": "empty_indicator_payload",
+                "source_indicator_file": str(indicators_path.relative_to(ROOT)),
+            },
+        }
     candidates = result["candidates"]
     screening_log = {
         "date": target_date_text,
@@ -5253,7 +6980,17 @@ def run_screen(provider_name: str, target_date_text: str) -> None:
         "fallback_passed_count": result["fallback_passed_count"],
         "candidate_count": len(candidates),
         "candidates": candidates,
-        "excluded_summary": result["excluded_summary"],
+        "excluded_summary": {
+            **result["excluded_summary"],
+            "market_filter_excluded": market_filtered["excluded_count"],
+        },
+        "market_coverage": {
+            "allowed_sections": sorted(allowed_market_sections(config)),
+            "allow_unknown_market": bool(config.get("market_filter", {}).get("allow_unknown_market", False)),
+            "input_counts": market_filtered["input_counts"],
+            "candidate_counts": market_section_counts(candidates),
+            "market_filter_excluded_count": market_filtered["excluded_count"],
+        },
     }
 
     screening_log.setdefault("profile_id", profile_id_from(config))
@@ -5261,24 +6998,29 @@ def run_screen(provider_name: str, target_date_text: str) -> None:
     screening_path = ROOT / "logs" / "screening" / profile_id_from(config) / f"screening_{target_date_text}.json"
     candidates_path = processed_profile_path(config, f"candidates_{target_date_text}.json")
     write_json(screening_path, screening_log)
-    write_json(
-        candidates_path,
-        {
-            "date": target_date_text,
-            "provider": provider_name,
-            "profile_id": profile_id_from(config),
-            "profile_name": profile_name_from(config),
-            "config_version": config_version_from(config),
-            "candidate_count": len(candidates),
-            "candidates": candidates,
-        },
-    )
+    candidate_payload = {
+        "date": target_date_text,
+        "provider": provider_name,
+        "profile_id": profile_id_from(config),
+        "profile_name": profile_name_from(config),
+        "config_version": config_version_from(config),
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+        "market_coverage": screening_log["market_coverage"],
+    }
+    write_json(candidates_path, candidate_payload)
+    if BACKTEST_MODE_ACTIVE:
+        _save_common_processed_cache(config, "candidates", target_date_text, candidate_payload)
+        _link_profile_processed_cache_to_common(config, "candidates", target_date_text, candidates_path)
     save_screening_results(config, ROOT, screening_log)
 
     print(f"target stocks: {len(indicators)}")
     print(f"condition passed: {result['strict_passed_count']}")
+    print(f"market_filter_excluded: {market_filtered['excluded_count']}")
     print(f"fallback used: {result['fallback_used']}")
     print(f"candidates: {len(candidates)}")
+    if not indicators:
+        print("screen warning: indicator payload is empty; saved empty candidates.")
     print(f"screening saved: {screening_path.relative_to(ROOT)}")
     print(f"candidates saved: {candidates_path.relative_to(ROOT)}")
 
@@ -5325,6 +7067,26 @@ def enrich_indicators_with_sector_momentum(
     return enriched
 
 
+def _apply_market_section_filter(rows: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, Any]:
+    allowed = []
+    excluded = []
+    for row in rows:
+        section = market_section_from_row(row)
+        enriched = attach_market_section_fields(row, section)
+        if market_section_allowed(enriched, config):
+            allowed.append(enriched)
+        else:
+            excluded.append({**enriched, "rejected_reason": "market_filter_excluded"})
+    return {
+        "allowed": allowed,
+        "excluded": excluded,
+        "excluded_count": len(excluded),
+        "input_counts": market_section_counts(rows),
+        "allowed_counts": market_section_counts(allowed),
+        "excluded_counts": market_section_counts(excluded),
+    }
+
+
 def run_score(provider_name: str, target_date_text: str) -> None:
     if provider_name != "jquants":
         raise SystemExit("score mode currently supports --provider jquants only.")
@@ -5343,25 +7105,38 @@ def run_score(provider_name: str, target_date_text: str) -> None:
 
     payload = read_json(candidates_path)
     candidates = payload.get("candidates", [])
-    if not candidates:
-        raise SystemExit(f"No candidates found in {candidates_path.relative_to(ROOT)}.")
-
     market_context = load_market_context_for_date(target_date_text, provider_name)
     target_date = date.fromisoformat(target_date_text)
-    earnings_payload = _load_earnings_calendar_for_date(target_date, config)
-    if config.get("earnings_filter", {}).get("enabled") and earnings_payload["metadata"].get("filter_available", False):
-        config["_earnings_calendar_records"] = earnings_payload["records"]
-    config["_earnings_calendar_metadata"] = earnings_payload["metadata"]
-    investor_context_payload = _load_investor_context_for_date(target_date, config)
-    config["_investor_context"] = investor_context_payload["context"]
-    config["_investor_context_metadata"] = investor_context_payload["metadata"]
-    scoring_log = score_real_candidates(
-        candidates,
-        target_date_text,
-        config,
-        provider_name,
-        market_context=market_context,
-    )
+    if candidates:
+        earnings_payload = _load_earnings_calendar_for_date(target_date, config)
+        if config.get("earnings_filter", {}).get("enabled") and earnings_payload["metadata"].get("filter_available", False):
+            config["_earnings_calendar_records"] = earnings_payload["records"]
+        config["_earnings_calendar_metadata"] = earnings_payload["metadata"]
+        investor_context_payload = _load_investor_context_for_date(target_date, config)
+        config["_investor_context"] = investor_context_payload["context"]
+        config["_investor_context_metadata"] = investor_context_payload["metadata"]
+        scoring_log = score_real_candidates(
+            candidates,
+            target_date_text,
+            config,
+            provider_name,
+            market_context=market_context,
+        )
+    else:
+        earnings_payload = {"records": [], "metadata": {"filter_available": False, "skip_reason": "empty_candidates"}}
+        investor_context_payload = {"context": {}, "metadata": {"available": False, "skip_reason": "empty_candidates"}}
+        scoring_log = {
+            "date": target_date_text,
+            "provider": provider_name,
+            "scores": [],
+            "selected": [],
+            "candidate_count": 0,
+            "selected_count": 0,
+            "selection_config": {},
+            "market_context": market_context,
+            "market_filter": {},
+            "skip_reason": "empty_candidates",
+        }
     scoring_log["earnings_calendar"] = earnings_payload.get("metadata", {})
     scoring_log["investor_context"] = investor_context_payload.get("metadata", {})
     attach_config_version(scoring_log, config)
@@ -5392,6 +7167,11 @@ def run_score(provider_name: str, target_date_text: str) -> None:
             "selection_config": scoring_log.get("selection_config", {}),
             "market_context": scoring_log.get("market_context", {}),
             "market_filter": scoring_log.get("market_filter", {}),
+            "market_coverage": {
+                "candidate_count": market_section_counts(scores),
+                "selected_count": market_section_counts(selected),
+                "market_filter_excluded_count": (scoring_log.get("market_filter", {}) or {}).get("market_filter_excluded_count", 0),
+            },
             "ai_decision": scoring_log.get("ai_decision", {}),
             "scores": _scores_for_storage(scores, config),
         },
@@ -5405,6 +7185,7 @@ def run_score(provider_name: str, target_date_text: str) -> None:
     print(f"scored: {len(scores)}")
     print(f"selected: {len(selected)}")
     print(f"highest_score: {highest_score}")
+    print(f"storage_mode: {_storage_save_mode(config)}")
     if len(storage_scoring_log.get("scores", [])) != len(scores):
         print(f"scoring storage: saved {len(storage_scoring_log.get('scores', []))}/{len(scores)} scores (rejected candidate detail disabled)")
     if ai_decision_log:
@@ -5574,10 +7355,11 @@ def run_trade(provider_name: str, target_date_text: str) -> None:
         for trade in trades:
             trade.setdefault("config_version", config_version_from(config))
         if not _round_lot_cache_is_stale(config, state, trades):
-            write_json(trades_path, {"date": target_date_text, "provider": provider_name, "profile_id": profile_id_from(config), "profile_name": profile_name_from(config), "config_version": config_version_from(config), "trades": trades})
+            storage_trades = _trades_for_storage(trades, config)
+            write_json(trades_path, {"date": target_date_text, "provider": provider_name, "profile_id": profile_id_from(config), "profile_name": profile_name_from(config), "config_version": config_version_from(config), "storage_mode": _storage_save_mode(config), "trades": storage_trades})
             write_json(portfolio_path, portfolio_summary)
             save_portfolio_snapshot(config, ROOT, portfolio_summary)
-            save_trades(config, ROOT, target_date_text, trades)
+            save_trades(config, ROOT, target_date_text, storage_trades)
             save_pending_orders(config, ROOT, state.get("pending_orders", []))
             selected_count = scored_payload.get("selected_count", sum(1 for item in scored_candidates if item.get("selected")))
             print(f"date: {target_date_text}")
@@ -5598,18 +7380,20 @@ def run_trade(provider_name: str, target_date_text: str) -> None:
         trade.setdefault("config_version", config_version_from(config))
 
     write_json(state_path, updated_state)
+    storage_trades = _trades_for_storage(trades, config)
     write_json(
         trades_path,
         {
             "date": target_date_text,
             "provider": provider_name,
             "config_version": config_version_from(config),
-            "trades": trades,
+            "storage_mode": _storage_save_mode(config),
+            "trades": storage_trades,
         },
     )
     write_json(portfolio_path, portfolio_summary)
     save_portfolio_snapshot(config, ROOT, portfolio_summary)
-    save_trades(config, ROOT, target_date_text, trades)
+    save_trades(config, ROOT, target_date_text, storage_trades)
     save_pending_orders(config, ROOT, updated_state.get("pending_orders", []))
 
     selected_count = sum(1 for item in scored_candidates if item.get("selected"))
@@ -6423,7 +8207,17 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
         print(f"- indicator_fetch_start_date: {indicator_fetch_start_date.isoformat()}")
         print(f"- indicator_fetch_lookback_days: {_backtest_indicator_fetch_lookback_days(config)}")
         print(f"- indicator_min_history_days: {_backtest_indicator_min_history_days(config)}")
-        _run_daily_step(1, 3, "fetch-period-prices", lambda: ensure_price_history_for_backtest(provider_name, indicator_fetch_start_date, end_date))
+        price_fetch_audit = _run_daily_step(
+            1,
+            3,
+            "fetch-period-prices",
+                lambda: ensure_price_history_for_backtest(
+                    provider_name,
+                    indicator_fetch_start_date,
+                    end_date,
+                    start_date,
+                ),
+        )
         trading_dates = _run_daily_step(2, 3, "detect-trading-days", lambda: available_cached_price_dates(start_date, end_date))
         if not trading_dates:
             raise SystemExit("No cached trading days found for the backtest period. The period may be weekend, holiday, or unavailable.")
@@ -6436,6 +8230,12 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
         print(f"backtest news fetch: {'disabled' if _backtest_disable_news(config) else 'enabled'}")
         print(f"backtest OpenAI: {'disabled' if _backtest_disable_openai(config) else 'configured by profile'}")
         print(f"backtest indicator_mode: {_backtest_indicator_mode(config)}")
+        execution_model = _backtest_execution_model(config)
+        print("backtest execution model:")
+        print(f"- signal_timing: {execution_model['signal_timing']}")
+        print(f"- entry_timing: {execution_model['entry_timing']}")
+        print(f"- entry_price_source: {execution_model['entry_price_source']}")
+        print(f"- same_day_execution: {execution_model['same_day_execution']}")
         print(f"backtest relative_strength: {'enabled' if _relative_strength_enabled_for_indicators(config) else 'disabled'}")
         print(f"backtest fast_analysis: {'enabled' if _fast_analysis_enabled(config) else 'disabled'}")
         _preload_light_api_context(config, start_date, end_date, indicator_fetch_start_date=indicator_fetch_start_date)
@@ -6445,7 +8245,11 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
             BACKTEST_DAY_LOG_PREFIX = f"[day {index}/{len(trading_dates)}] {target_date_text}"
             print(f"[day {index}/{len(trading_dates)}] {target_date_text} start")
             has_history, indicator_input_days, indicator_min_days = _has_minimum_indicator_history(indicator_fetch_start_date, trading_date, config)
-            if not has_history:
+            indicator_cache_exists = (
+                processed_profile_path(config, f"indicators_{target_date_text}.json").exists()
+                or (ROOT / "data" / "processed" / f"indicators_{target_date_text}.json").exists()
+            )
+            if not has_history and not indicator_cache_exists:
                 print(
                     f"[day {index}/{len(trading_dates)}] {target_date_text} warning: "
                     f"indicator history insufficient; input_days={indicator_input_days} "
@@ -6453,29 +8257,59 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
                 )
                 skipped_days.append({"date": target_date_text, "reason": "insufficient_indicator_history"})
                 continue
+            if not has_history and indicator_cache_exists:
+                print(
+                    f"[day {index}/{len(trading_dates)}] {target_date_text} warning: "
+                    f"indicator history insufficient; input_days={indicator_input_days} "
+                    f"min_required={indicator_min_days}, but cached indicator payload exists. continuing to screen empty stage if needed."
+                )
             _run_backtest_day_step(index, len(trading_dates), target_date_text, "calculate-indicators", lambda: ensure_indicators(provider_name, target_date_text), lambda: _backtest_indicator_metrics(target_date_text))
             if not _indicator_payload_has_rows(config, target_date_text):
                 print(
                     f"[day {index}/{len(trading_dates)}] {target_date_text} warning: "
-                    "indicator payload is empty after calculation; skipping day."
+                    "indicator payload is empty after calculation; continuing with empty candidates/scored_candidates."
                 )
-                skipped_days.append({"date": target_date_text, "reason": "empty_indicator_payload"})
-                continue
             _run_backtest_day_step(index, len(trading_dates), target_date_text, "market-context", lambda: ensure_market_context(provider_name, target_date_text), lambda: _backtest_market_context_metrics(target_date_text))
-            _run_backtest_day_step(index, len(trading_dates), target_date_text, "screen", lambda: run_screen(provider_name, target_date_text), lambda: _backtest_screen_metrics(config, target_date_text))
+            screen_step = ensure_screen if RUN_EXPERIMENTS_SHARED_STAGE_ACTIVE else run_screen
+            _run_backtest_day_step(index, len(trading_dates), target_date_text, "screen", lambda: screen_step(provider_name, target_date_text), lambda: _backtest_screen_metrics(config, target_date_text))
             scoring_log = _run_backtest_day_step(index, len(trading_dates), target_date_text, "score", lambda: score_for_date(provider_name, target_date_text), lambda: _backtest_score_metrics(config, target_date_text))
+            scoring_log["signal_date"] = target_date_text
+            for key in ("scores", "selected"):
+                for row in scoring_log.get(key, []):
+                    row.setdefault("signal_date", target_date_text)
             _run_backtest_day_step(index, len(trading_dates), target_date_text, "ai-decision", lambda: _backtest_ai_decision_status(scoring_log, config), lambda: _backtest_ai_decision_metrics(scoring_log))
 
             trade_context: dict[str, Any] = {}
+            entry_date = _entry_date_for_signal(trading_date, trading_dates, config)
+            if entry_date is None:
+                print(
+                    f"[day {index}/{len(trading_dates)}] {target_date_text} warning: "
+                    "entry date not found after signal date; trade execution skipped."
+                )
+                skipped_days.append({"date": target_date_text, "reason": "missing_entry_date"})
+                continue
+            entry_date_text = entry_date.isoformat()
 
             def run_trade_step() -> dict[str, Any]:
                 nonlocal state
-                scored_candidates = enrich_candidates_with_position_prices(scoring_log.get("scores", []), state, target_date_text)
-                state, portfolio_summary, trades = execute_real_data_paper_trade(scored_candidates, state, config, target_date_text)
+                execution_scores = _prepare_execution_candidates(scoring_log.get("scores", []), target_date_text, entry_date_text, config)
+                scored_candidates = enrich_candidates_with_position_prices(execution_scores, state, entry_date_text)
+                trade_config = {
+                    **config,
+                    "execution": {**config.get("execution", {}), "use_next_day_open_execution": False},
+                }
+                state, portfolio_summary, trades = execute_real_data_paper_trade(scored_candidates, state, trade_config, entry_date_text)
+                portfolio_summary["signal_date"] = target_date_text
+                portfolio_summary["entry_date"] = entry_date_text
+                portfolio_summary["entry_price_source"] = _backtest_execution_model(config)["entry_price_source"]
                 attach_config_version(portfolio_summary, config)
                 for trade in trades:
+                    trade.setdefault("signal_date", target_date_text)
+                    trade.setdefault("entry_price_source", _backtest_execution_model(config)["entry_price_source"])
                     trade.setdefault("config_version", config_version_from(config))
                 scoring_log.setdefault("config_version", config_version_from(config))
+                scoring_log["entry_date"] = entry_date_text
+                scoring_log["entry_price_source"] = _backtest_execution_model(config)["entry_price_source"]
                 attach_commentary(portfolio_summary, trades, scored_candidates, config)
                 safety_events = portfolio_summary.get("safety_events", [])
                 trade_result = {
@@ -6515,12 +8349,25 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
             trades = trade_context["trades"]
 
             def run_db_save_step() -> None:
-                write_json(backtest_dir / f"trades_{target_date_text}.json", {"date": target_date_text, "provider": provider_name, "config_version": config_version_from(config), "trades": trades})
+                storage_trades = _trades_for_storage(trades, config)
+                storage_scoring_log = _scoring_log_for_storage(scoring_log, config)
+                write_json(
+                    backtest_dir / f"trades_{target_date_text}.json",
+                    {
+                        "date": target_date_text,
+                        "signal_date": target_date_text,
+                        "entry_date": entry_date_text,
+                        "provider": provider_name,
+                        "config_version": config_version_from(config),
+                        "storage_mode": _storage_save_mode(config),
+                        "trades": storage_trades,
+                    },
+                )
                 write_json(backtest_dir / f"portfolio_{target_date_text}.json", portfolio_summary)
                 write_json(backtest_dir / f"safety_{target_date_text}.json", {"date": target_date_text, "config_version": config_version_from(config), "safety_events": trade_result.get("safety_events", [])})
-                write_json(backtest_dir / f"scoring_{target_date_text}.json", scoring_log)
+                write_json(backtest_dir / f"scoring_{target_date_text}.json", storage_scoring_log)
                 save_portfolio_snapshot(config, ROOT, portfolio_summary)
-                save_trades(config, ROOT, target_date_text, trades)
+                save_trades(config, ROOT, entry_date_text, storage_trades)
                 save_pending_orders(config, ROOT, state.get("pending_orders", []))
                 save_safety_events(config, ROOT, target_date_text, trade_result.get("safety_events", []))
 
@@ -6555,7 +8402,7 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
                         **runtime_resolution,
                         "requested_start_date": requested_start_date.isoformat(),
                         "requested_end_date": requested_end_text,
-                        "effective_start_date": start_date.isoformat(),
+                        "effective_start_date": (trading_dates[0].isoformat() if trading_dates else start_date.isoformat()),
                         "effective_end_date": end_date.isoformat(),
                     },
                     build_backtest_date_range_audit(
@@ -6570,6 +8417,7 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
                         processed_dates=processed_dates,
                         skipped_days=skipped_days,
                         all_trades=all_trades,
+                        price_fetch_audit=price_fetch_audit,
                     ),
                 )
             ),
@@ -6605,6 +8453,24 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
         print(f"- processed_days: {audit.get('processed_days')}")
         print(f"- last_processed_day: {audit.get('last_processed_day')}")
         print(f"- coverage_ok: {((audit.get('data_coverage') or {}).get('prices') or {}).get('coverage_ok')}")
+        execution_audit = audit.get("backtest_execution_audit", {})
+        if execution_audit:
+            print("Backtest Execution Audit")
+            print(f"- status: {execution_audit.get('status')}")
+            print(f"- last_processed_day: {execution_audit.get('last_processed_day')}")
+            print(f"- last_candidate_date: {execution_audit.get('last_candidate_date')}")
+            print(f"- last_scored_candidate_date: {execution_audit.get('last_scored_candidate_date')}")
+            print(f"- last_trade_date: {execution_audit.get('last_trade_date')}")
+            print(f"- date_range_limited_reason: {execution_audit.get('date_range_limited_reason')}")
+        coverage_audit = audit.get("backtest_coverage_audit", {})
+        if coverage_audit:
+            print("Backtest Coverage Audit")
+            print(f"- first_candidate_date: {coverage_audit.get('first_candidate_date')}")
+            print(f"- first_trade_date: {coverage_audit.get('first_trade_date')}")
+            print(f"- candidate_days: {coverage_audit.get('candidate_days')}")
+            print(f"- trade_days: {coverage_audit.get('trade_days')}")
+            print(f"- coverage_ratio: {_format_optional_percent(coverage_audit.get('coverage_ratio'))}")
+            print(f"- coverage_warning: {coverage_audit.get('coverage_warning') or '-'}")
     print(f"processed_days: {len(processed_dates)}")
     print(f"final_assets: {summary['final_assets']}")
     print(f"cumulative_profit: {summary['cumulative_profit']}")
@@ -6826,12 +8692,109 @@ def _backtest_disable_openai(config: dict[str, Any]) -> bool:
 
 
 def _fast_analysis_enabled(config: dict[str, Any]) -> bool:
-    return FAST_ANALYSIS_ACTIVE or bool(config.get("backtest", {}).get("fast_analysis")) or bool(config.get("analysis", {}).get("fast_analysis"))
+    return SUMMARY_ONLY_ACTIVE or FAST_ANALYSIS_ACTIVE or bool(config.get("backtest", {}).get("fast_analysis")) or bool(config.get("analysis", {}).get("fast_analysis"))
 
 
 def _backtest_indicator_mode(config: dict[str, Any]) -> str:
     mode = str(config.get("backtest", {}).get("indicator_mode", "fast"))
     return mode if mode in {"full", "fast", "minimal"} else "fast"
+
+
+def _normalize_entry_timing(value: Any) -> str:
+    timing = str(value or "next_business_day_open").strip().lower().replace("-", "_")
+    if timing in {"same_day_close", "next_business_day_open", "next_business_day_close"}:
+        return timing
+    return "next_business_day_open"
+
+
+def _backtest_execution_model(config: dict[str, Any]) -> dict[str, Any]:
+    backtest = config.get("backtest", {})
+    entry_timing = _normalize_entry_timing(backtest.get("entry_timing", "next_business_day_open"))
+    if entry_timing in {"same_day_close", "next_business_day_close"}:
+        entry_price_source = "close"
+    else:
+        entry_price_source = str(backtest.get("entry_price_source", "open") or "open").lower()
+        if entry_price_source not in {"open", "close"}:
+            entry_price_source = "open"
+    return {
+        "signal_timing": "after_close",
+        "entry_timing": entry_timing,
+        "entry_price_source": entry_price_source,
+        "same_day_execution": entry_timing == "same_day_close",
+    }
+
+
+def _entry_date_for_signal(signal_date: date, trading_dates: list[date], config: dict[str, Any]) -> date | None:
+    if _backtest_execution_model(config)["entry_timing"] == "same_day_close":
+        return signal_date
+    for trading_date in trading_dates:
+        if trading_date > signal_date:
+            return trading_date
+    return None
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _prepare_execution_candidates(
+    scored_candidates: list[dict[str, Any]],
+    signal_date_text: str,
+    entry_date_text: str,
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    model = _backtest_execution_model(config)
+    price_source = model["entry_price_source"]
+    entry_prices = {str(item.get("code")): item for item in load_cached_prime_prices(date.fromisoformat(entry_date_text))}
+    prepared: list[dict[str, Any]] = []
+    for item in scored_candidates:
+        code = str(item.get("code"))
+        market = entry_prices.get(code)
+        signal_close = _safe_float(item.get("close"))
+        row = dict(item)
+        row["signal_date"] = signal_date_text
+        row["entry_date"] = entry_date_text
+        row["entry_price_source"] = price_source
+        row["signal_close_price"] = signal_close
+        if market:
+            entry_open = _safe_float(market.get("open"))
+            entry_close = _safe_float(market.get("close"))
+            entry_price = entry_open if price_source == "open" else entry_close
+            row.update(
+                {
+                    "execution_date": entry_date_text,
+                    "open": market.get("open"),
+                    "high": market.get("high"),
+                    "low": market.get("low"),
+                    "close": market.get("close"),
+                    "volume": market.get("volume", row.get("volume")),
+                    "entry_price": entry_price,
+                    "entry_open_price": entry_open,
+                    "entry_close_price": entry_close,
+                    "entry_gap_rate": round((entry_open - signal_close) / signal_close, 4)
+                    if entry_open is not None and signal_close
+                    else None,
+                    "entry_price_available": entry_price is not None,
+                }
+            )
+        else:
+            row.update(
+                {
+                    "execution_date": entry_date_text,
+                    "entry_price": None,
+                    "entry_open_price": None,
+                    "entry_close_price": None,
+                    "entry_gap_rate": None,
+                    "entry_price_available": False,
+                }
+            )
+        prepared.append(row)
+    return prepared
 
 
 def _backtest_indicator_fetch_lookback_days(config: dict[str, Any]) -> int:
@@ -6965,7 +8928,17 @@ def ensure_indicators(provider_name: str, target_date_text: str) -> None:
         if _indicator_cache_matches_current_scoring(payload, config, indicator_mode, enable_relative_strength):
             _ensure_relative_strength_benchmark_cache(config, date.fromisoformat(target_date_text), indicator_mode, enable_relative_strength)
             write_json(path, payload)
+            _save_common_processed_cache(config, "indicators", target_date_text, payload)
+            _link_profile_processed_cache_to_common(config, "indicators", target_date_text, profile_path)
+            COMMON_CACHE_METRICS["profile_specific_cache_count"] = COMMON_CACHE_METRICS.get("profile_specific_cache_count", 0) + 1
             print(f"{BACKTEST_DAY_LOG_PREFIX} indicators cache hit: {profile_path.relative_to(ROOT)}")
+            return
+    if BACKTEST_MODE_ACTIVE and _restore_common_processed_cache(config, "indicators", target_date_text, profile_path):
+        payload = read_json(profile_path)
+        if _indicator_cache_matches_current_scoring(payload, config, indicator_mode, enable_relative_strength):
+            _ensure_relative_strength_benchmark_cache(config, date.fromisoformat(target_date_text), indicator_mode, enable_relative_strength)
+            write_json(path, payload)
+            print(f"{BACKTEST_DAY_LOG_PREFIX} indicators common cache hit: {profile_path.relative_to(ROOT)}")
             return
     if path.exists() and not BACKTEST_MODE_ACTIVE:
         return
@@ -6985,6 +8958,14 @@ def ensure_screen(provider_name: str, target_date_text: str) -> None:
         payload = read_json(screening_path) if screening_path.exists() else read_json(path)
         payload.setdefault("config_version", config_version_from(config))
         save_screening_results(config, ROOT, payload)
+        _save_common_processed_cache(config, "candidates", target_date_text, read_json(path))
+        _link_profile_processed_cache_to_common(config, "candidates", target_date_text, path)
+        COMMON_CACHE_METRICS["profile_specific_cache_count"] = COMMON_CACHE_METRICS.get("profile_specific_cache_count", 0) + 1
+        return
+    if BACKTEST_MODE_ACTIVE and _restore_common_processed_cache(config, "candidates", target_date_text, path):
+        payload = read_json(path)
+        save_screening_results(config, ROOT, payload)
+        print(f"{BACKTEST_DAY_LOG_PREFIX} candidates common cache hit: {path.relative_to(ROOT)}")
         return
     run_screen(provider_name, target_date_text)
 
@@ -7010,6 +8991,9 @@ def ensure_score(provider_name: str, target_date_text: str) -> dict[str, Any]:
 
 
 def score_for_date(provider_name: str, target_date_text: str) -> dict[str, Any]:
+    copied = _copy_reusable_scoring_for_active_profile(target_date_text)
+    if copied is not None:
+        return copied
     run_score(provider_name, target_date_text)
     config = load_config(CONFIG_PATH)
     scoring_path = ROOT / "logs" / "scoring" / profile_id_from(config) / f"scoring_{target_date_text}.json"
@@ -7024,8 +9008,111 @@ def score_for_date(provider_name: str, target_date_text: str) -> dict[str, Any]:
     }
 
 
+def _copy_reusable_scoring_for_active_profile(target_date_text: str) -> dict[str, Any] | None:
+    if not RUN_EXPERIMENTS_SHARED_STAGE_ACTIVE:
+        return None
+    target_config = load_config(CONFIG_PATH)
+    target_profile_id = profile_id_from(target_config)
+    source_profile_id = RUN_EXPERIMENTS_SCORING_REUSE_SOURCE_BY_PROFILE.get(target_profile_id)
+    if not source_profile_id:
+        return None
+    source_config = load_profile(source_profile_id)
+    source_processed = processed_profile_path(source_config, f"scored_candidates_{target_date_text}.json")
+    source_log = ROOT / "logs" / "scoring" / source_profile_id / f"scoring_{target_date_text}.json"
+    if not source_processed.exists() or not source_log.exists():
+        return None
+    target_processed = processed_profile_path(target_config, f"scored_candidates_{target_date_text}.json")
+    target_log = ROOT / "logs" / "scoring" / target_profile_id / f"scoring_{target_date_text}.json"
+    processed_payload = _with_profile_metadata(read_json(source_processed), target_config)
+    scoring_payload = _with_profile_metadata(read_json(source_log), target_config)
+    write_json(target_processed, processed_payload)
+    write_json(target_log, scoring_payload)
+    save_scoring_results(
+        target_config,
+        ROOT,
+        {
+            "date": scoring_payload.get("date", target_date_text),
+            "config_version": scoring_payload.get("config_version"),
+            "source_provider": scoring_payload.get("source_provider", "jquants"),
+            "scores": scoring_payload.get("scores", []),
+        },
+    )
+    RUN_EXPERIMENTS_PERFORMANCE_REPORT["reused_scoring_count"] = int(RUN_EXPERIMENTS_PERFORMANCE_REPORT.get("reused_scoring_count", 0) or 0) + 1
+    return {
+        **scoring_payload,
+        "candidate_count": processed_payload.get("candidate_count", len(scoring_payload.get("scores", []))),
+        "scored_count": processed_payload.get("scored_count", len(scoring_payload.get("scores", []))),
+        "selected_count": processed_payload.get("selected_count", len(scoring_payload.get("selected", []))),
+    }
+
+
 def _save_rejected_candidates(config: dict[str, Any]) -> bool:
     return bool(config.get("analysis", {}).get("save_rejected_candidates", True))
+
+
+def _storage_save_mode(config: dict[str, Any]) -> str:
+    mode = str(config.get("storage", {}).get("save_mode") or "analysis")
+    return mode if mode in {"full_debug", "analysis", "compact"} else "analysis"
+
+
+RUNTIME_SCORE_FIELDS = {
+    "code", "name", "sector_name", "section", "market_section", "listing_market",
+    "date", "open", "high", "low", "close", "volume", "ma5", "ma25", "rsi",
+    "volume_ratio", "turnover_value", "total_score", "technical_score",
+    "confidence", "rank", "selected", "reason", "score_reason",
+    "selection_reason", "selected_reason", "rejected_reason", "fallback",
+    "candlestick_signals", "candlestick_score", "trend_score", "ma_score",
+    "volume_score", "rsi_score", "market_context_score", "sector_score",
+    "penalty_score", "score_components_total", "score_components_match",
+    "market_regime", "market_filter_applied", "market_filter_reason",
+    "source_provider", "config_version",
+}
+
+ANALYSIS_SCORE_FIELDS = RUNTIME_SCORE_FIELDS | {
+    "sector_momentum_score", "sector_rank", "sector_comment", "sector_score_adjustment",
+    "five_day_volatility", "five_day_change_rate",
+    "stock_return_5d", "stock_return_10d", "stock_return_20d",
+    "benchmark_source", "benchmark_return_5d", "benchmark_return_10d", "benchmark_return_20d",
+    "relative_strength_5d", "relative_strength_10d", "relative_strength_20d",
+    "relative_strength_score", "topix_records_loaded", "topix_api_calls",
+    "investor_context_source", "investor_context_week", "overseas_net_buy",
+    "overseas_net_buy_4w_sum", "overseas_net_buy_4w_trend", "overseas_buy_sell_ratio",
+    "individual_net_buy", "institution_net_buy", "trust_bank_net_buy",
+    "proprietary_net_buy", "investor_context_score",
+    "candle_type", "candle_body_rate", "upper_shadow_rate", "lower_shadow_rate",
+    "close_position_in_range", "gap_rate",
+    "earnings_filter_checked", "earnings_filter_blocked", "earnings_filter_reason",
+    "earnings_announcement_date", "earnings_calendar_records_count",
+    "earnings_info_found", "earnings_candidate_date", "earnings_days_until_earnings",
+}
+
+RUNTIME_TRADE_FIELDS = {
+    "trade_id", "profile_id", "profile_name", "action", "code", "name", "sector_name",
+    "signal_date", "entry_date", "exit_date", "holding_days", "entry_price",
+    "entry_price_source", "signal_close_price", "entry_open_price", "entry_gap_rate",
+    "exit_price", "shares", "amount", "profit", "profit_rate", "exit_reason",
+    "result", "score", "total_score", "technical_score", "rsi", "volume_ratio",
+    "selected_reason", "reason", "broker_provider", "order_status", "status",
+    "config_version",
+}
+
+ANALYSIS_TRADE_FIELDS = RUNTIME_TRADE_FIELDS | {
+    "stock_return_5d", "stock_return_10d", "stock_return_20d",
+    "benchmark_source", "benchmark_return_5d", "benchmark_return_10d", "benchmark_return_20d",
+    "relative_strength_5d", "relative_strength_10d", "relative_strength_20d",
+    "relative_strength_score", "topix_records_loaded", "topix_api_calls",
+    "investor_context_source", "investor_context_week", "overseas_net_buy",
+    "overseas_net_buy_4w_sum", "overseas_net_buy_4w_trend", "investor_context_score",
+    "ma_score", "rsi_score", "volume_score", "candlestick_score",
+    "market_context_score", "sector_score", "penalty_score",
+    "score_components_total", "score_components_match", "market_regime",
+    "advance_ratio", "candlestick_signals",
+    "earnings_filter_checked", "earnings_filter_blocked", "earnings_filter_reason",
+    "earnings_announcement_date", "earnings_info_found", "earnings_candidate_date",
+    "earnings_days_until_earnings", "gross_profit", "gross_profit_rate",
+    "buy_commission", "sell_commission", "total_commission", "estimated_tax",
+    "net_profit", "net_profit_rate",
+}
 
 
 def _save_backtest_daily_reports(config: dict[str, Any]) -> bool:
@@ -7037,6 +9124,8 @@ def _reporting_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _generate_articles_in_backtest(config: dict[str, Any]) -> bool:
+    if SUMMARY_ONLY_ACTIVE:
+        return False
     reporting = _reporting_config(config)
     if "generate_articles_in_backtest" in reporting:
         return bool(reporting.get("generate_articles_in_backtest"))
@@ -7044,6 +9133,8 @@ def _generate_articles_in_backtest(config: dict[str, Any]) -> bool:
 
 
 def _generate_backtest_daily_markdown(config: dict[str, Any]) -> bool:
+    if SUMMARY_ONLY_ACTIVE:
+        return False
     reporting = _reporting_config(config)
     if "generate_daily_markdown_in_backtest" in reporting:
         return bool(reporting.get("generate_daily_markdown_in_backtest"))
@@ -7051,21 +9142,60 @@ def _generate_backtest_daily_markdown(config: dict[str, Any]) -> bool:
 
 
 def _scores_for_storage(scores: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
-    if _save_rejected_candidates(config):
-        return scores
-    return [item for item in scores if item.get("selected")]
+    mode = _storage_save_mode(config)
+    if mode == "full_debug":
+        rows = scores
+    elif mode == "compact":
+        rows = [item for item in scores if item.get("selected") or _is_always_saved_rejected_score(item)]
+    elif _save_rejected_candidates(config):
+        rows = scores
+    else:
+        rows = [item for item in scores if item.get("selected") or _is_always_saved_rejected_score(item)]
+    return [_score_row_for_storage(item, mode) for item in rows]
+
+
+def _score_row_for_storage(item: dict[str, Any], mode: str) -> dict[str, Any]:
+    if mode == "full_debug":
+        return dict(item)
+    fields = RUNTIME_SCORE_FIELDS if mode == "compact" else ANALYSIS_SCORE_FIELDS
+    return {key: item.get(key) for key in fields if key in item}
+
+
+def _trades_for_storage(trades: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
+    mode = _storage_save_mode(config)
+    if mode == "full_debug":
+        return trades
+    fields = RUNTIME_TRADE_FIELDS if mode == "compact" else ANALYSIS_TRADE_FIELDS
+    return [{key: trade.get(key) for key in fields if key in trade} for trade in trades]
+
+
+def _is_always_saved_rejected_score(item: dict[str, Any]) -> bool:
+    return str(item.get("rejected_reason") or item.get("reason") or "") == "investor_context_negative"
 
 
 def _scoring_log_for_storage(scoring_log: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
-    if _save_rejected_candidates(config):
+    mode = _storage_save_mode(config)
+    if mode == "full_debug" and _save_rejected_candidates(config):
         return scoring_log
     scores = _scores_for_storage(scoring_log.get("scores", []), config)
+    omitted = len(scoring_log.get("scores", [])) - len(scores)
     return {
         **scoring_log,
+        "storage_mode": mode,
         "scores": scores,
-        "rejected_candidate_detail_saved": False,
-        "storage_note": "Rejected candidate details were omitted because analysis.save_rejected_candidates=false.",
+        "selected": [item for item in scores if item.get("selected")],
+        "rejected_candidate_detail_saved": mode == "analysis" and _save_rejected_candidates(config),
+        "storage_omitted_score_count": omitted,
+        "storage_note": _storage_note(mode, omitted),
     }
+
+
+def _storage_note(mode: str, omitted: int) -> str:
+    if mode == "full_debug":
+        return "Full debug storage keeps all score fields and rows."
+    if mode == "compact":
+        return f"Compact storage keeps selected and important rejected rows only; omitted={omitted}."
+    return "Analysis storage prunes debug-only fields while keeping analysis rows."
 
 
 def attach_commentary(
@@ -7121,11 +9251,12 @@ def execute_trade_for_date(provider_name: str, target_date_text: str) -> dict[st
             attach_commentary(portfolio_summary, cached_trades, scored_candidates, config)
             for trade in cached_trades:
                 trade.setdefault("config_version", config_version_from(config))
-            write_json(trades_path, {"date": target_date_text, "provider": provider_name, "profile_id": profile_id_from(config), "profile_name": profile_name_from(config), "config_version": config_version_from(config), "trades": cached_trades})
+            storage_trades = _trades_for_storage(cached_trades, config)
+            write_json(trades_path, {"date": target_date_text, "provider": provider_name, "profile_id": profile_id_from(config), "profile_name": profile_name_from(config), "config_version": config_version_from(config), "storage_mode": _storage_save_mode(config), "trades": storage_trades})
             write_json(portfolio_path, portfolio_summary)
             write_json(safety_path, {"date": target_date_text, "provider": provider_name, "profile_id": profile_id_from(config), "profile_name": profile_name_from(config), "config_version": config_version_from(config), "safety_events": safety_events})
             save_portfolio_snapshot(config, ROOT, portfolio_summary)
-            save_trades(config, ROOT, target_date_text, cached_trades)
+            save_trades(config, ROOT, target_date_text, storage_trades)
             save_pending_orders(config, ROOT, state.get("pending_orders", []))
             save_safety_events(config, ROOT, target_date_text, safety_events)
             write_daily_ai_dataset(config, target_date_text)
@@ -7146,12 +9277,13 @@ def execute_trade_for_date(provider_name: str, target_date_text: str) -> dict[st
         trade.setdefault("config_version", config_version_from(config))
     attach_commentary(portfolio_summary, trades, scored_candidates, config)
 
+    storage_trades = _trades_for_storage(trades, config)
     write_json(state_path, updated_state)
-    write_json(trades_path, {"date": target_date_text, "provider": provider_name, "profile_id": profile_id_from(config), "profile_name": profile_name_from(config), "config_version": config_version_from(config), "trades": trades})
+    write_json(trades_path, {"date": target_date_text, "provider": provider_name, "profile_id": profile_id_from(config), "profile_name": profile_name_from(config), "config_version": config_version_from(config), "storage_mode": _storage_save_mode(config), "trades": storage_trades})
     write_json(portfolio_path, portfolio_summary)
     write_json(safety_path, {"date": target_date_text, "provider": provider_name, "profile_id": profile_id_from(config), "profile_name": profile_name_from(config), "config_version": config_version_from(config), "safety_events": portfolio_summary.get("safety_events", [])})
     save_portfolio_snapshot(config, ROOT, portfolio_summary)
-    save_trades(config, ROOT, target_date_text, trades)
+    save_trades(config, ROOT, target_date_text, storage_trades)
     save_pending_orders(config, ROOT, updated_state.get("pending_orders", []))
     save_safety_events(config, ROOT, target_date_text, portfolio_summary.get("safety_events", []))
     write_daily_ai_dataset(config, target_date_text)
@@ -7684,6 +9816,7 @@ def write_real_summary_csvs() -> tuple[Path, Path]:
 
 
 def load_trade_rows_for_csv(config: dict[str, Any], root: Path = ROOT) -> list[dict[str, Any]]:
+    initialize_database(config, root)
     db_path = get_database_path(config, root)
     if not db_path.exists():
         return []
@@ -7700,7 +9833,20 @@ def load_trade_rows_for_csv(config: dict[str, Any], root: Path = ROOT) -> list[d
             """,
             (profile_id_from(config),),
         ).fetchall()
-    return [dict(row) for row in rows]
+    return [_normalize_trade_row_for_csv(dict(row)) for row in rows]
+
+
+def _normalize_trade_row_for_csv(row: dict[str, Any]) -> dict[str, Any]:
+    if not row.get("signal_date"):
+        trade_id = str(row.get("trade_id") or "")
+        first_token = trade_id.split("_", 1)[0]
+        try:
+            date.fromisoformat(first_token)
+        except ValueError:
+            first_token = ""
+        if first_token and first_token != str(row.get("entry_date") or ""):
+            row["signal_date"] = first_token
+    return row
 
 
 def write_trades_csv_from_db(config: dict[str, Any], root: Path = ROOT) -> tuple[Path, int, int]:
@@ -7710,20 +9856,20 @@ def write_trades_csv_from_db(config: dict[str, Any], root: Path = ROOT) -> tuple
     return trades_csv, len(rows), count_csv_data_rows(trades_csv)
 
 
-def ensure_price_history_for_backtest(provider_name: str, start_date: date, end_date: date) -> None:
+def ensure_price_history_for_backtest(
+    provider_name: str,
+    start_date: date,
+    end_date: date,
+    price_fetch_min_start: date | None = None,
+) -> dict[str, Any]:
     if provider_name != "jquants":
         raise SystemExit("backtest mode currently supports --provider jquants only.")
 
-    target_dates = business_dates_between(start_date, end_date)
-    print(f"fetch-period-prices target period: {start_date.isoformat()} to {end_date.isoformat()}")
-    print(f"fetch-period-prices target business days: {len(target_dates)}")
-    if target_dates and all((ROOT / "data" / "processed" / f"indicators_{target.isoformat()}.json").exists() for target in target_dates):
-        print("backtest price history: using cached indicator files")
-        return
+    requested_start_date = start_date
 
-    prime_path = ROOT / "data" / "raw" / "prime_stocks_jquants.json"
-    if not prime_path.exists():
-        print("fetch-period-prices prime stock cache: missing; fetching J-Quants master")
+    stock_master_path = _listed_stock_master_path()
+    if not stock_master_path.exists():
+        print("fetch-period-prices listed stock cache: missing; fetching J-Quants master")
         try:
             run_list_stocks(provider_name)
         except (RuntimeError, SystemExit) as exc:
@@ -7733,24 +9879,62 @@ def ensure_price_history_for_backtest(provider_name: str, start_date: date, end_
                     "fetch-period-prices warning: prime stock master fetch failed; "
                     f"continuing with {len(cached_dates)} cached backtest day(s). reason={exc}"
                 )
-                return
+                return {
+                    "price_fetch_requested_start": requested_start_date.isoformat(),
+                    "price_fetch_clamped_start": start_date.isoformat(),
+                    "first_fetch_attempt_date": None,
+                    "target_business_days": len(cached_dates),
+                    "warning": str(exc),
+                }
             raise
 
-    prime_payload = read_json(prime_path)
-    prime_codes = {stock["code"] for stock in prime_payload.get("stocks", [])}
-    if not prime_codes:
-        raise SystemExit("Prime stock list is empty. Re-run list-stocks and check the result.")
-
     config = load_config(CONFIG_PATH)
-    effective_start_date = max(start_date, jquants_earliest_supported_date(config, "prices") or start_date)
+    stock_by_code = _allowed_stock_master_by_code(config)
+    prime_codes = set(stock_by_code)
+    if not prime_codes:
+        raise SystemExit(_market_filter_empty_message(config))
+    prices_supported_start = jquants_earliest_supported_date(config, "prices")
+    effective_start_date = max(
+        start_date,
+        price_fetch_min_start or start_date,
+        prices_supported_start or start_date,
+    )
     if effective_start_date != start_date:
         print(
-            "warning: requested start-date is before J-Quants supported range; "
+            "warning: price fetch start-date clamped; "
             f"requested={start_date.isoformat()} effective={effective_start_date.isoformat()}"
         )
         start_date = effective_start_date
-    lookback_start = previous_business_dates(start_date, 30)[0]
+    requested_lookback_start = previous_business_dates(start_date, 30)[0]
+    lookback_start = max(
+        requested_lookback_start,
+        price_fetch_min_start or requested_lookback_start,
+        prices_supported_start or requested_lookback_start,
+    )
+    if lookback_start != requested_lookback_start:
+        print(
+            "fetch-period-prices lookback clamped: "
+            f"requested_lookback_start={requested_lookback_start.isoformat()} "
+            f"effective_lookback_start={lookback_start.isoformat()}"
+        )
     fetch_dates = business_dates_between(lookback_start, end_date)
+    target_dates = business_dates_between(start_date, end_date)
+    first_fetch_attempt_date = fetch_dates[0].isoformat() if fetch_dates else None
+    audit = {
+        "price_fetch_requested_start": requested_start_date.isoformat(),
+        "price_fetch_min_start": price_fetch_min_start.isoformat() if price_fetch_min_start else None,
+        "price_fetch_clamped_start": lookback_start.isoformat(),
+        "first_fetch_attempt_date": first_fetch_attempt_date,
+        "price_fetch_end": end_date.isoformat(),
+        "target_business_days": len(fetch_dates),
+        "trade_business_days": len(target_dates),
+    }
+    print(f"price_fetch_requested_start: {audit['price_fetch_requested_start']}")
+    print(f"price_fetch_min_start: {audit['price_fetch_min_start'] or '-'}")
+    print(f"price_fetch_clamped_start: {audit['price_fetch_clamped_start']}")
+    print(f"first_fetch_attempt_date: {audit['first_fetch_attempt_date'] or '-'}")
+    print(f"fetch-period-prices target period: {lookback_start.isoformat()} to {end_date.isoformat()}")
+    print(f"fetch-period-prices target business days: {len(fetch_dates)}")
     cached_dates = [fetch_date for fetch_date in fetch_dates if load_cached_prime_prices(fetch_date) is not None]
     no_data_cache = load_no_data_days_cache()
     unsupported_cache = load_unsupported_days_cache()
@@ -7793,7 +9977,7 @@ def ensure_price_history_for_backtest(provider_name: str, start_date: date, end_
         print(f"fetch-period-prices skip unsupported cache: {fetch_date.isoformat()} reason={entry.get('reason', 'unknown')}")
     if fetch_dates and not missing_dates:
         print("backtest price history: using cached price files")
-        return
+        return audit
 
     try:
         provider = JQuantsDataProvider(
@@ -7811,7 +9995,8 @@ def ensure_price_history_for_backtest(provider_name: str, start_date: date, end_
                 "fetch-period-prices warning: J-Quants provider unavailable; "
                 f"continuing with {len(usable_dates)} cached backtest day(s). reason={exc}"
             )
-            return
+            audit["warning"] = str(exc)
+            return audit
         raise
     try:
         fetch_price_history(
@@ -7823,6 +10008,7 @@ def ensure_price_history_for_backtest(provider_name: str, start_date: date, end_
             fetch_dates=fetch_dates,
             continue_on_error=True,
             verbose=True,
+            stop_on_consecutive_unsupported=False,
         )
         _print_fetch_statistics(provider)
     except KeyboardInterrupt:
@@ -7836,8 +10022,9 @@ def ensure_price_history_for_backtest(provider_name: str, start_date: date, end_
             "fetch-period-prices completed with cached usable days: "
             f"{len(usable_dates)}/{len(target_dates)}"
         )
-        return
+        return audit
     print("fetch-period-prices completed, but no usable cached dates were found for the target period.")
+    return audit
 
 
 def available_cached_price_dates(start_date: date, end_date: date) -> list[date]:
@@ -7847,6 +10034,26 @@ def available_cached_price_dates(start_date: date, end_date: date) -> list[date]
         if cached_rows:
             dates.append(current)
     return dates
+
+
+def all_cached_price_dates() -> list[date]:
+    dates: set[date] = set()
+    for directory in [ROOT / "data" / "raw", ROOT / "data" / "cache" / "jquants" / "prices"]:
+        if not directory.exists():
+            continue
+        for path in directory.glob("prices_*.json"):
+            date_text = path.stem.removeprefix("prices_")
+            try:
+                dates.add(date.fromisoformat(date_text))
+            except ValueError:
+                continue
+        if directory.name == "prices":
+            for path in directory.glob("*.json"):
+                try:
+                    dates.add(date.fromisoformat(path.stem))
+                except ValueError:
+                    continue
+    return sorted(dates)
 
 
 def build_backtest_date_range_audit(
@@ -7862,6 +10069,7 @@ def build_backtest_date_range_audit(
     processed_dates: list[str],
     skipped_days: list[dict[str, str]],
     all_trades: list[dict[str, Any]],
+    price_fetch_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     expected_trading_days = business_dates_between(effective_trade_start_date, effective_trade_end_date)
     latest_available_price_date = price_history_dates[-1].isoformat() if price_history_dates else None
@@ -7873,6 +10081,28 @@ def build_backtest_date_range_audit(
             if value
         }
     )
+    processed_set = set(processed_dates)
+    missing_processed_dates = [item.isoformat() for item in trading_dates if item.isoformat() not in processed_set]
+    processed_data_audit = build_processed_data_audit(config, trading_dates)
+    coverage_audit = build_backtest_coverage_audit(
+        requested_start_date=requested_start_date,
+        requested_end_date=requested_end_date,
+        price_history_dates=price_history_dates,
+        trading_dates=trading_dates,
+        expected_trading_days=expected_trading_days,
+        processed_data_audit=processed_data_audit,
+        trade_dates=trade_dates,
+        price_fetch_audit=price_fetch_audit or {},
+    )
+    execution_audit = build_backtest_execution_audit(
+        processed_dates=processed_dates,
+        skipped_days=skipped_days,
+        trading_dates=trading_dates,
+        expected_trading_days=expected_trading_days,
+        processed_data_audit=processed_data_audit,
+        all_trades=all_trades,
+        effective_trade_end_date=effective_trade_end_date,
+    )
     coverage_ok = bool(latest_available_price_date and latest_available_price_date >= requested_end_date.isoformat())
     audit = {
         "requested_start_date": requested_start_date.isoformat(),
@@ -7880,12 +10110,23 @@ def build_backtest_date_range_audit(
         "effective_trade_start_date": effective_trade_start_date.isoformat(),
         "effective_trade_end_date": effective_trade_end_date.isoformat(),
         "indicator_fetch_start_date": indicator_fetch_start_date.isoformat(),
+        "price_fetch_requested_start": (price_fetch_audit or {}).get("price_fetch_requested_start"),
+        "price_fetch_clamped_start": (price_fetch_audit or {}).get("price_fetch_clamped_start"),
+        "first_fetch_attempt_date": (price_fetch_audit or {}).get("first_fetch_attempt_date"),
+        "raw_price_first_date": price_history_dates[0].isoformat() if price_history_dates else None,
+        "raw_price_last_date": latest_available_price_date,
         "first_price_date": price_history_dates[0].isoformat() if price_history_dates else None,
         "last_price_date": latest_available_price_date,
         "first_trading_day": trading_dates[0].isoformat() if trading_dates else None,
         "last_trading_day": trading_dates[-1].isoformat() if trading_dates else None,
         "target_trading_days": len(expected_trading_days),
+        "target_trading_days_source": "raw_price_cache",
         "detected_trading_days": len(trading_dates),
+        "processed_first_date": processed_dates[0] if processed_dates else None,
+        "processed_last_date": processed_dates[-1] if processed_dates else None,
+        "missing_processed_dates_count": len(missing_processed_dates),
+        "first_missing_processed_date": missing_processed_dates[0] if missing_processed_dates else None,
+        "last_missing_processed_date": missing_processed_dates[-1] if missing_processed_dates else None,
         "processed_days": len(processed_dates),
         "skipped_days": len(skipped_days),
         "skipped_day_details": skipped_days,
@@ -7907,6 +10148,9 @@ def build_backtest_date_range_audit(
             }
         },
         "hardcoded_date_audit": hardcoded_date_audit(),
+        "processed_data_audit": processed_data_audit,
+        "backtest_coverage_audit": coverage_audit,
+        "backtest_execution_audit": execution_audit,
     }
     if audit["last_processed_day"] and audit["last_processed_day"] < requested_end_date.isoformat():
         audit["effective_range_warning"] = (
@@ -7915,6 +10159,232 @@ def build_backtest_date_range_audit(
     else:
         audit["effective_range_warning"] = ""
     return audit
+
+
+def build_backtest_coverage_audit(
+    *,
+    requested_start_date: date,
+    requested_end_date: date,
+    price_history_dates: list[date],
+    trading_dates: list[date],
+    expected_trading_days: list[date],
+    processed_data_audit: dict[str, Any],
+    trade_dates: list[str],
+    price_fetch_audit: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    first_price_date = price_history_dates[0].isoformat() if price_history_dates else None
+    last_price_date = price_history_dates[-1].isoformat() if price_history_dates else None
+    raw_cache_dates = all_cached_price_dates()
+    raw_cache_first_date = raw_cache_dates[0].isoformat() if raw_cache_dates else None
+    raw_cache_last_date = raw_cache_dates[-1].isoformat() if raw_cache_dates else None
+    first_indicator_date = (
+        processed_data_audit.get("indicators_first_date_in_range")
+        or processed_data_audit.get("indicators_first_date")
+    )
+    last_indicator_date = (
+        processed_data_audit.get("indicators_last_date_in_range")
+        or processed_data_audit.get("indicators_last_date")
+    )
+    first_candidate_date = (
+        processed_data_audit.get("candidates_first_date_in_range")
+        or processed_data_audit.get("candidates_first_date")
+    )
+    last_candidate_date = (
+        processed_data_audit.get("candidates_last_date_in_range")
+        or processed_data_audit.get("candidates_last_date")
+    )
+    warnings = _backtest_coverage_warnings(
+        requested_start=requested_start_date.isoformat(),
+        requested_end=requested_end_date.isoformat(),
+        first_price=first_price_date,
+        last_price=last_price_date,
+        first_candidate=first_candidate_date,
+        last_candidate=last_candidate_date,
+        first_trade=trade_dates[0] if trade_dates else None,
+    )
+    coverage_ratio = round(len(trading_dates) / len(expected_trading_days), 4) if expected_trading_days else 0.0
+    return {
+        "requested_start_date": requested_start_date.isoformat(),
+        "requested_end_date": requested_end_date.isoformat(),
+        "price_fetch_requested_start": (price_fetch_audit or {}).get("price_fetch_requested_start"),
+        "price_fetch_clamped_start": (price_fetch_audit or {}).get("price_fetch_clamped_start"),
+        "first_fetch_attempt_date": (price_fetch_audit or {}).get("first_fetch_attempt_date"),
+        "actual_start_date": first_price_date,
+        "actual_end_date": last_price_date,
+        "raw_cache_first_date": raw_cache_first_date,
+        "raw_cache_last_date": raw_cache_last_date,
+        "first_price_date": first_price_date,
+        "last_price_date": last_price_date,
+        "first_indicator_date": first_indicator_date,
+        "last_indicator_date": last_indicator_date,
+        "first_candidate_date": first_candidate_date,
+        "last_candidate_date": last_candidate_date,
+        "first_trade_date": trade_dates[0] if trade_dates else None,
+        "last_trade_date": trade_dates[-1] if trade_dates else None,
+        "candidate_days": processed_data_audit.get("candidate_days_in_range", 0),
+        "trade_days": len(set(trade_dates)),
+        "price_days": len(trading_dates),
+        "expected_business_days": len(expected_trading_days),
+        "coverage_ratio": coverage_ratio,
+        "coverage_warnings": warnings,
+        "coverage_warning": "; ".join(warnings) if warnings else "",
+    }
+
+
+def _backtest_coverage_warnings(
+    *,
+    requested_start: str,
+    requested_end: str,
+    first_price: str | None,
+    last_price: str | None,
+    first_candidate: str | None,
+    last_candidate: str | None,
+    first_trade: str | None,
+) -> list[str]:
+    warnings: list[str] = []
+    if not first_price:
+        return ["no price data available"]
+    if requested_start < first_price:
+        warnings.append("requested_start_date is earlier than first_price_date")
+        warnings.append("historical price coverage incomplete")
+    if last_price and last_price < requested_end:
+        warnings.append("last_price_date is earlier than requested_end_date")
+    if first_candidate and first_price and first_candidate > first_price:
+        warnings.append("first_candidate_date is later than first_price_date")
+    if last_candidate and last_price and last_candidate < last_price:
+        warnings.append("last_candidate_date is earlier than last_price_date")
+    if first_trade and first_candidate and first_trade > first_candidate:
+        warnings.append("first_trade_date is later than first_candidate_date")
+    return warnings
+
+
+def build_backtest_execution_audit(
+    *,
+    processed_dates: list[str],
+    skipped_days: list[dict[str, str]],
+    trading_dates: list[date],
+    expected_trading_days: list[date],
+    processed_data_audit: dict[str, Any],
+    all_trades: list[dict[str, Any]],
+    effective_trade_end_date: date,
+) -> dict[str, Any]:
+    expected_processing_end_date = expected_trading_days[-1].isoformat() if expected_trading_days else effective_trade_end_date.isoformat()
+    actual_trading_days = len(trading_dates)
+    trade_dates = sorted(
+        {
+            str(value)
+            for trade in all_trades
+            for value in [trade.get("entry_date") or trade.get("date"), trade.get("exit_date")]
+            if value
+        }
+    )
+    last_processed_day = processed_dates[-1] if processed_dates else None
+    limited_reason = _backtest_date_range_limited_reason(
+        last_processed_day=last_processed_day,
+        expected_processing_end_date=expected_processing_end_date,
+        processed_data_audit=processed_data_audit,
+        actual_trading_days=actual_trading_days,
+    )
+    status = "ERROR" if limited_reason != "none" else "OK"
+    return {
+        "status": status,
+        "first_processed_day": processed_dates[0] if processed_dates else None,
+        "last_processed_day": last_processed_day,
+        "processed_days": len(processed_dates),
+        "skipped_days": len(skipped_days),
+        "first_indicator_date": processed_data_audit.get("indicators_first_date_in_range") or processed_data_audit.get("indicators_first_date"),
+        "last_indicator_date": processed_data_audit.get("indicators_last_date_in_range") or processed_data_audit.get("indicators_last_date"),
+        "first_candidate_date": processed_data_audit.get("candidates_first_date_in_range") or processed_data_audit.get("candidates_first_date"),
+        "last_candidate_date": processed_data_audit.get("candidates_last_date_in_range") or processed_data_audit.get("candidates_last_date"),
+        "first_scored_candidate_date": processed_data_audit.get("scored_candidates_first_date_in_range") or processed_data_audit.get("scored_candidates_first_date"),
+        "last_scored_candidate_date": processed_data_audit.get("scored_candidates_last_date_in_range") or processed_data_audit.get("scored_candidates_last_date"),
+        "first_trade_date": trade_dates[0] if trade_dates else None,
+        "last_trade_date": trade_dates[-1] if trade_dates else None,
+        "target_trading_days": len(expected_trading_days),
+        "actual_trading_days": actual_trading_days,
+        "effective_end_date": effective_trade_end_date.isoformat(),
+        "expected_processing_end_date": expected_processing_end_date,
+        "date_range_limited_reason": limited_reason,
+    }
+
+
+def _backtest_date_range_limited_reason(
+    *,
+    last_processed_day: str | None,
+    expected_processing_end_date: str,
+    processed_data_audit: dict[str, Any],
+    actual_trading_days: int,
+) -> str:
+    if actual_trading_days == 0:
+        return "no_actual_trading_days"
+    if not last_processed_day:
+        return "no_processed_days"
+    if last_processed_day < expected_processing_end_date:
+        return "processed_ends_before_expected_processing_end_date"
+    candidates_last = processed_data_audit.get("candidates_last_date")
+    scored_last = processed_data_audit.get("scored_candidates_last_date")
+    indicators_last = processed_data_audit.get("indicators_last_date")
+    if indicators_last and candidates_last and candidates_last < indicators_last:
+        return "candidates_end_before_indicators"
+    if candidates_last and scored_last and scored_last < candidates_last:
+        return "scored_candidates_end_before_candidates"
+    if processed_data_audit.get("dates_with_indicators_but_no_candidates_count"):
+        return "indicators_without_candidates"
+    if processed_data_audit.get("dates_with_candidates_but_no_scored_count"):
+        return "candidates_without_scored_candidates"
+    return "none"
+
+
+def build_processed_data_audit(config: dict[str, Any], trading_dates: list[date]) -> dict[str, Any]:
+    profile_dir = ROOT / "data" / "processed" / profile_id_from(config)
+    expected_set = {item.isoformat() for item in trading_dates}
+    indicators = _processed_stage_dates(profile_dir, "indicators")
+    candidates = _processed_stage_dates(profile_dir, "candidates")
+    scored = _processed_stage_dates(profile_dir, "scored_candidates")
+    indicators_in_range = [item for item in indicators if item in expected_set]
+    candidates_in_range = [item for item in candidates if item in expected_set]
+    scored_in_range = [item for item in scored if item in expected_set]
+    candidates_set = set(candidates)
+    scored_set = set(scored)
+    dates_with_indicators_but_no_candidates = [item for item in indicators if item in expected_set and item not in candidates_set]
+    dates_with_candidates_but_no_scored = [item for item in candidates if item in expected_set and item not in scored_set]
+    return {
+        "indicators_first_date": indicators[0] if indicators else None,
+        "indicators_last_date": indicators[-1] if indicators else None,
+        "candidates_first_date": candidates[0] if candidates else None,
+        "candidates_last_date": candidates[-1] if candidates else None,
+        "scored_candidates_first_date": scored[0] if scored else None,
+        "scored_candidates_last_date": scored[-1] if scored else None,
+        "indicators_first_date_in_range": indicators_in_range[0] if indicators_in_range else None,
+        "indicators_last_date_in_range": indicators_in_range[-1] if indicators_in_range else None,
+        "candidates_first_date_in_range": candidates_in_range[0] if candidates_in_range else None,
+        "candidates_last_date_in_range": candidates_in_range[-1] if candidates_in_range else None,
+        "scored_candidates_first_date_in_range": scored_in_range[0] if scored_in_range else None,
+        "scored_candidates_last_date_in_range": scored_in_range[-1] if scored_in_range else None,
+        "indicators_count": len(indicators),
+        "candidates_file_count": len(candidates),
+        "scored_candidates_file_count": len(scored),
+        "indicator_days_in_range": len(indicators_in_range),
+        "candidate_days_in_range": len(candidates_in_range),
+        "scored_candidate_days_in_range": len(scored_in_range),
+        "dates_with_indicators_but_no_candidates": dates_with_indicators_but_no_candidates,
+        "dates_with_candidates_but_no_scored": dates_with_candidates_but_no_scored,
+        "dates_with_indicators_but_no_candidates_count": len(dates_with_indicators_but_no_candidates),
+        "dates_with_candidates_but_no_scored_count": len(dates_with_candidates_but_no_scored),
+    }
+
+
+def _processed_stage_dates(profile_dir: Path, stage: str) -> list[str]:
+    prefix = f"{stage}_"
+    dates = []
+    for path in sorted(profile_dir.glob(f"{prefix}*.json")):
+        date_text = path.stem.removeprefix(prefix)
+        try:
+            date.fromisoformat(date_text)
+        except ValueError:
+            continue
+        dates.append(date_text)
+    return sorted(dates)
 
 
 def hardcoded_date_audit(target: str = "2026-03-06") -> dict[str, Any]:
@@ -7961,10 +10431,10 @@ def enrich_candidates_with_position_prices(
         return enriched
 
     indicators_path = ROOT / "data" / "processed" / f"indicators_{target_date_text}.json"
-    if not indicators_path.exists():
-        return enriched
-
-    indicators = read_json(indicators_path).get("indicators", [])
+    if indicators_path.exists():
+        indicators = read_json(indicators_path).get("indicators", [])
+    else:
+        indicators = load_cached_prime_prices(date.fromisoformat(target_date_text))
     by_code = {item["code"]: item for item in indicators}
     for code in sorted(missing_codes):
         indicator = by_code.get(code)
@@ -7973,7 +10443,7 @@ def enrich_candidates_with_position_prices(
         enriched.append(
             {
                 "code": indicator["code"],
-                "name": indicator["name"],
+                "name": indicator.get("name", indicator["code"]),
                 "sector_name": indicator.get("sector_name", ""),
                 "date": target_date_text,
                 "open": indicator.get("open"),
@@ -8062,10 +10532,10 @@ def write_backtest_summary(
         if selected_count == 0:
             no_trade_days += 1
     net_cumulative_profit_rate = round(net_cumulative_profit / initial_capital, 4) if initial_capital else None
-    summary = {
-        "start_date": start_date_text,
-        "end_date": end_date_text,
-        "date_resolution": date_resolution
+    execution_model = _backtest_execution_model(config)
+    execution_model.update(_backtest_execution_model_stats(all_trades, execution_model))
+    resolved_dates = _date_resolution_with_coverage(
+        date_resolution
         or {
             "requested_start_date": start_date_text,
             "requested_end_date": end_date_text,
@@ -8074,7 +10544,15 @@ def write_backtest_summary(
             "start_date_source": "default",
             "end_date_source": "default",
         },
+        date_range_audit or {},
+    )
+    summary = {
+        "start_date": start_date_text,
+        "end_date": end_date_text,
+        "date_resolution": resolved_dates,
         "date_range_audit": date_range_audit or {},
+        "execution_model": execution_model,
+        "market_coverage": build_market_coverage_summary(backtest_dir),
         "profile_id": profile_id_from(config),
         "profile_name": profile_name_from(config),
         "provider": "jquants",
@@ -8112,6 +10590,9 @@ def write_backtest_summary(
         "daily_asset_curve": daily_asset_curve,
         "dealer_comment": _backtest_dealer_comment(final_assets, initial_capital, closed_trades),
     }
+    integrity_audit = build_backtest_integrity_audit(config, all_trades, backtest_dir, date_range_audit or {})
+    summary["backtest_integrity_audit"] = integrity_audit
+    summary["evaluation_label"] = "final_evaluation" if integrity_audit.get("overall_status") == "OK" else "experimental"
     report_json_path = ROOT / "reports" / profile_id_from(config) / f"backtest_{range_key}.json"
     report_md_path = ROOT / "reports" / profile_id_from(config) / f"backtest_{range_key}.md"
     rule_based_90d_report_path = ROOT / "reports" / "backtests" / f"rule_based_90d_summary_{range_key}.md"
@@ -8129,6 +10610,50 @@ def write_backtest_summary(
     write_summary_csv(backtest_dir / "summary.csv", daily_summaries)
     write_trades_csv(backtest_dir / "trades.csv", closed_trades)
     return summary
+
+
+def _date_resolution_with_coverage(
+    date_resolution: dict[str, Any],
+    date_range_audit: dict[str, Any],
+) -> dict[str, Any]:
+    resolved = dict(date_resolution)
+    coverage = date_range_audit.get("backtest_coverage_audit", {}) if isinstance(date_range_audit, dict) else {}
+    first_price_date = coverage.get("first_price_date") or date_range_audit.get("first_trading_day") or date_range_audit.get("first_price_date")
+    requested_start = str(resolved.get("requested_start_date") or resolved.get("effective_start_date") or "")
+    if first_price_date and requested_start and requested_start < str(first_price_date):
+        resolved["effective_start_date"] = first_price_date
+        resolved["effective_start_date_source"] = "price_coverage"
+    return resolved
+
+
+def build_market_coverage_summary(backtest_dir: Path) -> dict[str, Any]:
+    candidate_counts = {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0}
+    selected_counts = {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0}
+    excluded_count = 0
+    for scoring_file in sorted(backtest_dir.glob("scoring_*.json")):
+        try:
+            payload = read_json(scoring_file)
+        except Exception:
+            continue
+        scores = payload.get("scores", [])
+        selected = [item for item in scores if item.get("selected")]
+        _merge_count_dict(candidate_counts, market_section_counts(scores))
+        _merge_count_dict(selected_counts, market_section_counts(selected))
+        market_filter = payload.get("market_filter", {})
+        if isinstance(market_filter, dict):
+            excluded_count += int(market_filter.get("market_filter_excluded_count") or 0)
+        else:
+            excluded_count += sum(1 for item in scores if item.get("market_section_filter_blocked"))
+    return {
+        "candidate_count": candidate_counts,
+        "selected_count": selected_counts,
+        "market_filter_excluded_count": excluded_count,
+    }
+
+
+def _merge_count_dict(target: dict[str, int], source: dict[str, int]) -> None:
+    for key, value in source.items():
+        target[key] = int(target.get(key, 0)) + int(value or 0)
 
 
 def _is_rule_based_backtest(config: dict[str, Any]) -> bool:
@@ -8169,8 +10694,29 @@ def render_backtest_summary_markdown(summary: dict[str, Any], config: dict[str, 
         "",
         *_backtest_date_range_audit_lines(summary.get("date_range_audit", {})),
         "",
+        "## Backtest Coverage Audit",
+        "",
+        *_backtest_coverage_audit_lines(summary.get("date_range_audit", {}).get("backtest_coverage_audit", {})),
+        "",
+        "## Backtest Execution Audit",
+        "",
+        *_backtest_execution_audit_lines(summary.get("date_range_audit", {}).get("backtest_execution_audit", {})),
+        "",
+        "## Backtest Execution Model",
+        "",
+        *_backtest_execution_model_lines(summary.get("execution_model") or _backtest_execution_model(config)),
+        "",
+        "## Market Coverage",
+        "",
+        *_market_coverage_lines(summary.get("market_coverage", {})),
+        "",
+        "## Backtest Integrity Audit",
+        "",
+        *_backtest_integrity_audit_lines(summary.get("backtest_integrity_audit", {})),
+        "",
         "## 成績",
         "",
+        f"- evaluation_label: {summary.get('evaluation_label', 'experimental')}",
         f"- 初期資金: {summary['initial_capital']:,.0f}円",
         f"- 最終資産: {summary['final_assets']:,.0f}円",
         f"- 累計損益: {summary['cumulative_profit']:,.0f}円",
@@ -8222,17 +10768,29 @@ def _backtest_date_range_audit_lines(audit: dict[str, Any]) -> list[str]:
         return ["- audit: unavailable"]
     prices = (audit.get("data_coverage") or {}).get("prices", {})
     hardcoded = audit.get("hardcoded_date_audit", {})
+    processed = audit.get("processed_data_audit", {}) if isinstance(audit.get("processed_data_audit"), dict) else {}
     lines = [
         f"- requested_start_date: {audit.get('requested_start_date')}",
         f"- requested_end_date: {audit.get('requested_end_date')}",
         f"- effective_trade_start_date: {audit.get('effective_trade_start_date')}",
         f"- effective_trade_end_date: {audit.get('effective_trade_end_date')}",
         f"- indicator_fetch_start_date: {audit.get('indicator_fetch_start_date')}",
+        f"- price_fetch_requested_start: {audit.get('price_fetch_requested_start')}",
+        f"- price_fetch_clamped_start: {audit.get('price_fetch_clamped_start')}",
+        f"- first_fetch_attempt_date: {audit.get('first_fetch_attempt_date')}",
+        f"- raw_price_first_date: {audit.get('raw_price_first_date')}",
+        f"- raw_price_last_date: {audit.get('raw_price_last_date')}",
         f"- first_price_date: {audit.get('first_price_date')}",
         f"- last_price_date: {audit.get('last_price_date')}",
         f"- first_trading_day: {audit.get('first_trading_day')}",
         f"- last_trading_day: {audit.get('last_trading_day')}",
         f"- target_trading_days: {audit.get('target_trading_days')}",
+        f"- target_trading_days_source: {audit.get('target_trading_days_source')}",
+        f"- processed_first_date: {audit.get('processed_first_date')}",
+        f"- processed_last_date: {audit.get('processed_last_date')}",
+        f"- missing_processed_dates_count: {audit.get('missing_processed_dates_count')}",
+        f"- first_missing_processed_date: {audit.get('first_missing_processed_date')}",
+        f"- last_missing_processed_date: {audit.get('last_missing_processed_date')}",
         f"- processed_days: {audit.get('processed_days')}",
         f"- skipped_days: {audit.get('skipped_days')}",
         f"- last_processed_day: {audit.get('last_processed_day')}",
@@ -8257,9 +10815,383 @@ def _backtest_date_range_audit_lines(audit: dict[str, Any]) -> list[str]:
         f"- target: {hardcoded.get('target', '2026-03-06')}",
         f"- match_count: {hardcoded.get('match_count', 0)}",
         f"- warning: {hardcoded.get('warning') or '-'}",
+        "",
+        "### Processed Data Audit",
+        "",
+        f"- indicators_last_date: {processed.get('indicators_last_date')}",
+        f"- candidates_last_date: {processed.get('candidates_last_date')}",
+        f"- scored_candidates_last_date: {processed.get('scored_candidates_last_date')}",
+        f"- indicators_count: {processed.get('indicators_count')}",
+        f"- candidates_file_count: {processed.get('candidates_file_count')}",
+        f"- scored_candidates_file_count: {processed.get('scored_candidates_file_count')}",
+        f"- dates_with_indicators_but_no_candidates: {processed.get('dates_with_indicators_but_no_candidates_count', 0)}",
+        f"- dates_with_candidates_but_no_scored: {processed.get('dates_with_candidates_but_no_scored_count', 0)}",
     ]
+    for value in (processed.get("dates_with_indicators_but_no_candidates") or [])[:10]:
+        lines.append(f"- indicator_without_candidate: {value}")
+    for value in (processed.get("dates_with_candidates_but_no_scored") or [])[:10]:
+        lines.append(f"- candidate_without_scored: {value}")
     for match in hardcoded.get("matches_sample", [])[:10]:
         lines.append(f"- match: {match}")
+    return lines
+
+
+def _backtest_coverage_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- audit: unavailable"]
+    lines = [
+        f"- requested_start_date: {audit.get('requested_start_date')}",
+        f"- requested_end_date: {audit.get('requested_end_date')}",
+        f"- price_fetch_requested_start: {audit.get('price_fetch_requested_start')}",
+        f"- price_fetch_clamped_start: {audit.get('price_fetch_clamped_start')}",
+        f"- first_fetch_attempt_date: {audit.get('first_fetch_attempt_date')}",
+        f"- actual_start_date: {audit.get('actual_start_date')}",
+        f"- actual_end_date: {audit.get('actual_end_date')}",
+        f"- raw_cache_first_date: {audit.get('raw_cache_first_date')}",
+        f"- raw_cache_last_date: {audit.get('raw_cache_last_date')}",
+        f"- first_price_date: {audit.get('first_price_date')}",
+        f"- last_price_date: {audit.get('last_price_date')}",
+        f"- first_indicator_date: {audit.get('first_indicator_date')}",
+        f"- last_indicator_date: {audit.get('last_indicator_date')}",
+        f"- first_candidate_date: {audit.get('first_candidate_date')}",
+        f"- last_candidate_date: {audit.get('last_candidate_date')}",
+        f"- first_trade_date: {audit.get('first_trade_date')}",
+        f"- last_trade_date: {audit.get('last_trade_date')}",
+        f"- candidate_days: {audit.get('candidate_days')}",
+        f"- trade_days: {audit.get('trade_days')}",
+        f"- price_days: {audit.get('price_days')}",
+        f"- expected_business_days: {audit.get('expected_business_days')}",
+        f"- coverage_ratio: {_format_optional_percent(audit.get('coverage_ratio'))}",
+        f"- coverage_warning: {audit.get('coverage_warning') or '-'}",
+    ]
+    for warning in audit.get("coverage_warnings") or []:
+        lines.append(f"- warning: {warning}")
+    return lines
+
+
+def _backtest_execution_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- audit: unavailable"]
+    status = str(audit.get("status") or "")
+    lines = [
+        f"- status: {status}",
+        f"- first_processed_day: {audit.get('first_processed_day')}",
+        f"- last_processed_day: {audit.get('last_processed_day')}",
+        f"- processed_days: {audit.get('processed_days')}",
+        f"- skipped_days: {audit.get('skipped_days')}",
+        f"- first_indicator_date: {audit.get('first_indicator_date')}",
+        f"- last_indicator_date: {audit.get('last_indicator_date')}",
+        f"- first_candidate_date: {audit.get('first_candidate_date')}",
+        f"- last_candidate_date: {audit.get('last_candidate_date')}",
+        f"- first_scored_candidate_date: {audit.get('first_scored_candidate_date')}",
+        f"- last_scored_candidate_date: {audit.get('last_scored_candidate_date')}",
+        f"- first_trade_date: {audit.get('first_trade_date')}",
+        f"- last_trade_date: {audit.get('last_trade_date')}",
+        f"- target_trading_days: {audit.get('target_trading_days')}",
+        f"- actual_trading_days: {audit.get('actual_trading_days')}",
+        f"- effective_end_date: {audit.get('effective_end_date')}",
+        f"- expected_processing_end_date: {audit.get('expected_processing_end_date')}",
+        f"- date_range_limited_reason: {audit.get('date_range_limited_reason')}",
+    ]
+    if status == "ERROR":
+        lines.append("- ERROR: processed_last_date is before the expected processing end date or a processed stage is incomplete.")
+    return lines
+
+
+def _backtest_execution_model_lines(model: dict[str, Any]) -> list[str]:
+    return [
+        f"- signal_timing: {model.get('signal_timing', 'after_close')}",
+        f"- entry_timing: {model.get('entry_timing', 'next_business_day_open')}",
+        f"- entry_price_source: {model.get('entry_price_source', 'open')}",
+        f"- same_day_execution: {str(bool(model.get('same_day_execution'))).lower()}",
+        f"- signal_date_entry_date_separated: {str(bool(model.get('signal_date_entry_date_separated', False))).lower()}",
+        f"- signal_entry_same_day_count: {model.get('signal_entry_same_day_count', 0)}",
+        f"- signal_entry_next_day_count: {model.get('signal_entry_next_day_count', 0)}",
+        f"- signal_entry_gap_average: {_format_optional_percent(model.get('signal_entry_gap_average'))}",
+    ]
+
+
+def _market_coverage_lines(coverage: dict[str, Any]) -> list[str]:
+    if not coverage:
+        return ["- market coverage: unavailable"]
+    candidates = coverage.get("candidate_count", {}) if isinstance(coverage.get("candidate_count"), dict) else {}
+    selected = coverage.get("selected_count", {}) if isinstance(coverage.get("selected_count"), dict) else {}
+    return [
+        f"- Prime candidate count: {candidates.get('Prime', 0)}",
+        f"- Standard candidate count: {candidates.get('Standard', 0)}",
+        f"- Growth candidate count: {candidates.get('Growth', 0)}",
+        f"- Unknown candidate count: {candidates.get('Unknown', 0)}",
+        f"- Prime selected count: {selected.get('Prime', 0)}",
+        f"- Standard selected count: {selected.get('Standard', 0)}",
+        f"- Growth selected count: {selected.get('Growth', 0)}",
+        f"- Unknown selected count: {selected.get('Unknown', 0)}",
+        f"- market_filter_excluded_count: {coverage.get('market_filter_excluded_count', 0)}",
+    ]
+
+
+def _backtest_execution_model_stats(all_trades: list[dict[str, Any]], model: dict[str, Any]) -> dict[str, Any]:
+    filled_buys = [
+        trade
+        for trade in all_trades
+        if trade.get("action") == "BUY" and (trade.get("order_status") or trade.get("status")) in {"FILLED", "filled", "Filled", None}
+    ]
+    same_day_count = 0
+    next_day_count = 0
+    missing_count = 0
+    gaps: list[float] = []
+    for trade in filled_buys:
+        signal_text = trade.get("signal_date")
+        entry_text = trade.get("entry_date")
+        if not signal_text or not entry_text:
+            missing_count += 1
+            continue
+        try:
+            signal = date.fromisoformat(str(signal_text))
+            entry = date.fromisoformat(str(entry_text))
+        except ValueError:
+            missing_count += 1
+            continue
+        if signal == entry:
+            same_day_count += 1
+        elif signal < entry:
+            next_day_count += 1
+        gap = _safe_float(trade.get("entry_gap_rate"))
+        if gap is not None:
+            gaps.append(gap)
+    same_day_execution = bool(model.get("same_day_execution"))
+    separated = missing_count == 0 and (same_day_execution or same_day_count == 0)
+    return {
+        "signal_date_entry_date_separated": separated,
+        "signal_entry_same_day_count": same_day_count,
+        "signal_entry_next_day_count": next_day_count,
+        "signal_entry_missing_count": missing_count,
+        "signal_entry_gap_average": round(sum(gaps) / len(gaps), 4) if gaps else None,
+    }
+
+
+def build_backtest_integrity_audit(
+    config: dict[str, Any],
+    all_trades: list[dict[str, Any]],
+    backtest_dir: Path | None = None,
+    date_range_audit: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    model = _backtest_execution_model(config)
+    filled_buys = [
+        trade
+        for trade in all_trades
+        if trade.get("action") == "BUY" and (trade.get("order_status") or trade.get("status")) in {"FILLED", "filled", "Filled", None}
+    ]
+    filled_sells = [
+        trade
+        for trade in all_trades
+        if trade.get("action") == "SELL" and (trade.get("order_status") or trade.get("status")) in {"FILLED", "filled", "Filled", None}
+    ]
+    checks: dict[str, dict[str, Any]] = {}
+    same_day_execution = bool(model.get("same_day_execution"))
+    checks["same_day_execution"] = _integrity_check(
+        "WARN" if same_day_execution else "OK",
+        same_day_execution,
+        "same_day_close is enabled; useful for comparison but optimistic." if same_day_execution else "buy execution is not same-day close.",
+    )
+
+    separated_violations = [
+        trade
+        for trade in filled_buys
+        if trade.get("signal_date") and trade.get("entry_date") and trade.get("signal_date") == trade.get("entry_date")
+    ]
+    missing_signal = [trade for trade in filled_buys if not trade.get("signal_date") or not trade.get("entry_date")]
+    if same_day_execution:
+        separated_status = "WARN"
+        separated_message = "same_day_close intentionally keeps signal_date and entry_date on the same date."
+    elif separated_violations:
+        separated_status = "NG"
+        separated_message = f"{len(separated_violations)} buy trade(s) executed on signal_date."
+    elif missing_signal:
+        separated_status = "WARN"
+        separated_message = f"{len(missing_signal)} buy trade(s) lack signal_date or entry_date."
+    else:
+        separated_status = "OK"
+        separated_message = "filled buy trades separate signal_date and entry_date."
+    checks["signal_date_entry_date_separated"] = _integrity_check(
+        separated_status,
+        not separated_violations and not missing_signal and not same_day_execution,
+        separated_message,
+    )
+
+    price_source = str(model.get("entry_price_source") or "")
+    entry_price_mismatches = []
+    for trade in filled_buys:
+        entry_price = _safe_float(trade.get("entry_price"))
+        if price_source == "open":
+            expected = _safe_float(trade.get("entry_open_price"))
+        elif price_source == "close":
+            expected = _safe_float(trade.get("signal_close_price" if same_day_execution else "entry_price"))
+        else:
+            expected = None
+        if expected is not None and entry_price is not None and abs(entry_price - expected) > 0.0001:
+            entry_price_mismatches.append(trade)
+    checks["entry_price_source"] = _integrity_check(
+        "NG" if entry_price_mismatches else "OK",
+        price_source,
+        f"{len(entry_price_mismatches)} buy trade(s) do not match configured entry price source."
+        if entry_price_mismatches
+        else f"entry price source is {price_source}.",
+    )
+
+    stop_loss_execution = str(config.get("execution", {}).get("stop_loss_execution", "next_day_open"))
+    checks["exit_price_source"] = _integrity_check(
+        "OK",
+        stop_loss_execution,
+        "close-based exit checks are applied after holding_days >= 2; intraday stop uses same-day low only when configured.",
+    )
+    checks["entry_day_exit_policy"] = _integrity_check(
+        "OK",
+        "disabled",
+        "entry-day immediate TP/SL/max-holding exit is disabled by holding_days < 2.",
+    )
+
+    investor_enabled = bool(config.get("features", {}).get("investor_context")) and bool(
+        config.get("scoring", {}).get("use_investor_context_score")
+    )
+    earnings_enabled = bool(config.get("earnings_filter", {}).get("enabled"))
+    financial_enabled = bool(config.get("features", {}).get("financial_context"))
+    context_warnings = investor_enabled or earnings_enabled or financial_enabled
+    checks["uses_future_price_data"] = _integrity_check(
+        "WARN" if context_warnings else "OK",
+        context_warnings,
+        "price path uses signal_date/entry_date only, but point-in-time safety warnings exist in non-price context data."
+        if context_warnings
+        else "no evidence of future price data use in the execution model.",
+    )
+    checks["investor_context_pubdate_safe"] = _integrity_check(
+        "WARN" if investor_enabled else "OK",
+        not investor_enabled,
+        "investor_types is filtered by record date, but PubDate availability is not explicitly enforced."
+        if investor_enabled
+        else "investor_context disabled for this profile.",
+    )
+    checks["financial_context_disclosure_date_safe"] = _integrity_check(
+        "WARN" if financial_enabled else "OK",
+        not financial_enabled,
+        "financial_context requires explicit disclosure-date point-in-time verification before final evaluation."
+        if financial_enabled
+        else "financial_context disabled for this profile.",
+    )
+    checks["earnings_calendar_point_in_time_safe"] = _integrity_check(
+        "WARN" if earnings_enabled else "OK",
+        not earnings_enabled,
+        "earnings calendar uses available schedule cache; historical point-in-time schedule availability is not guaranteed."
+        if earnings_enabled
+        else "earnings_filter disabled for this profile.",
+    )
+
+    costs = config.get("costs", {})
+    commission_enabled = float(costs.get("commission_rate", 0.0) or 0.0) > 0 or float(costs.get("min_commission", 0.0) or 0.0) > 0
+    checks["transaction_costs_enabled"] = _integrity_check(
+        "OK" if commission_enabled else "WARN",
+        commission_enabled,
+        "commission is modeled." if commission_enabled else "commission is configured as zero; results exclude brokerage fees.",
+    )
+    tax_enabled = bool(costs.get("apply_tax_on_profit", True)) and float(costs.get("tax_rate", 0.0) or 0.0) > 0
+    checks["tax_enabled"] = _integrity_check(
+        "OK" if tax_enabled else "WARN",
+        tax_enabled,
+        "tax on realized profit is modeled." if tax_enabled else "tax is disabled or tax_rate is zero.",
+    )
+    gap_recorded = any(trade.get("entry_gap_rate") is not None for trade in filled_buys)
+    checks["slippage_enabled"] = _integrity_check(
+        "WARN" if not gap_recorded else "OK",
+        gap_recorded,
+        "entry gap is recorded; additional order-book slippage is not modeled."
+        if gap_recorded
+        else "no entry_gap_rate found in filled buys; slippage/gap effect may be missing.",
+    )
+    checks["cash_constraint_enabled"] = _integrity_check("OK", True, "buy sizing is constrained by cash and commission.")
+    checks["round_lot_enabled"] = _integrity_check(
+        "OK" if bool(config.get("trading", {}).get("use_round_lot")) else "WARN",
+        bool(config.get("trading", {}).get("use_round_lot")),
+        "round-lot sizing is enabled." if bool(config.get("trading", {}).get("use_round_lot")) else "round-lot sizing is disabled.",
+    )
+    checks["max_positions_enabled"] = _integrity_check(
+        "OK" if int(config.get("portfolio", {}).get("max_positions", 0) or 0) > 0 else "NG",
+        config.get("portfolio", {}).get("max_positions"),
+        f"max_positions={config.get('portfolio', {}).get('max_positions')}",
+    )
+    checks["same_day_cash_reuse"] = _integrity_check(
+        "WARN",
+        True,
+        "sell proceeds are added to cash before same-day buys in the paper engine.",
+    )
+    checks["listed_info_point_in_time_safe"] = _integrity_check(
+        "WARN",
+        False,
+        "listed_info uses the current cached universe for historical periods; delisted names may be missing.",
+    )
+    processed = (date_range_audit or {}).get("processed_data_audit") or {}
+    missing_count = int(processed.get("dates_with_indicators_but_no_candidates_count") or 0) + int(
+        processed.get("dates_with_candidates_but_no_scored_count") or 0
+    )
+    checks["missing_price_handling"] = _integrity_check(
+        "WARN" if missing_count else "OK",
+        missing_count,
+        f"processed stage gaps={missing_count}." if missing_count else "missing stage files are not detected in the audited range.",
+    )
+    checks["survivorship_bias_risk"] = _integrity_check(
+        "WARN",
+        True,
+        "historical universe is likely based on current listed_info; treat long backtests as experimental.",
+    )
+
+    status_counts = {
+        "OK": sum(1 for item in checks.values() if item["status"] == "OK"),
+        "WARN": sum(1 for item in checks.values() if item["status"] == "WARN"),
+        "NG": sum(1 for item in checks.values() if item["status"] == "NG"),
+    }
+    overall_status = "NG" if status_counts["NG"] else "WARN" if status_counts["WARN"] else "OK"
+    return {
+        "overall_status": overall_status,
+        "evaluation_label": "final_evaluation" if overall_status == "OK" else "experimental",
+        "status_counts": status_counts,
+        "checks": checks,
+    }
+
+
+def _integrity_check(status: str, value: Any, message: str) -> dict[str, Any]:
+    return {"status": status, "value": value, "message": message}
+
+
+def _backtest_integrity_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- audit: unavailable"]
+    lines = [
+        f"- overall_status: {audit.get('overall_status')}",
+        f"- evaluation_label: {audit.get('evaluation_label')}",
+    ]
+    checks = audit.get("checks") or {}
+    for key in [
+        "same_day_execution",
+        "signal_date_entry_date_separated",
+        "entry_price_source",
+        "exit_price_source",
+        "uses_future_price_data",
+        "investor_context_pubdate_safe",
+        "financial_context_disclosure_date_safe",
+        "earnings_calendar_point_in_time_safe",
+        "transaction_costs_enabled",
+        "tax_enabled",
+        "slippage_enabled",
+        "cash_constraint_enabled",
+        "round_lot_enabled",
+        "max_positions_enabled",
+        "same_day_cash_reuse",
+        "listed_info_point_in_time_safe",
+        "missing_price_handling",
+        "survivorship_bias_risk",
+    ]:
+        item = checks.get(key, {})
+        lines.append(f"- {key}: {item.get('status', 'WARN')} - {item.get('message', '')}")
+    if audit.get("overall_status") in {"WARN", "NG"}:
+        lines.append("- conclusion: WARN/NG項目があるため、このbacktest結果はfinal evaluationではなくexperimentalとして扱います。")
     return lines
 
 
@@ -9054,6 +11986,7 @@ def fetch_price_history(
     fetch_dates: list[date] | None = None,
     continue_on_error: bool = False,
     verbose: bool = False,
+    stop_on_consecutive_unsupported: bool = True,
 ) -> list[dict[str, Any]]:
     target_fetch_dates = fetch_dates or previous_business_dates(target_date, lookback_business_days)
     total_dates = len(target_fetch_dates)
@@ -9107,15 +12040,18 @@ def fetch_price_history(
                 unsupported_range_start,
                 fetch_date,
                 reason="bad_request_or_out_of_range",
-                source="early-stop-consecutive-400",
+                source="consecutive-400",
             )
             if verbose:
+                action = "remaining dates skipped" if stop_on_consecutive_unsupported else "range recorded, continuing because later dates may be available"
                 print(
-                    "fetch-period-prices early stop: consecutive bad_request_or_out_of_range "
-                    f"from {unsupported_range_start.isoformat()} to {fetch_date.isoformat()}; "
-                    "remaining dates skipped"
+                    "fetch-period-prices warning: consecutive bad_request_or_out_of_range "
+                    f"from {unsupported_range_start.isoformat()} to {fetch_date.isoformat()}; {action}"
                 )
-            break
+            if stop_on_consecutive_unsupported:
+                break
+            consecutive_unsupported = 0
+            unsupported_range_start = None
     return rows
 
 
@@ -9194,22 +12130,26 @@ def _fetch_price_history_for_date(
         if continue_on_error:
             return []
         raise
-    prime_prices = [
-        _normalize_daily_price(record)
+    config = load_config(CONFIG_PATH)
+    listed_stock_by_code = {str(stock["code"]): stock for stock in _listed_stock_master() if stock.get("code")}
+    all_listed_prices = [
+        _normalize_daily_price_with_market(record, listed_stock_by_code)
         for record in daily_prices
-        if _get_first(record, ["code", "Code", "LocalCode"]) in prime_codes
+        if _get_first(record, ["code", "Code", "LocalCode"]) in listed_stock_by_code
     ]
-    if prime_prices:
-        cache_price_snapshot(fetch_date, len(daily_prices), prime_prices)
+    allowed_codes = set(_allowed_stock_master_by_code(config))
+    allowed_prices = [row for row in all_listed_prices if row.get("code") in allowed_codes]
+    if all_listed_prices:
+        cache_price_snapshot(fetch_date, len(daily_prices), all_listed_prices)
         if verbose:
             print(
                 f"fetch-period-prices {fetch_date.isoformat()} saved "
-                f"{len(prime_prices)} prime rows from {len(daily_prices)} rows"
+                f"{len(all_listed_prices)} listed rows from {len(daily_prices)} rows"
             )
-        return prime_prices
-    save_no_data_day(fetch_date, reason="no_prime_rows", source="fetch-period-prices")
+        return allowed_prices
+    save_no_data_day(fetch_date, reason="no_listed_rows", source="fetch-period-prices")
     if verbose:
-        print(f"fetch-period-prices {fetch_date.isoformat()} no prime rows; saved no-data cache")
+        print(f"fetch-period-prices {fetch_date.isoformat()} no listed rows; saved no-data cache")
     return []
 
 
@@ -9274,9 +12214,92 @@ def jquants_error_category(exc: Exception) -> str:
 def load_cached_prime_prices(fetch_date: date) -> Any:
     path = ROOT / "data" / "raw" / f"prices_{fetch_date.isoformat()}.json"
     if not path.exists():
+        return load_cached_prime_prices_from_jquants_cache(fetch_date)
+    payload = read_json(path)
+    return _enrich_cached_prices_with_market(payload.get("prices", [])) or None
+
+
+def load_cached_prime_prices_from_jquants_cache(fetch_date: date) -> list[dict[str, Any]] | None:
+    path = ROOT / "data" / "cache" / "jquants" / "prices" / f"{fetch_date.isoformat()}.json"
+    if not path.exists():
         return None
     payload = read_json(path)
-    return payload.get("prices", [])
+    records = payload.get("records", []) if isinstance(payload, dict) else []
+    if not records:
+        return None
+    prime_codes = _cached_prime_stock_codes()
+    normalized = [_normalize_daily_price(record) for record in records]
+    if prime_codes:
+        normalized = [record for record in normalized if record.get("code") in prime_codes]
+    normalized = _enrich_cached_prices_with_market(normalized)
+    return normalized or None
+
+
+def _enrich_cached_prices_with_market(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    stock_by_code = _allowed_stock_master_by_code(load_config(CONFIG_PATH))
+    if not stock_by_code:
+        return rows
+    enriched = []
+    for row in rows:
+        code = str(row.get("code") or "")
+        if code not in stock_by_code:
+            continue
+        if row.get("section") and row.get("market_section") and row.get("listing_market"):
+            enriched.append(row)
+        else:
+            enriched.append(attach_market_section_fields(row, stock_by_code[code].get("section", "Unknown")))
+    return enriched
+
+
+def _cached_prime_stock_codes() -> set[str]:
+    return set(_allowed_stock_master_by_code(load_config(CONFIG_PATH)).keys())
+
+
+def _listed_stock_master_path() -> Path:
+    listed = ROOT / "data" / "raw" / "listed_stocks_jquants.json"
+    if listed.exists():
+        return listed
+    return ROOT / "data" / "raw" / "prime_stocks_jquants.json"
+
+
+def _listed_stock_master() -> list[dict[str, Any]]:
+    path = _listed_stock_master_path()
+    if not path.exists():
+        return []
+    payload = read_json(path)
+    stocks = [_normalize_listed_stock(stock) for stock in payload.get("stocks", []) if stock.get("code")]
+    if path.name == "prime_stocks_jquants.json":
+        return [
+            attach_market_section_fields(stock, "TSEPrime") if market_section_from_row(stock) == "Unknown" else stock
+            for stock in stocks
+        ]
+    return stocks
+
+
+def _allowed_stock_master_by_code(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    stocks = _listed_stock_master()
+    allowed = [stock for stock in stocks if market_section_allowed(stock, config)]
+    return {str(stock["code"]): stock for stock in allowed if stock.get("code")}
+
+
+def _market_filter_empty_message(config: dict[str, Any]) -> str:
+    stocks = _listed_stock_master()
+    allowed_sections = sorted(allowed_market_sections(config))
+    section_value_counts: dict[str, int] = {}
+    raw_market_counts: dict[str, int] = {}
+    for stock in stocks:
+        section = market_section_from_row(stock)
+        section_value_counts[section] = section_value_counts.get(section, 0) + 1
+        raw_value = str(stock.get("market") or stock.get("section") or stock.get("market_section") or stock.get("listing_market") or "Unknown")
+        raw_market_counts[raw_value] = raw_market_counts.get(raw_value, 0) + 1
+    return (
+        "Allowed stock list is empty. Re-run list-stocks and check market_filter settings. "
+        f"listed_stock_count={len(stocks)} "
+        f"allowed_sections={allowed_sections} "
+        f"allow_unknown_market={bool(config.get('market_filter', {}).get('allow_unknown_market', False))} "
+        f"section_value_counts={dict(sorted(section_value_counts.items()))} "
+        f"raw_market_value_counts={dict(sorted(raw_market_counts.items()))}"
+    )
 
 
 def no_data_days_cache_path() -> Path:
@@ -9402,7 +12425,7 @@ def load_cached_price_history(fetch_dates: list[date]) -> list[dict[str, Any]]:
     return rows
 
 
-def cache_price_snapshot(fetch_date: date, total_count: int, prime_prices: list[dict[str, Any]]) -> None:
+def cache_price_snapshot(fetch_date: date, total_count: int, listed_prices: list[dict[str, Any]]) -> None:
     path = ROOT / "data" / "raw" / f"prices_{fetch_date.isoformat()}.json"
     write_json(
         path,
@@ -9410,8 +12433,9 @@ def cache_price_snapshot(fetch_date: date, total_count: int, prime_prices: list[
             "provider": "jquants",
             "date": fetch_date.isoformat(),
             "total_count": total_count,
-            "prime_count": len(prime_prices),
-            "prices": prime_prices,
+            "listed_count": len(listed_prices),
+            "market_counts": market_section_counts(listed_prices),
+            "prices": listed_prices,
         },
     )
 
@@ -9427,19 +12451,25 @@ def previous_business_dates(target_date: date, count: int) -> list[date]:
 
 
 def _is_prime_stock(record: dict[str, Any]) -> bool:
-    market_values = [
-        _get_first(record, ["market", "market_name", "MarketName", "MarketCodeName", "market_segment", "MktNm"]),
-        _get_first(record, ["market_code", "MarketCode", "market_segment_code", "Mkt"]),
-    ]
-    joined = " ".join(str(value) for value in market_values if value)
-    return "プライム" in joined or "Prime" in joined or "prime" in joined or "0111" in joined
+    return _normalize_listed_stock(record).get("section") == "TSEPrime"
 
 
 def _normalize_prime_stock(record: dict[str, Any]) -> dict[str, Any]:
+    stock = _normalize_listed_stock(record)
+    return stock
+
+
+def _normalize_listed_stock(record: dict[str, Any]) -> dict[str, Any]:
+    section = normalize_market_section(
+        _get_first(record, ["section", "Section", "market", "market_name", "MarketName", "MarketCodeName", "market_segment", "MktNm", "market_code", "MarketCode", "market_segment_code", "Mkt"])
+    )
     return {
         "code": _get_first(record, ["code", "Code", "local_code", "LocalCode"]),
         "name": _get_first(record, ["name", "Name", "company_name", "CompanyName", "issue_name", "IssueName", "CoName"]),
         "market": _get_first(record, ["market", "market_name", "MarketName", "MarketCodeName", "market_segment", "MktNm"]),
+        "section": section,
+        "market_section": section,
+        "listing_market": section,
         "sector_code": _get_first(record, ["sector_code", "SectorCode", "sector_33_code", "Sector33Code", "sector17_code", "Sector17Code", "S33", "S17"]),
         "sector_name": _get_first(record, ["sector_name", "SectorName", "sector_33_name", "Sector33Name", "sector17_name", "Sector17Name", "S33Nm", "S17Nm"]),
         "scale_category": _get_first(record, ["scale_category", "ScaleCategory", "scale_category_name", "ScaleCategoryName", "ScaleCat"]),
@@ -9459,6 +12489,22 @@ def _normalize_daily_price(record: dict[str, Any]) -> dict[str, Any]:
     turnover_value = _get_number(record, ["turnover_value", "TurnoverValue", "Va"])
     if turnover_value is not None:
         normalized["turnover_value"] = turnover_value
+    return normalized
+
+
+def _normalize_daily_price_with_market(record: dict[str, Any], stock_by_code: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    normalized = _normalize_daily_price(record)
+    stock = stock_by_code.get(str(normalized.get("code")), {})
+    section = stock.get("section") or market_section_from_row(record)
+    normalized.update(
+        {
+            "name": stock.get("name", ""),
+            "sector_name": stock.get("sector_name", ""),
+            "section": normalize_market_section(section),
+            "market_section": normalize_market_section(section),
+            "listing_market": normalize_market_section(section),
+        }
+    )
     return normalized
 
 
@@ -9553,7 +12599,10 @@ def load_config(path: Path) -> dict[str, Any]:
     config = load_profile(profile_id)
     _apply_runtime_provider_settings(config)
     _apply_jquants_plan_settings(config)
+    if STORAGE_MODE_OVERRIDE:
+        config.setdefault("storage", {})["save_mode"] = STORAGE_MODE_OVERRIDE
     if _fast_analysis_enabled(config):
+        config.setdefault("storage", {}).setdefault("save_mode", "compact")
         analysis = config.setdefault("analysis", {})
         analysis["save_rejected_candidates"] = False
         analysis["save_selection_quality_detail"] = False
@@ -9609,6 +12658,8 @@ def _apply_runtime_provider_settings(config: dict[str, Any]) -> None:
     operation["auto_order_enabled"] = bool(settings["auto_order_enabled"])
     jquants = config.setdefault("jquants", {})
     jquants["plan"] = settings["jquants_plan"]
+    if settings.get("entry_timing"):
+        config.setdefault("backtest", {})["entry_timing"] = _normalize_entry_timing(settings["entry_timing"])
 
 
 def _apply_jquants_plan_settings(config: dict[str, Any]) -> None:
@@ -10270,7 +13321,10 @@ def _load_investor_context_for_date(target_date: date, config: dict[str, Any], f
 
 
 def _load_investor_types_for_period(start_date: date, end_date: date, config: dict[str, Any]) -> dict[str, Any]:
-    fetch_start = start_date - timedelta(weeks=26)
+    requested_fetch_start = start_date - timedelta(weeks=26)
+    earliest = _investor_types_earliest_supported_date(config)
+    fetch_start = max(requested_fetch_start, earliest) if earliest else requested_fetch_start
+    clamp_reason = "plan_supported_date" if earliest and requested_fetch_start < earliest else ""
     fetch_end = _business_day_on_or_before(end_date - timedelta(days=14))
     if fetch_end < fetch_start:
         fetch_end = _business_day_on_or_before(end_date)
@@ -10279,45 +13333,21 @@ def _load_investor_types_for_period(start_date: date, end_date: date, config: di
         "warning": "investor_types unavailable",
         "reason": "unavailable",
         "from_period_preload": True,
+        "requested_fetch_start": requested_fetch_start.isoformat(),
+        "clamped_fetch_start": fetch_start.isoformat(),
+        "clamp_reason": clamp_reason,
     }
+    if clamp_reason:
+        print(
+            "investor_types fetch_start clamped: "
+            f"requested_fetch_start={requested_fetch_start.isoformat()} "
+            f"clamped_fetch_start={fetch_start.isoformat()} "
+            f"fetch_end={fetch_end.isoformat()} "
+            f"clamp_reason={clamp_reason}"
+        )
     if not jquants_has_capability(_jquants_plan(config), "investor_types"):
         metadata["warning"] = "investor_types disabled for current J-Quants plan"
         metadata["reason"] = "capability_disabled"
-        return {
-            "records": [],
-            "metadata": metadata,
-            "start_date": fetch_start.isoformat(),
-            "end_date": fetch_end.isoformat(),
-        }
-    cached = _read_investor_types_cache_payload(fetch_start, fetch_end)
-    if cached is not None:
-        _log_jquants_api_event(
-            endpoint="investor_types",
-            plan=_jquants_plan(config),
-            cache_hit=True,
-            status="200",
-            records=len(cached.get("records", [])),
-            saved=False,
-            cache_path=cached.get("cache_path"),
-            reason="",
-        )
-        return {
-            "records": cached.get("records", []),
-            "metadata": {
-                **metadata,
-                "available": True,
-                "warning": "",
-                "reason": "",
-                "cache_path": cached.get("cache_path"),
-                "from_cache": True,
-            },
-            "start_date": fetch_start.isoformat(),
-            "end_date": fetch_end.isoformat(),
-        }
-    allowed, stop_reason = _api_call_allowed("investor_types")
-    if not allowed:
-        metadata["warning"] = stop_reason
-        metadata["reason"] = stop_reason
         return {
             "records": [],
             "metadata": metadata,
@@ -10332,44 +13362,147 @@ def _load_investor_types_for_period(start_date: date, end_date: date, config: di
         parallel_fetch=_jquants_parallel_fetch(config),
         max_parallel_requests=_jquants_max_parallel_requests(config),
     )
-    payload = _fetch_investor_types_with_retries(provider, fetch_start, fetch_end, config, force_refresh=FORCE_REFRESH_ACTIVE)
-    status = _provider_payload_status(payload)
-    reason = str(payload.get("reason") or status)
-    _log_jquants_api_event(
-        endpoint="investor_types",
-        plan=_jquants_plan(config),
-        cache_hit=bool(payload.get("from_cache")),
-        status=status,
-        records=len(payload.get("records", [])),
-        saved=bool(payload.get("saved")),
-        cache_path=payload.get("cache_path"),
-        reason=reason,
-        attempt=payload.get("attempt") or "",
-        error_reason=reason,
-        **_payload_http_log_fields(payload, getattr(provider, "last_request_metadata", {}) or {}),
-    )
-    records = payload.get("records", [])
+    chunks = _investor_types_period_chunks(fetch_start, fetch_end)
+    records: list[dict[str, Any]] = []
+    success_chunks = []
+    failed_chunks = []
+    cache_paths = []
+    for chunk_start, chunk_end in chunks:
+        payload: dict[str, Any]
+        cached = _read_investor_types_cache_payload(chunk_start, chunk_end)
+        if cached is not None:
+            payload = cached
+            status = "200"
+            reason = ""
+            _log_jquants_api_event(
+                endpoint="investor_types",
+                plan=_jquants_plan(config),
+                cache_hit=True,
+                status=status,
+                records=len(payload.get("records", [])),
+                saved=False,
+                cache_path=payload.get("cache_path"),
+                reason=reason,
+                fetch_from=chunk_start.isoformat(),
+                fetch_to=chunk_end.isoformat(),
+            )
+        else:
+            allowed, stop_reason = _api_call_allowed("investor_types")
+            if not allowed:
+                payload = _api_unavailable_payload("investor_types", stop_reason)
+                status = stop_reason
+                reason = stop_reason
+            else:
+                payload = _fetch_investor_types_with_retries(provider, chunk_start, chunk_end, config, force_refresh=FORCE_REFRESH_ACTIVE)
+                status = _provider_payload_status(payload)
+                reason = str(payload.get("reason") or status)
+            _log_jquants_api_event(
+                endpoint="investor_types",
+                plan=_jquants_plan(config),
+                cache_hit=bool(payload.get("from_cache")),
+                status=status,
+                records=len(payload.get("records", [])),
+                saved=bool(payload.get("saved")),
+                cache_path=payload.get("cache_path"),
+                reason=reason,
+                attempt=payload.get("attempt") or "",
+                error_reason=reason,
+                fetch_from=chunk_start.isoformat(),
+                fetch_to=chunk_end.isoformat(),
+                **_payload_http_log_fields(payload, getattr(provider, "last_request_metadata", {}) or {}),
+            )
+        chunk_records = payload.get("records", []) if isinstance(payload.get("records"), list) else []
+        if chunk_records:
+            records.extend(chunk_records)
+            success_chunks.append({"start": chunk_start.isoformat(), "end": chunk_end.isoformat(), "records": len(chunk_records)})
+            if payload.get("cache_path"):
+                cache_paths.append(payload.get("cache_path"))
+        else:
+            failed_chunks.append({"start": chunk_start.isoformat(), "end": chunk_end.isoformat(), "reason": reason or "empty_response"})
+    records = _dedupe_investor_type_records(records)
+    chunk_summary = {
+        "investor_types_chunks_total": len(chunks),
+        "investor_types_chunks_success": len(success_chunks),
+        "investor_types_chunks_failed": len(failed_chunks),
+        "investor_types_records_loaded": len(records),
+        "investor_types_fetch_requested_start": requested_fetch_start.isoformat(),
+        "investor_types_fetch_clamped_start": fetch_start.isoformat(),
+        "investor_types_fetch_start": fetch_start.isoformat(),
+        "investor_types_fetch_end": fetch_end.isoformat(),
+        "investor_types_clamp_reason": clamp_reason,
+        "investor_types_failed_chunks": failed_chunks,
+        "investor_types_disabled_reason": "",
+    }
+    _jquants_api_session()["investor_types_fetch_summary"] = chunk_summary
     if records:
         metadata.update(
             {
                 "available": True,
                 "warning": "",
                 "reason": "",
-                "cache_path": payload.get("cache_path"),
-                "from_cache": payload.get("from_cache"),
-                "saved": payload.get("saved"),
+                "cache_path": cache_paths[0] if cache_paths else "",
+                "cache_paths": cache_paths,
+                "from_cache": len(success_chunks) == len(chunks),
+                "chunks_total": len(chunks),
+                "chunks_success": len(success_chunks),
+                "chunks_failed": len(failed_chunks),
+                "records_loaded": len(records),
+                "failed_chunks": failed_chunks,
             }
         )
     else:
-        metadata["warning"] = payload.get("warning") or reason
+        reason = failed_chunks[0]["reason"] if failed_chunks else "unavailable"
+        metadata["warning"] = reason
         metadata["reason"] = reason
+        chunk_summary["investor_types_disabled_reason"] = reason
+        metadata["chunks_total"] = len(chunks)
+        metadata["chunks_success"] = 0
+        metadata["chunks_failed"] = len(failed_chunks)
+        metadata["records_loaded"] = 0
+        metadata["failed_chunks"] = failed_chunks
         _record_api_error("investor_types", reason)
     return {
         "records": records if isinstance(records, list) else [],
         "metadata": metadata,
         "start_date": fetch_start.isoformat(),
         "end_date": fetch_end.isoformat(),
+        "requested_start_date": requested_fetch_start.isoformat(),
+        "clamped_start_date": fetch_start.isoformat(),
+        "clamp_reason": clamp_reason,
     }
+
+
+def _investor_types_earliest_supported_date(config: dict[str, Any]) -> date | None:
+    earliest = jquants_earliest_supported_date(config, "investor_types") or jquants_earliest_supported_date(config, "prices")
+    if earliest is None and _jquants_plan(config) == "light":
+        return date(2021, 5, 31)
+    return earliest
+
+
+def _investor_types_period_chunks(start_date: date, end_date: date) -> list[tuple[date, date]]:
+    if end_date < start_date:
+        return []
+    chunks = []
+    current = start_date
+    while current <= end_date:
+        chunk_end = min(current + timedelta(days=364), end_date)
+        chunks.append((current, chunk_end))
+        current = chunk_end + timedelta(days=1)
+    return chunks
+
+
+def _dedupe_investor_type_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen = set()
+    deduped = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        key = json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(record)
+    return deduped
 
 
 def _investor_types_fetch_ranges(target_date: date) -> list[tuple[date, date]]:
@@ -10869,6 +14002,8 @@ def _log_jquants_api_event(
     retry_after: str = "",
     error_reason: str = "",
     result: str = "",
+    fetch_from: str = "",
+    fetch_to: str = "",
 ) -> None:
     path = ROOT / "logs" / "jquants_api.log"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -10893,6 +14028,10 @@ def _log_jquants_api_event(
         line = f"{line} error_reason={error_reason}"
     if result:
         line = f"{line} result={result}"
+    if fetch_from:
+        line = f"{line} from={fetch_from}"
+    if fetch_to:
+        line = f"{line} to={fetch_to}"
     if request_url:
         line = f"{line} request_url={request_url}"
     if request_params:
@@ -11019,10 +14158,15 @@ def write_trades_csv(path: Path, trades: list[dict[str, Any]]) -> None:
         "code",
         "name",
         "sector_name",
+        "signal_date",
         "entry_date",
         "exit_date",
         "holding_days",
         "entry_price",
+        "entry_price_source",
+        "signal_close_price",
+        "entry_open_price",
+        "entry_gap_rate",
         "exit_price",
         "intended_exit_price",
         "actual_exit_price",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 from db import initialize_database, save_market_context, save_scoring_results, save_trades
 from feature_analysis import build_feature_analysis, render_feature_analysis_markdown
 from paper_trade import execute_real_data_paper_trade, initial_live_paper_state
@@ -220,9 +222,122 @@ def test_feature_analysis_groups_closed_trade_results(config_copy: dict, tmp_pat
     assert "Score Effective Range Audit" in render_feature_analysis_markdown(analysis)
     assert "Duplicated Signal Warning" in render_feature_analysis_markdown(analysis)
     assert "Relative Strength Analysis" in render_feature_analysis_markdown(analysis)
+    assert "Relative Strength Effect Analysis" in render_feature_analysis_markdown(analysis)
     assert "relative_strength_5d帯別" in render_feature_analysis_markdown(analysis)
     assert "Relative Strength Debug" in render_feature_analysis_markdown(analysis)
     assert "technical_score average: 41.50" in render_feature_analysis_markdown(analysis)
+
+
+def test_relative_strength_effect_analysis_uses_closed_trade_profit_and_baseline(config_copy: dict, tmp_path) -> None:
+    config_copy["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    config_copy["profile_id"] = "rookie_dealer_02_v2_6"
+    config_copy["profile_name"] = "RS Test"
+    config_copy.setdefault("features", {})["relative_strength"] = True
+    config_copy.setdefault("scoring", {})["use_relative_strength_score"] = True
+    initialize_database(config_copy, tmp_path)
+
+    save_trades(
+        config_copy,
+        tmp_path,
+        "2026-03-06",
+        [
+            {
+                "trade_id": "target-new",
+                "action": "SELL",
+                "code": "1001",
+                "name": "New RS",
+                "signal_date": "2026-03-01",
+                "entry_date": "2026-03-02",
+                "exit_date": "2026-03-06",
+                "profit": 12000,
+                "net_profit": 10000,
+                "profit_rate": 0.1,
+                "net_profit_rate": 0.08,
+                "result": "WIN",
+                "order_status": "FILLED",
+                "relative_strength_score": 10,
+                "relative_strength_5d": 0.04,
+                "relative_strength_10d": 0.06,
+                "relative_strength_20d": 0.09,
+                "score_components": {"relative_strength_score": 10},
+            },
+            {
+                "trade_id": "target-common",
+                "action": "SELL",
+                "code": "1003",
+                "name": "Common",
+                "signal_date": "2026-03-01",
+                "entry_date": "2026-03-02",
+                "exit_date": "2026-03-06",
+                "profit": -2000,
+                "net_profit": -3000,
+                "profit_rate": -0.02,
+                "net_profit_rate": -0.03,
+                "result": "LOSS",
+                "order_status": "FILLED",
+                "relative_strength_score": 0,
+                "score_components": {"relative_strength_score": 0},
+            },
+        ],
+    )
+    baseline_config = deepcopy(config_copy)
+    baseline_config["profile_id"] = "rookie_dealer_02_v2_1"
+    baseline_config["profile_name"] = "Baseline"
+    save_trades(
+        baseline_config,
+        tmp_path,
+        "2026-03-06",
+        [
+            {
+                "trade_id": "base-removed",
+                "action": "SELL",
+                "code": "1002",
+                "name": "Removed",
+                "signal_date": "2026-03-01",
+                "entry_date": "2026-03-02",
+                "exit_date": "2026-03-06",
+                "profit": 5000,
+                "net_profit": 4000,
+                "profit_rate": 0.05,
+                "net_profit_rate": 0.04,
+                "result": "WIN",
+                "order_status": "FILLED",
+            },
+            {
+                "trade_id": "base-common",
+                "action": "SELL",
+                "code": "1003",
+                "name": "Common",
+                "signal_date": "2026-03-01",
+                "entry_date": "2026-03-02",
+                "exit_date": "2026-03-06",
+                "profit": -2000,
+                "net_profit": -3000,
+                "profit_rate": -0.02,
+                "net_profit_rate": -0.03,
+                "result": "LOSS",
+                "order_status": "FILLED",
+            },
+        ],
+    )
+
+    analysis = build_feature_analysis(config_copy, tmp_path)
+    effect = analysis["relative_strength_effect_analysis"]
+    buckets = {row["bucket"]: row for row in effect["buckets"]}
+    comparison = effect["selected_vs_baseline"]
+
+    assert buckets["relative_strength_score 10"]["total_profit"] == 10000
+    assert buckets["relative_strength_score = 0"]["total_profit"] == -3000
+    assert effect["top_selected_trades"][0]["code"] == "1001"
+    assert comparison["newly_selected_count"] == 1
+    assert comparison["removed_count"] == 1
+    assert comparison["newly_selected_profit"] == 10000
+    assert comparison["removed_profit_if_kept"] == 4000
+    assert comparison["net_selection_effect_profit"] == 6000
+
+    markdown = render_feature_analysis_markdown(analysis)
+    assert "## Top Relative Strength Selected Trades" in markdown
+    assert "## Relative Strength Selected vs Baseline" in markdown
 
 
 def test_relative_strength_debug_outputs_distribution_and_benchmark_warning(config_copy: dict, tmp_path) -> None:
@@ -304,6 +419,137 @@ def test_relative_strength_debug_outputs_distribution_and_benchmark_warning(conf
     assert "- records loaded: 35" in markdown
     assert "### benchmark_source" in markdown
     assert "Top 20 relative_strength_score" in markdown
+
+
+def test_investor_context_debug_shows_top_candidates_and_effect(config_copy: dict, tmp_path) -> None:
+    config_copy["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    config_copy.setdefault("features", {})["investor_context"] = True
+    config_copy.setdefault("scoring", {})["use_investor_context_score"] = True
+    initialize_database(config_copy, tmp_path)
+    save_trades(
+        config_copy,
+        tmp_path,
+        "2026-03-06",
+        [
+            {
+                "trade_id": "high-win",
+                "action": "SELL",
+                "code": "1001",
+                "name": "High Winner",
+                "signal_date": "2026-03-01",
+                "entry_date": "2026-03-02",
+                "exit_date": "2026-03-06",
+                "profit": 10000,
+                "profit_rate": 0.1,
+                "gross_profit": 10000,
+                "result": "WIN",
+                "order_status": "FILLED",
+                "investor_context_score": 5,
+                "overseas_net_buy_4w_sum": 1000,
+                "overseas_net_buy_4w_trend": "improving",
+                "score_components": {"investor_context_score": 5, "component_total": 50, "matches_total_score": True},
+            },
+            {
+                "trade_id": "low-loss",
+                "action": "SELL",
+                "code": "1002",
+                "name": "Low Loser",
+                "signal_date": "2026-03-01",
+                "entry_date": "2026-03-02",
+                "exit_date": "2026-03-06",
+                "profit": -5000,
+                "profit_rate": -0.05,
+                "gross_profit": -5000,
+                "result": "LOSS",
+                "order_status": "FILLED",
+                "investor_context_score": 0,
+                "overseas_net_buy_4w_sum": -100,
+                "overseas_net_buy_4w_trend": "worsening",
+                "score_components": {"investor_context_score": 0, "component_total": 45, "matches_total_score": True},
+            },
+        ],
+    )
+
+    full = build_feature_analysis(config_copy, tmp_path)
+    analysis = full["investor_context_analysis"]
+    top = analysis["top_candidates"][0]
+    effect_by_bucket = {item["bucket"]: item for item in analysis["effect_analysis"]}
+
+    assert top["code"] == "1001"
+    assert top["investor_context_score"] == 5
+    assert effect_by_bucket["investor_context_score >= 4"]["count"] == 1
+    assert effect_by_bucket["investor_context_score >= 4"]["win_rate"] == 1.0
+    assert effect_by_bucket["investor_context_score <= 0"]["count"] == 1
+    assert effect_by_bucket["investor_context_score <= 0"]["profit_factor"] == 0.0
+    markdown = render_feature_analysis_markdown(full)
+    assert "### Top Investor Context Candidates" in markdown
+    assert "| 2026-03-01 | 1001 | 5.00 | 1,000.00 | improving | true | WIN | 10,000円 |" in markdown
+    assert "### Investor Context Effect Analysis" in markdown
+
+
+def test_investor_context_filter_analysis_reports_rejections(tmp_path) -> None:
+    config = load_profile("rookie_dealer_02_v2_11")
+    config["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
+    initialize_database(config, tmp_path)
+    save_scoring_results(
+        config,
+        tmp_path,
+        {
+            "date": "2026-03-01",
+            "scores": [
+                {
+                    "code": "1001",
+                    "name": "Rejected",
+                    "rank": 1,
+                    "selected": False,
+                    "rejected_reason": "investor_context_negative",
+                    "investor_context_score": -2,
+                    "total_score": 48,
+                    "technical_score": 48,
+                    "confidence": 0.8,
+                    "score_components": {
+                        "technical_score": 48,
+                        "investor_context_score": 0,
+                        "component_total": 48,
+                        "total_score": 48,
+                        "matches_total_score": True,
+                    },
+                }
+            ],
+        },
+    )
+    save_trades(
+        config,
+        tmp_path,
+        "2026-03-06",
+        [
+            {
+                "trade_id": "accepted",
+                "action": "SELL",
+                "code": "1002",
+                "name": "Accepted",
+                "signal_date": "2026-03-01",
+                "entry_date": "2026-03-02",
+                "exit_date": "2026-03-06",
+                "profit": 7000,
+                "profit_rate": 0.07,
+                "gross_profit": 7000,
+                "result": "WIN",
+                "order_status": "FILLED",
+                "investor_context_score": 1,
+            }
+        ],
+    )
+
+    analysis = build_feature_analysis(config, tmp_path)
+    investor_filter = analysis["investor_context_filter"]
+    markdown = render_feature_analysis_markdown(analysis)
+
+    assert investor_filter["rejected_count"] == 1
+    assert investor_filter["rejected_codes"] == ["1001"]
+    assert investor_filter["accepted_profit"] == 7000
+    assert "## Investor Context Filter" in markdown
+    assert "- rejected_codes: 1001" in markdown
 
 
 def test_relative_strength_debug_warns_when_all_scores_are_zero(config_copy: dict, tmp_path) -> None:
@@ -671,6 +917,9 @@ def test_sell_trade_inherits_buy_time_features(config_copy: dict) -> None:
         "code": "1001",
         "name": "Feature Stock",
         "sector_name": "情報・通信",
+        "section": "TSEPrime",
+        "market_section": "TSEPrime",
+        "listing_market": "TSEPrime",
         "close": 1000,
         "selected": True,
         "total_score": 44,

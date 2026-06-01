@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 import main as main_module
@@ -65,10 +67,13 @@ def test_run_experiments_selects_registry_profiles() -> None:
 
     assert profiles == [
         "rookie_dealer_02_v2_10",
+        "rookie_dealer_02_v2_11",
         "rookie_dealer_02_v2_6",
         "rookie_dealer_02_v2_7",
         "rookie_dealer_02_v2_8",
         "rookie_dealer_02_v2_9",
+        "rookie_dealer_03_growth",
+        "rookie_dealer_03_standard_growth",
     ]
 
 
@@ -125,6 +130,19 @@ def test_run_experiments_skip_analyze_skips_analyze_step(tmp_path, monkeypatch) 
     monkeypatch.setattr(main_module, "run_backtest", lambda *args: calls.append(("backtest", args)))
     monkeypatch.setattr(main_module, "run_analyze", lambda *args: calls.append(("analyze", args)))
     monkeypatch.setattr(main_module, "run_compare_profiles", lambda *args: calls.append(("compare", args)))
+    monkeypatch.setattr(
+        main_module,
+        "prepare_run_experiments_common_stages",
+        lambda *_args: {
+            "price_fetch_time": 0,
+            "indicator_time": 0,
+            "candidate_time": 0,
+            "scoring_time": 0,
+            "trade_time": 0,
+            "reused_indicator_count": 0,
+            "reused_candidate_count": 0,
+        },
+    )
 
     main_module.run_experiments(
         "rookie_dealer_02_v2_1",
@@ -138,6 +156,102 @@ def test_run_experiments_skip_analyze_skips_analyze_step(tmp_path, monkeypatch) 
     assert "analyze" not in [call[0] for call in calls]
     assert [call[0] for call in calls].count("backtest") == 2
     assert [call[0] for call in calls].count("compare") == 1
+
+
+def test_summary_only_skips_analyze_step(tmp_path, monkeypatch) -> None:
+    calls: list[tuple] = []
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "SUMMARY_ONLY_ACTIVE", True)
+    monkeypatch.setattr(main_module, "run_backtest", lambda *args: calls.append(("backtest", args)))
+    monkeypatch.setattr(main_module, "run_analyze", lambda *args: calls.append(("analyze", args)))
+    monkeypatch.setattr(main_module, "run_compare_profiles", lambda *args: calls.append(("compare", args)))
+    monkeypatch.setattr(
+        main_module,
+        "prepare_run_experiments_common_stages",
+        lambda *_args: {
+            "shared_price_fetch_time": 0,
+            "shared_indicator_time": 0,
+            "shared_candidate_time": 0,
+            "profile_scoring_time_by_profile": {},
+            "profile_trade_time_by_profile": {},
+            "reused_scoring_count": 0,
+        },
+    )
+
+    main_module.run_experiments(
+        "rookie_dealer_02_v2_1",
+        "2026-01-01",
+        "2026-03-06",
+        ["rookie_dealer_02_v2_10"],
+        skip_backtest=False,
+        skip_analyze=False,
+    )
+
+    assert "analyze" not in [call[0] for call in calls]
+    assert [call[0] for call in calls].count("backtest") == 2
+    assert [call[0] for call in calls].count("compare") == 1
+
+
+def test_scoring_reuse_sources_detect_identical_scoring_profiles() -> None:
+    reuse = main_module._experiment_scoring_reuse_sources(
+        ["rookie_dealer_02_v2_1", "rookie_dealer_02_v2_7", "rookie_dealer_02_v2_10"]
+    )
+
+    assert reuse.get("rookie_dealer_02_v2_10") == "rookie_dealer_02_v2_7"
+    assert "rookie_dealer_02_v2_7" not in reuse
+
+
+def test_prepare_run_experiments_common_stages_reuses_indicator_and_candidate_generation(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "ensure_price_history_for_backtest", lambda *_args: None)
+    monkeypatch.setattr(main_module, "available_cached_price_dates", lambda *_args: [date(2026, 1, 5), date(2026, 1, 6)])
+    monkeypatch.setattr(main_module, "_preload_light_api_context", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main_module, "ensure_market_context", lambda *_args: {})
+    calls = {"indicators": 0, "candidates": 0}
+
+    def fake_ensure_indicators(_provider: str, target_date_text: str) -> None:
+        calls["indicators"] += 1
+        config = main_module.load_config(main_module.CONFIG_PATH)
+        main_module.write_json(
+            main_module.processed_profile_path(config, f"indicators_{target_date_text}.json"),
+            {
+                "date": target_date_text,
+                "indicator_mode": main_module._backtest_indicator_mode(config),
+                "relative_strength_enabled": main_module._relative_strength_enabled_for_indicators(config),
+                "indicators": [{"code": "1001", "date": target_date_text}],
+            },
+        )
+
+    def fake_ensure_screen(_provider: str, target_date_text: str) -> None:
+        calls["candidates"] += 1
+        config = main_module.load_config(main_module.CONFIG_PATH)
+        profile_id = main_module.profile_id_from(config)
+        payload = {
+            "date": target_date_text,
+            "profile_id": profile_id,
+            "profile_name": main_module.profile_name_from(config),
+            "config_version": main_module.config_version_from(config),
+            "candidate_count": 1,
+            "candidates": [{"code": "1001", "date": target_date_text}],
+        }
+        main_module.write_json(main_module.processed_profile_path(config, f"candidates_{target_date_text}.json"), payload)
+        main_module.write_json(tmp_path / "logs" / "screening" / profile_id / f"screening_{target_date_text}.json", payload)
+
+    monkeypatch.setattr(main_module, "ensure_indicators", fake_ensure_indicators)
+    monkeypatch.setattr(main_module, "ensure_screen", fake_ensure_screen)
+
+    report = main_module.prepare_run_experiments_common_stages(
+        ["rookie_dealer_02_v2_1", "rookie_dealer_02_v2_7", "rookie_dealer_02_v2_9"],
+        "2026-01-05",
+        "2026-01-06",
+    )
+
+    assert calls == {"indicators": 2, "candidates": 2}
+    assert report["reused_indicator_count"] == 4
+    assert report["reused_candidate_count"] == 4
+    for profile_id in ["rookie_dealer_02_v2_7", "rookie_dealer_02_v2_9"]:
+        assert (tmp_path / "data" / "processed" / profile_id / "indicators_2026-01-05.json").exists()
+        assert (tmp_path / "data" / "processed" / profile_id / "candidates_2026-01-05.json").exists()
 
 
 def test_experiment_verdict_no_practical_effect() -> None:

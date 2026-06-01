@@ -333,6 +333,229 @@ def test_clean_cache_targets_jquants_cache_kind(tmp_path, monkeypatch) -> None:
     assert [item["relative_path"] for item in plan["targets"]] == ["data/cache/jquants/prices/a.json"]
 
 
+def test_storage_audit_reports_processed_duplication(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    for profile in ["a", "b"]:
+        path = tmp_path / "data" / "processed" / profile / "indicators_2026-01-05.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{}", encoding="utf-8")
+
+    audit = main_module.build_storage_audit()
+
+    assert audit["cache_duplication"]["profile_indicator_files"] == 2
+    assert audit["cache_duplication"]["duplicate_indicator_dates"] == 1
+
+
+def test_cleanup_storage_is_dry_run_by_default_and_keeps_raw_prices(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    log = tmp_path / "logs" / "backtests" / "old.json"
+    raw = tmp_path / "data" / "raw" / "prices_2026-01-05.json"
+    log.parent.mkdir(parents=True)
+    raw.parent.mkdir(parents=True)
+    log.write_text("old", encoding="utf-8")
+    raw.write_text("price", encoding="utf-8")
+    old_time = (main_module.datetime.now() - main_module.timedelta(days=40)).timestamp()
+    import os
+
+    os.utime(log, (old_time, old_time))
+    os.utime(raw, (old_time, old_time))
+
+    plan = main_module.build_cleanup_storage_plan(include_logs=True, keep_days=30)
+    result = main_module.execute_cleanup_storage_plan(plan, apply=False)
+
+    assert [item["relative_path"] for item in plan["targets"]] == ["logs/backtests/old.json"]
+    assert result["deleted_count"] == 0
+    assert log.exists()
+    assert raw.exists()
+
+
+def test_cleanup_storage_apply_deletes_only_allowed_targets(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    log = tmp_path / "logs" / "scoring" / "old.json"
+    config = tmp_path / "config" / "danger.json"
+    log.parent.mkdir(parents=True)
+    config.parent.mkdir(parents=True)
+    log.write_text("old", encoding="utf-8")
+    config.write_text("keep", encoding="utf-8")
+
+    result = main_module.execute_cleanup_storage_plan(
+        {"targets": [main_module._cleanup_target(log, 3, "test"), main_module._cleanup_target(config, 4, "test")]},
+        apply=True,
+    )
+
+    assert result["deleted_count"] == 1
+    assert not log.exists()
+    assert config.exists()
+
+
+def test_common_processed_cache_restores_candidate_with_target_profile_metadata(tmp_path, monkeypatch, config_copy) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    config_copy["profile_id"] = "target_profile"
+    config_copy["profile_name"] = "Target"
+    payload = {"profile_id": "source_profile", "profile_name": "Source", "candidates": [{"code": "1001"}]}
+
+    main_module._save_common_processed_cache(config_copy, "candidates", "2026-01-05", payload)
+    target = tmp_path / "data" / "processed" / "target_profile" / "candidates_2026-01-05.json"
+
+    assert main_module._restore_common_processed_cache(config_copy, "candidates", "2026-01-05", target) is True
+    restored = main_module.read_json(target)
+    assert restored["profile_id"] == "target_profile"
+    assert restored["profile_name"] == "Target"
+    assert restored["candidates"] == [{"code": "1001"}]
+
+
+def test_compact_processed_cache_hardlinks_duplicate_profile_cache(tmp_path, monkeypatch, config_copy) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "load_profile", lambda profile_id: {**config_copy, "profile_id": profile_id, "profile_name": profile_id})
+    for profile in ["p1", "p2"]:
+        path = tmp_path / "data" / "processed" / profile / "indicators_2026-01-05.json"
+        path.parent.mkdir(parents=True)
+        path.write_text('{"indicators":[]}', encoding="utf-8")
+
+    plan = main_module.build_compact_processed_cache_plan()
+    result = main_module.execute_compact_processed_cache_plan(plan, apply=True)
+    p1 = tmp_path / "data" / "processed" / "p1" / "indicators_2026-01-05.json"
+    p2 = tmp_path / "data" / "processed" / "p2" / "indicators_2026-01-05.json"
+
+    assert result["compacted_count"] == 2
+    assert main_module._same_inode(p1, p2)
+    assert (tmp_path / "data" / "processed" / "common").exists()
+
+
+def test_inspect_cache_reports_required_and_removable_indicator_fields(tmp_path, monkeypatch, config_copy) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    config_copy["profile_id"] = "rookie_dealer_02_v2_1"
+    path = tmp_path / "data" / "processed" / "rookie_dealer_02_v2_1" / "indicators_2026-03-06.json"
+    path.parent.mkdir(parents=True)
+    main_module.write_json(
+        path,
+        {
+            "indicators": [
+                {
+                    "code": "1001",
+                    "date": "2026-03-06",
+                    "close": 100,
+                    "ma5": 101,
+                    "ma25": 99,
+                    "rsi": 55,
+                    "volume_ratio": 2,
+                    "turnover_value": 1_000_000_000,
+                    "five_day_volatility": 0.02,
+                    "macd": 1.2,
+                }
+            ]
+        },
+    )
+
+    inspection = main_module.inspect_cache("indicators", "2026-03-06", config_copy)
+
+    assert inspection["row_count"] == 1
+    assert inspection["column_count"] == 10
+    assert "close" in inspection["required_fields"]
+    assert "macd" in inspection["removable_fields"]
+    assert inspection["largest_fields"][0]["field"] in {"turnover_value", "date", "code", "macd"}
+
+
+def test_inspect_cache_keeps_relative_strength_fields_when_enabled(tmp_path, monkeypatch, config_copy) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    config_copy["profile_id"] = "rookie_dealer_02_v2_6"
+    config_copy.setdefault("features", {})["relative_strength"] = True
+    config_copy.setdefault("scoring", {})["use_relative_strength_score"] = True
+    path = tmp_path / "data" / "processed" / "rookie_dealer_02_v2_6" / "indicators_2026-03-06.json"
+    path.parent.mkdir(parents=True)
+    main_module.write_json(path, {"indicators": [{"code": "1001", "relative_strength_score": 3, "macd": 1.2}]})
+
+    inspection = main_module.inspect_cache("indicators", "2026-03-06", config_copy)
+
+    assert "relative_strength_score" in inspection["required_fields"]
+    assert "relative_strength_score" not in inspection["removable_fields"]
+    assert "macd" in inspection["removable_fields"]
+
+
+def test_compact_storage_keeps_selected_scores_and_prunes_debug_fields(config_copy) -> None:
+    config_copy.setdefault("storage", {})["save_mode"] = "compact"
+    scores = [
+        {
+            "code": "1001",
+            "selected": True,
+            "total_score": 45,
+            "macd": 1.2,
+            "score_components": {"technical_score": 45},
+            "relative_strength_score": 3,
+        },
+        {"code": "1002", "selected": False, "total_score": 40, "macd": 0.1},
+    ]
+
+    stored = main_module._scores_for_storage(scores, config_copy)
+
+    assert [row["code"] for row in stored] == ["1001"]
+    assert stored[0]["total_score"] == 45
+    assert "macd" not in stored[0]
+    assert "score_components" not in stored[0]
+
+
+def test_analysis_storage_keeps_rows_but_prunes_debug_fields(config_copy) -> None:
+    config_copy.setdefault("storage", {})["save_mode"] = "analysis"
+    config_copy.setdefault("analysis", {})["save_rejected_candidates"] = True
+    scores = [
+        {"code": "1001", "selected": True, "total_score": 45, "macd": 1.2, "relative_strength_score": 3},
+        {"code": "1002", "selected": False, "total_score": 40, "macd": 0.1, "relative_strength_score": 0},
+    ]
+
+    stored = main_module._scores_for_storage(scores, config_copy)
+
+    assert [row["code"] for row in stored] == ["1001", "1002"]
+    assert "relative_strength_score" in stored[0]
+    assert "macd" not in stored[0]
+
+
+def test_compact_trade_storage_prunes_debug_fields(config_copy) -> None:
+    config_copy.setdefault("storage", {})["save_mode"] = "compact"
+    trades = [
+        {
+            "trade_id": "t1",
+            "action": "BUY",
+            "code": "1001",
+            "entry_date": "2026-01-06",
+            "profit": 100,
+            "dealer_comment": "debug text",
+            "score_components": {"technical_score": 45},
+        }
+    ]
+
+    stored = main_module._trades_for_storage(trades, config_copy)
+
+    assert stored[0]["trade_id"] == "t1"
+    assert "dealer_comment" not in stored[0]
+    assert "score_components" not in stored[0]
+
+
+def test_performance_audit_reports_hot_files_and_load_samples(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    indicator = tmp_path / "data" / "processed" / "p1" / "indicators_2026-01-05.json"
+    candidate = tmp_path / "data" / "processed" / "p1" / "candidates_2026-01-05.json"
+    scored = tmp_path / "data" / "processed" / "p1" / "scored_candidates_2026-01-05.json"
+    log = tmp_path / "logs" / "backtests" / "summary.json"
+    report = tmp_path / "reports" / "experiments" / "summary.md"
+    for path, key in [(indicator, "indicators"), (candidate, "candidates"), (scored, "scores")]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        main_module.write_json(path, {key: [{"code": "1001"}]})
+    log.parent.mkdir(parents=True)
+    report.parent.mkdir(parents=True)
+    log.write_text('{"ok":true}', encoding="utf-8")
+    report.write_text("ok", encoding="utf-8")
+
+    audit = main_module.build_performance_audit()
+
+    assert audit["processed_indicator_total_size"] > 0
+    assert audit["processed_candidate_total_size"] > 0
+    assert audit["scored_candidate_total_size"] > 0
+    assert audit["logs_total_size"] > 0
+    assert audit["reports_total_size"] > 0
+    assert audit["largest_indicator_files"][0]["path"].endswith("indicators_2026-01-05.json")
+    assert audit["runtime_cost_estimate"]["indicator_load_time_sample"]["sample_count"] == 1
+
+
 def test_period_5y_sets_start_date_from_today(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "_today_jst", lambda: date(2026, 5, 31))
     args = SimpleNamespace(period="5y", start_date=None, end_date=None)
@@ -354,6 +577,14 @@ def test_period_preset_is_applied_by_parse_args(monkeypatch) -> None:
     assert args.end_date == "2026-05-31"
     assert args.start_date_source == "cli"
     assert args.end_date_source == "cli"
+
+
+def test_summary_only_flag_is_parsed(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.sys, "argv", ["main.py", "--mode", "run-experiments", "--summary-only"])
+
+    args = main_module.parse_args()
+
+    assert args.summary_only is True
 
 
 def test_experiment_judgement_candidate_needs_review_and_rejected() -> None:
