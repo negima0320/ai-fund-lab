@@ -4,7 +4,13 @@ import json
 from copy import deepcopy
 
 from db import initialize_database, save_market_context, save_scoring_results, save_trades
-from feature_analysis import _backtest_integrity_audits, _capital_utilization_audit, render_feature_analysis_markdown, build_feature_analysis
+from feature_analysis import (
+    _backtest_integrity_audits,
+    _capital_utilization_audit,
+    _price_band_affordability_audit,
+    build_feature_analysis,
+    render_feature_analysis_markdown,
+)
 from paper_trade import execute_real_data_paper_trade, initial_live_paper_state
 from profile_loader import load_profile
 
@@ -30,7 +36,7 @@ def test_capital_utilization_audit_reports_target_exposure_blockers(config_copy:
     )
     backtest_summary = {
         "all_trades": [
-            {"action": "BUY", "entry_date": "2026-01-02", "amount": 450000, "shares": 100, "allocation_reason": "capital_utilization_policy"},
+            {"action": "BUY", "entry_date": "2026-01-02", "amount": 450000, "shares": 100, "entry_price": 4500, "allocation_reason": "capital_utilization_policy"},
             {"action": "SKIP_BUY", "entry_date": "2026-01-02", "skipped_reason": "target_exposure_limit"},
             {"action": "SKIP_BUY", "entry_date": "2026-01-03", "skipped_reason": "insufficient_available_cash"},
             {"action": "SKIP_BUY", "entry_date": "2026-01-03", "skipped_reason": "round_lot_unaffordable"},
@@ -45,9 +51,24 @@ def test_capital_utilization_audit_reports_target_exposure_blockers(config_copy:
         "2026-01-03",
         backtest_summary,
         config_copy,
+        [
+            {"selected": True, "close": 2500},
+            {"selected": True, "round_lot_amount": 450000},
+            {"selected": False, "close": 9000},
+        ],
     )
 
     assert audit["target_exposure_gap_average"] == 0.3833
+    assert audit["target_exposure"] == 0.9
+    assert audit["max_position_value_rate"] == 0.5
+    assert audit["average_round_lot_amount"] == 350000
+    assert audit["median_round_lot_amount"] == 350000
+    assert audit["affordable_under_300k_count"] == 1
+    assert audit["affordable_under_400k_count"] == 1
+    assert audit["affordable_under_500k_count"] == 2
+    assert audit["selected_round_lot_amount_breakdown"]["<=300k"] == 1
+    assert audit["selected_round_lot_amount_breakdown"]["400k-500k"] == 1
+    assert audit["bought_round_lot_amount_breakdown"]["400k-500k"] == 1
     assert audit["target_exposure_blocked_reason_breakdown"]["target_exposure_limit"] == 1
     assert audit["affordable_selected_count"] == 2
     assert audit["unaffordable_selected_count"] == 2
@@ -55,6 +76,53 @@ def test_capital_utilization_audit_reports_target_exposure_blockers(config_copy:
     assert audit["min_cash_buffer_hit_count"] == 1
     assert audit["no_candidate_days"] == 1
     assert audit["no_affordable_candidate_days"] == 1
+
+
+def test_price_band_affordability_audit_reports_penalized_rows(config_copy: dict) -> None:
+    config_copy["capital_utilization_policy"] = {"buy_lot_size": 100}
+    config_copy["affordability_filter"] = {
+        "enabled": True,
+        "preferred_round_lot_amount": 400000,
+        "penalty_points": 3,
+        "reason": "price_band_penalty",
+    }
+    scoring_rows = [
+        {
+            "date": "2026-01-02",
+            "code": "1001",
+            "name": "Affordable",
+            "close": 3500,
+            "selected": True,
+            "price_band_penalty": 0,
+            "total_score": 50,
+        },
+        {
+            "date": "2026-01-02",
+            "code": "1002",
+            "name": "Expensive",
+            "close": 5000,
+            "selected": False,
+            "price_band_penalty": 3,
+            "total_score": 47,
+        },
+    ]
+    backtest_summary = {"all_trades": [{"action": "BUY", "entry_price": 3500, "shares": 100}]}
+
+    audit = _price_band_affordability_audit(config_copy, scoring_rows, backtest_summary)
+
+    assert audit["enabled"] is True
+    assert audit["preferred_round_lot_amount"] == 400000
+    assert audit["penalty_points"] == 3
+    assert audit["scored_count"] == 2
+    assert audit["selected_count"] == 1
+    assert audit["penalized_count"] == 1
+    assert audit["average_round_lot_amount"] == 425000
+    assert audit["selected_average_round_lot_amount"] == 350000
+    assert audit["bought_average_round_lot_amount"] == 350000
+    assert audit["scored_round_lot_amount_breakdown"]["300k-400k"] == 1
+    assert audit["scored_round_lot_amount_breakdown"]["400k-500k"] == 1
+    assert audit["sample_penalized_rows"][0]["code"] == "1002"
+    assert audit["sample_penalized_rows"][0]["round_lot_amount"] == 500000
 
 
 def test_feature_analysis_repairs_stale_trade_without_selected_audit(config_copy: dict, tmp_path) -> None:

@@ -175,6 +175,81 @@ profiles:
       earnings_filter: false
       capital_utilization: true
 
+  rookie_dealer_02_v2_20:
+    role: experiment
+    description: 資金利用率向上 max_position_value_rate 0.7 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_19
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+
+  rookie_dealer_02_v2_21:
+    role: experiment
+    description: 資金利用率向上 max_position_value_rate 0.8 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_19
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+
+  rookie_dealer_02_v2_22:
+    role: experiment
+    description: 資金利用率向上 max_position_value_rate 1.0 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_19
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+
+  rookie_dealer_02_v2_23:
+    role: experiment
+    description: 100株購入金額500000円以下優先 score penalty 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_19
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      affordability_filter: true
+
+  rookie_dealer_02_v2_24:
+    role: experiment
+    description: 100株購入金額400000円以下優先 score penalty 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_19
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      affordability_filter: true
+
+  rookie_dealer_02_v2_25:
+    role: experiment
+    description: 100株購入金額300000円以下優先 score penalty 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_19
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      affordability_filter: true
+
   rookie_dealer_03_growth:
     role: experiment
     description: 東証グロース市場のみを対象にする攻撃型検証

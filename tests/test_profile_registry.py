@@ -89,6 +89,21 @@ def test_run_experiments_profiles_option_filters_targets() -> None:
     assert profiles == ["rookie_dealer_02_v2_10", "rookie_dealer_02_v2_6"]
 
 
+def test_run_experiments_selects_v2_19_capital_exposure_profiles() -> None:
+    registry = main_module.load_profile_registry()
+
+    profiles = main_module.select_experiment_profiles("rookie_dealer_02_v2_19", registry, None)
+
+    assert profiles == [
+        "rookie_dealer_02_v2_20",
+        "rookie_dealer_02_v2_21",
+        "rookie_dealer_02_v2_22",
+        "rookie_dealer_02_v2_23",
+        "rookie_dealer_02_v2_24",
+        "rookie_dealer_02_v2_25",
+    ]
+
+
 def test_run_experiments_skip_backtest_writes_summary(tmp_path, monkeypatch) -> None:
     calls: list[tuple] = []
     monkeypatch.setattr(main_module, "ROOT", tmp_path)

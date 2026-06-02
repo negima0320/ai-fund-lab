@@ -1214,6 +1214,7 @@ def test_experiment_summary_results_table_includes_baseline_row() -> None:
 
     assert "| base_profile | baseline |" in markdown
     assert "| experiment_profile | experiment |" in markdown
+    assert "integrity_warning_count" in markdown
     assert main_module._experiment_summary_result_rows(
         {
             "base": {"profile_id": "base_profile"},
@@ -1223,6 +1224,45 @@ def test_experiment_summary_results_table_includes_baseline_row() -> None:
         {"profile_id": "base_profile", "role": "baseline"},
         {"profile_id": "experiment_profile", "role": "experiment"},
     ]
+
+
+def test_experiment_summary_result_integrity_prefers_feature_analysis_audit(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    profile_id = "rookie_dealer_02_v2_19"
+    feature_dir = tmp_path / "reports" / profile_id / "backtests"
+    feature_dir.mkdir(parents=True)
+    main_module.write_json(
+        feature_dir / "feature_analysis.json",
+        {
+            "backtest_result_integrity_audit": {
+                "result_integrity_status": "OK",
+                "trade_without_selected_count": 0,
+                "integrity_warning_count": 0,
+                "warnings": [],
+                "errors": [],
+            }
+        },
+    )
+    summary_dir = tmp_path / "logs" / "backtests" / profile_id / "2026-01-01_to_2026-03-06"
+    summary_dir.mkdir(parents=True)
+    main_module.write_json(
+        summary_dir / "backtest_summary.json",
+        {
+            "backtest_result_integrity_audit": {
+                "result_integrity_status": "WARNING",
+                "trade_without_selected_count": 1,
+                "integrity_warning_count": 1,
+                "warnings": ["stale warning"],
+                "errors": [],
+            }
+        },
+    )
+
+    audit = main_module._backtest_summary_result_integrity(profile_id, "2026-01-01", "2026-03-06")
+
+    assert audit["result_integrity_status"] == "OK"
+    assert audit["trade_without_selected_count"] == 0
+    assert audit["integrity_warning_count"] == 0
 
 
 def test_experiment_processed_data_audit_recomputes_common_cache_dates(monkeypatch, config_copy, tmp_path) -> None:

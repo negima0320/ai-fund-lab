@@ -5379,6 +5379,7 @@ def build_experiment_batch_summary(
                 "market_trade_consistency_warning": market_trade_consistency_warning,
                 "result_integrity_status": result_integrity.get("result_integrity_status", ""),
                 "integrity_error_count": len(result_integrity.get("errors", []) or []),
+                "integrity_warning_count": int(result_integrity.get("integrity_warning_count", len(result_integrity.get("warnings", []) or [])) or 0),
                 "market_filter_violation_count": result_integrity.get("market_filter_violation_count", 0),
                 "trade_without_selected_count": result_integrity.get("trade_without_selected_count", 0),
                 "out_of_period_trade_count": result_integrity.get("out_of_period_trade_count", 0),
@@ -5473,6 +5474,7 @@ def build_experiment_batch_summary(
             "backtest_coverage_audit": base_date_audit.get("backtest_coverage_audit", {}) if isinstance(base_date_audit, dict) else {},
             "result_integrity_status": base_result_integrity.get("result_integrity_status", ""),
             "integrity_error_count": len(base_result_integrity.get("errors", []) or []),
+            "integrity_warning_count": int(base_result_integrity.get("integrity_warning_count", len(base_result_integrity.get("warnings", []) or [])) or 0),
             "market_filter_violation_count": base_result_integrity.get("market_filter_violation_count", 0),
             "trade_without_selected_count": base_result_integrity.get("trade_without_selected_count", 0),
             "out_of_period_trade_count": base_result_integrity.get("out_of_period_trade_count", 0),
@@ -5914,8 +5916,8 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             "",
             "## Results",
             "",
-            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | investor_filter_rejected_count | market_filter | market_candidate_count | market_selected_count | market_filter_excluded_count | market_trade_consistency_warning | result_integrity_status | integrity_error_count | market_filter_violation_count | trade_without_selected_count | out_of_period_trade_count | stale_cache_read_count | score_integrity_status | total_score_mismatch_count | stale_score_cache_count | future_data_leak_count | signal_entry_date_violation_count | no_trade_fallback_selected_count | selected_below_regular_min_score_count | fallback_top_pick_selected_count | invalid_below_threshold_selected_count | selection_diff_count | outcome_diff_count | indicators_last_date | candidates_last_date | scored_candidates_last_date | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | earnings_calendar_records | earnings_filter_rejected_count | earnings_filter_status | practical_effect | effect_reason | verdict | verdict_reason |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | investor_filter_rejected_count | market_filter | market_candidate_count | market_selected_count | market_filter_excluded_count | market_trade_consistency_warning | result_integrity_status | integrity_error_count | integrity_warning_count | market_filter_violation_count | trade_without_selected_count | out_of_period_trade_count | stale_cache_read_count | score_integrity_status | total_score_mismatch_count | stale_score_cache_count | future_data_leak_count | signal_entry_date_violation_count | no_trade_fallback_selected_count | selected_below_regular_min_score_count | fallback_top_pick_selected_count | invalid_below_threshold_selected_count | selection_diff_count | outcome_diff_count | indicators_last_date | candidates_last_date | scored_candidates_last_date | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | earnings_calendar_records | earnings_filter_rejected_count | earnings_filter_status | practical_effect | effect_reason | verdict | verdict_reason |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for row in _experiment_summary_result_rows(summary):
@@ -5946,6 +5948,7 @@ def _experiment_summary_table_row(row: dict[str, Any]) -> str:
         f"{_compact_json(row.get('market_selected_count', {}))} | {row.get('market_filter_excluded_count', 0)} | "
         f"{row.get('market_trade_consistency_warning', '') or '-'} | "
         f"{row.get('result_integrity_status', '') or '-'} | {row.get('integrity_error_count', 0)} | "
+        f"{row.get('integrity_warning_count', 0)} | "
         f"{row.get('market_filter_violation_count', 0)} | {row.get('trade_without_selected_count', 0)} | "
         f"{row.get('out_of_period_trade_count', 0)} | {row.get('stale_cache_read_count', 0)} | "
         f"{row.get('score_integrity_status', '') or '-'} | {row.get('total_score_mismatch_count', 0)} | "
@@ -6261,7 +6264,24 @@ def _backtest_summary_market_coverage(profile_id: str, start_date_text: str, end
 
 
 def _backtest_summary_result_integrity(profile_id: str, start_date_text: str, end_date_text: str) -> dict[str, Any]:
+    feature_audit = _feature_analysis_result_integrity(profile_id)
+    if feature_audit:
+        return feature_audit
     payload = _backtest_summary_payload(profile_id, start_date_text, end_date_text)
+    audit = payload.get("backtest_result_integrity_audit", {})
+    return audit if isinstance(audit, dict) else {}
+
+
+def _feature_analysis_result_integrity(profile_id: str) -> dict[str, Any]:
+    path = ROOT / "reports" / profile_id / "backtests" / "feature_analysis.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
     audit = payload.get("backtest_result_integrity_audit", {})
     return audit if isinstance(audit, dict) else {}
 

@@ -187,7 +187,11 @@ def build_feature_analysis(
     integrity_audits = timed("feature_analysis_market_filter_audit_sec", lambda: _backtest_integrity_audits(root, profile_id, start_date, end_date))
     capital_utilization_audit = timed(
         "feature_analysis_result_integrity_sec",
-        lambda: _capital_utilization_audit(root, profile_id, start_date, end_date, backtest_summary, config),
+        lambda: _capital_utilization_audit(root, profile_id, start_date, end_date, backtest_summary, config, scoring_rows),
+    )
+    price_band_affordability_audit = timed(
+        "feature_analysis_score_component_sec",
+        lambda: _price_band_affordability_audit(config, scoring_rows, backtest_summary),
     )
     api_field_usage_audit = timed(
         "feature_analysis_score_component_sec",
@@ -360,6 +364,7 @@ def build_feature_analysis(
         "investor_context_analysis": investor_context_analysis,
         "investor_context_filter": investor_context_filter,
         "capital_utilization_audit": capital_utilization_audit,
+        "price_band_affordability_audit": price_band_affordability_audit,
         "market_filter_audit": integrity_audits.get("market_filter_audit", {}),
         "backtest_result_integrity_audit": integrity_audits.get("backtest_result_integrity_audit", {}),
         "score_integrity_audit": integrity_audits.get("score_integrity_audit", {}),
@@ -430,6 +435,10 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "## Capital Utilization Audit",
         "",
         *_capital_utilization_audit_lines(analysis.get("capital_utilization_audit", {})),
+        "",
+        "## Price Band / Affordability Audit",
+        "",
+        *_price_band_affordability_audit_lines(analysis.get("price_band_affordability_audit", {})),
         "",
         "## Backtest Result Integrity Audit",
         "",
@@ -4899,6 +4908,7 @@ def _capital_utilization_audit(
     end_date: str | None,
     backtest_summary: dict[str, Any],
     config: dict[str, Any] | None = None,
+    scoring_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if not start_date or not end_date:
         return {"status": "unavailable", "reason": "start_date/end_date are required"}
@@ -4911,10 +4921,12 @@ def _capital_utilization_audit(
     exposure_ratios: list[float] = []
     position_counts: list[float] = []
     target_exposure = None
+    max_position_value_rate = None
     if isinstance(config, dict):
         policy = config.get("capital_utilization_policy", {})
         if isinstance(policy, dict):
             target_exposure = _number(policy.get("target_exposure"))
+            max_position_value_rate = _number(policy.get("max_position_value_rate"))
     target_exposure_reached_days = 0
     target_exposure_gaps: list[float] = []
     cash_after_buy_candidates: list[tuple[str, float]] = []
@@ -4968,6 +4980,18 @@ def _capital_utilization_audit(
             event_dates[day].add(action)
     order_amounts = [_number(item.get("amount") or item.get("notional")) for item in buys]
     order_quantities = [_number(item.get("shares") or item.get("quantity")) for item in buys]
+    selected_round_lot_amounts = []
+    for row in scoring_rows or []:
+        if not bool(row.get("selected")):
+            continue
+        amount = _round_lot_amount(row, config)
+        if amount is not None:
+            selected_round_lot_amounts.append(amount)
+    bought_round_lot_amounts = [
+        amount
+        for amount in (_round_lot_amount(item, config) for item in buys)
+        if amount is not None
+    ]
     buy_as_much_as_possible_count = sum(
         1
         for item in buys
@@ -4997,6 +5021,15 @@ def _capital_utilization_audit(
         },
         "average_cash_ratio": _average(cash_ratios),
         "average_market_exposure": _average(exposure_ratios),
+        "target_exposure": target_exposure,
+        "max_position_value_rate": max_position_value_rate,
+        "average_round_lot_amount": _average(selected_round_lot_amounts),
+        "median_round_lot_amount": _median(selected_round_lot_amounts),
+        "affordable_under_300k_count": sum(1 for amount in selected_round_lot_amounts if amount <= 300000),
+        "affordable_under_400k_count": sum(1 for amount in selected_round_lot_amounts if amount <= 400000),
+        "affordable_under_500k_count": sum(1 for amount in selected_round_lot_amounts if amount <= 500000),
+        "selected_round_lot_amount_breakdown": _round_lot_amount_breakdown(selected_round_lot_amounts),
+        "bought_round_lot_amount_breakdown": _round_lot_amount_breakdown(bought_round_lot_amounts),
         "average_position_count": _average(position_counts),
         "max_position_count": max(position_counts) if position_counts else None,
         "skipped_buy_count": len(skipped),
@@ -5049,6 +5082,89 @@ def _capital_skip_reason(value: Any) -> str:
     return text
 
 
+def _round_lot_amount(row: dict[str, Any], config: dict[str, Any] | None = None) -> float | None:
+    amount = _number(row.get("round_lot_amount"))
+    if amount is not None:
+        return amount
+    price = _number(row.get("entry_price") or row.get("open") or row.get("close") or row.get("entry_open"))
+    if price is None:
+        return None
+    lot_size = 100
+    if isinstance(config, dict):
+        policy = config.get("capital_utilization_policy", {})
+        trading = config.get("trading", {})
+        if isinstance(policy, dict) and policy.get("buy_lot_size"):
+            lot_size = int(policy.get("buy_lot_size") or 100)
+        elif isinstance(trading, dict) and trading.get("round_lot_size"):
+            lot_size = int(trading.get("round_lot_size") or 100)
+    return round(price * lot_size, 2)
+
+
+def _round_lot_amount_breakdown(amounts: list[float]) -> dict[str, int]:
+    return {
+        "<=300k": sum(1 for amount in amounts if amount <= 300000),
+        "300k-400k": sum(1 for amount in amounts if 300000 < amount <= 400000),
+        "400k-500k": sum(1 for amount in amounts if 400000 < amount <= 500000),
+        "500k-700k": sum(1 for amount in amounts if 500000 < amount <= 700000),
+        "700k+": sum(1 for amount in amounts if amount > 700000),
+    }
+
+
+def _price_band_affordability_audit(
+    config: dict[str, Any],
+    scoring_rows: list[dict[str, Any]],
+    backtest_summary: dict[str, Any],
+) -> dict[str, Any]:
+    policy = config.get("affordability_filter", {})
+    if not isinstance(policy, dict):
+        policy = {}
+    scored_amounts = [_round_lot_amount(row, config) for row in scoring_rows]
+    scored_amounts = [amount for amount in scored_amounts if amount is not None]
+    selected_rows = [row for row in scoring_rows if bool(row.get("selected"))]
+    selected_amounts = [_round_lot_amount(row, config) for row in selected_rows]
+    selected_amounts = [amount for amount in selected_amounts if amount is not None]
+    events = backtest_summary.get("all_trades", []) if isinstance(backtest_summary, dict) else []
+    if not isinstance(events, list):
+        events = []
+    buy_amounts = [
+        amount
+        for amount in (_round_lot_amount(item, config) for item in events if isinstance(item, dict) and str(item.get("action") or "").upper() == "BUY")
+        if amount is not None
+    ]
+    penalty_rows = [
+        row
+        for row in scoring_rows
+        if (_number(row.get("price_band_penalty")) or _number(row.get("affordability_penalty")) or 0) > 0
+    ]
+    return {
+        "enabled": bool(policy.get("enabled", False)),
+        "preferred_round_lot_amount": _number(policy.get("preferred_round_lot_amount")),
+        "penalty_points": _number(policy.get("penalty_points")),
+        "scored_count": len(scoring_rows),
+        "selected_count": len(selected_rows),
+        "penalized_count": len(penalty_rows),
+        "average_round_lot_amount": _average(scored_amounts),
+        "median_round_lot_amount": _median(scored_amounts),
+        "selected_average_round_lot_amount": _average(selected_amounts),
+        "bought_average_round_lot_amount": _average(buy_amounts),
+        "scored_round_lot_amount_breakdown": _round_lot_amount_breakdown(scored_amounts),
+        "selected_round_lot_amount_breakdown": _round_lot_amount_breakdown(selected_amounts),
+        "bought_round_lot_amount_breakdown": _round_lot_amount_breakdown(buy_amounts),
+        "sample_penalized_rows": [
+            {
+                "date": row.get("date"),
+                "code": row.get("code"),
+                "name": row.get("name"),
+                "round_lot_amount": _round_lot_amount(row, config),
+                "price_band_penalty": _number(row.get("price_band_penalty")) or _number(row.get("affordability_penalty")) or 0,
+                "total_score": _number(row.get("total_score")),
+                "selected": bool(row.get("selected")),
+            }
+            for row in penalty_rows[:20]
+        ],
+    }
+
+
 def _capital_utilization_audit_lines(audit: dict[str, Any]) -> list[str]:
     if not audit:
         return ["- audit: unavailable"]
@@ -5057,6 +5173,15 @@ def _capital_utilization_audit_lines(audit: dict[str, Any]) -> list[str]:
     lines = [
         f"- average_cash_ratio: {_format_number(audit.get('average_cash_ratio'))}",
         f"- average_market_exposure: {_format_number(audit.get('average_market_exposure'))}",
+        f"- target_exposure: {_format_number(audit.get('target_exposure'))}",
+        f"- max_position_value_rate: {_format_number(audit.get('max_position_value_rate'))}",
+        f"- average_round_lot_amount: {_format_number(audit.get('average_round_lot_amount'))}",
+        f"- median_round_lot_amount: {_format_number(audit.get('median_round_lot_amount'))}",
+        f"- affordable_under_300k_count: {audit.get('affordable_under_300k_count', 0)}",
+        f"- affordable_under_400k_count: {audit.get('affordable_under_400k_count', 0)}",
+        f"- affordable_under_500k_count: {audit.get('affordable_under_500k_count', 0)}",
+        f"- selected_round_lot_amount_breakdown: {json.dumps(audit.get('selected_round_lot_amount_breakdown', {}), ensure_ascii=False, sort_keys=True)}",
+        f"- bought_round_lot_amount_breakdown: {json.dumps(audit.get('bought_round_lot_amount_breakdown', {}), ensure_ascii=False, sort_keys=True)}",
         f"- average_position_count: {_format_number(audit.get('average_position_count'))}",
         f"- max_position_count: {_format_number(audit.get('max_position_count'))}",
         f"- skipped_buy_count: {audit.get('skipped_buy_count', 0)}",
@@ -5079,6 +5204,39 @@ def _capital_utilization_audit_lines(audit: dict[str, Any]) -> list[str]:
     source = audit.get("source", {})
     if isinstance(source, dict):
         lines.append(f"- source: {json.dumps(source, ensure_ascii=False, sort_keys=True)}")
+    return lines
+
+
+def _price_band_affordability_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- audit: unavailable"]
+    lines = [
+        f"- enabled: {str(bool(audit.get('enabled'))).lower()}",
+        f"- preferred_round_lot_amount: {_format_number(audit.get('preferred_round_lot_amount'))}",
+        f"- penalty_points: {_format_number(audit.get('penalty_points'))}",
+        f"- scored_count: {audit.get('scored_count', 0)}",
+        f"- selected_count: {audit.get('selected_count', 0)}",
+        f"- penalized_count: {audit.get('penalized_count', 0)}",
+        f"- average_round_lot_amount: {_format_number(audit.get('average_round_lot_amount'))}",
+        f"- median_round_lot_amount: {_format_number(audit.get('median_round_lot_amount'))}",
+        f"- selected_average_round_lot_amount: {_format_number(audit.get('selected_average_round_lot_amount'))}",
+        f"- bought_average_round_lot_amount: {_format_number(audit.get('bought_average_round_lot_amount'))}",
+        f"- scored_round_lot_amount_breakdown: {json.dumps(audit.get('scored_round_lot_amount_breakdown', {}), ensure_ascii=False, sort_keys=True)}",
+        f"- selected_round_lot_amount_breakdown: {json.dumps(audit.get('selected_round_lot_amount_breakdown', {}), ensure_ascii=False, sort_keys=True)}",
+        f"- bought_round_lot_amount_breakdown: {json.dumps(audit.get('bought_round_lot_amount_breakdown', {}), ensure_ascii=False, sort_keys=True)}",
+        "",
+        "| date | code | name | round_lot_amount | price_band_penalty | total_score | selected |",
+        "| --- | --- | --- | ---: | ---: | ---: | --- |",
+    ]
+    samples = audit.get("sample_penalized_rows", []) or []
+    if not samples:
+        lines.append("| - | - | - | - | - | - | - |")
+    for row in samples:
+        lines.append(
+            f"| {row.get('date') or ''} | {row.get('code') or ''} | {row.get('name') or ''} | "
+            f"{_format_number(row.get('round_lot_amount'))} | {_format_number(row.get('price_band_penalty'))} | "
+            f"{_format_number(row.get('total_score'))} | {str(bool(row.get('selected'))).lower()} |"
+        )
     return lines
 
 

@@ -158,6 +158,7 @@ def score_real_candidates(
     selection_config = _selection_config(config)
     volume_filter = _volume_filter_config(config)
     rsi_volume_hot_zone_filter = _rsi_volume_hot_zone_filter_config(config)
+    affordability_filter = _affordability_filter_config(config)
     market_filter = _market_filter_config(config)
     market_regime = str((market_context or {}).get("market_regime") or "neutral")
     advance_ratio = _optional_float((market_context or {}).get("advance_ratio"))
@@ -186,13 +187,15 @@ def score_real_candidates(
             candidate.get("volume_ratio"),
             rsi_volume_hot_zone_filter,
         )
-        total = max(0, total_before_selection_adjustment - rsi_selection["penalty"])
+        affordability = _affordability_adjustment(candidate, affordability_filter, config)
+        total_penalty = rsi_selection["penalty"] + affordability["penalty"]
+        total = max(0, total_before_selection_adjustment - total_penalty)
         score_components = _score_components(
             technical_parts=technical_parts,
             market_context_score=market_context_score,
             relative_strength_score=relative_strength_score,
             investor_context_score=investor_context_score,
-            penalty_score=-rsi_selection["penalty"],
+            penalty_score=-total_penalty,
             total_score=total,
         )
         confidence = _real_confidence(candidate, technical)
@@ -205,6 +208,11 @@ def score_real_candidates(
             score_reason = f"{score_reason}、investor_context_score={investor_context_raw_score}"
         if rsi_selection["penalty"]:
             score_reason = f"{score_reason}、RSIが{selection_config['max_rsi_for_new_position']:.0f}を超えたため減点{rsi_selection['penalty']:.0f}点"
+        if affordability["penalty"]:
+            score_reason = (
+                f"{score_reason}、100株購入金額が{affordability['preferred_round_lot_amount']:.0f}円を超えたため"
+                f"資金効率ペナルティ{affordability['penalty']:.0f}点"
+            )
         if rsi_selection["excluded"]:
             score_reason = f"{score_reason}、RSI過熱のため新規買付見送り"
         if volume_selection["excluded"]:
@@ -278,6 +286,11 @@ def score_real_candidates(
                 "relative_strength_10d": candidate.get("relative_strength_10d"),
                 "relative_strength_20d": candidate.get("relative_strength_20d"),
                 "relative_strength_score": relative_strength_score,
+                "affordability_filter_enabled": affordability["enabled"],
+                "round_lot_amount": affordability["round_lot_amount"],
+                "preferred_round_lot_amount": affordability["preferred_round_lot_amount"],
+                "price_band_penalty": affordability["penalty"],
+                "price_band_penalty_reason": affordability["reason"],
                 "topix_records_loaded": candidate.get("topix_records_loaded"),
                 "topix_api_calls": candidate.get("topix_api_calls"),
                 "topix_cache_path": candidate.get("topix_cache_path"),
@@ -317,6 +330,7 @@ def score_real_candidates(
                 "score_components_match": score_components["matches_total_score"],
                 "total_score": total,
                 "rsi_selection_penalty": rsi_selection["penalty"],
+                "affordability_penalty": affordability["penalty"],
                 "rsi_selection_excluded": rsi_selection["excluded"],
                 "rsi_filter_threshold": rsi_selection["threshold"],
                 "volume_filter_excluded": volume_selection["excluded"],
@@ -396,6 +410,7 @@ def score_real_candidates(
             "min_volume_ratio": volume_filter["min_volume_ratio"],
             "max_volume_ratio": volume_filter["max_volume_ratio"],
             "rsi_volume_hot_zone_filter": rsi_volume_hot_zone_filter,
+            "affordability_filter": affordability_filter,
         },
         "selection_config": selection_config,
         "market_context": market_context or {},
@@ -592,6 +607,45 @@ def _rsi_volume_hot_zone_filter_config(config: dict[str, Any]) -> dict[str, Any]
         "min_volume_ratio": float(hot_zone.get("min_volume_ratio", 3.0)) if isinstance(hot_zone, dict) else 3.0,
         "max_volume_ratio": float(hot_zone.get("max_volume_ratio", 5.0)) if isinstance(hot_zone, dict) else 5.0,
         "reason": str(hot_zone.get("reason", "rsi_volume_hot_zone")) if isinstance(hot_zone, dict) else "rsi_volume_hot_zone",
+    }
+
+
+def _affordability_filter_config(config: dict[str, Any]) -> dict[str, Any]:
+    policy = config.get("affordability_filter", {})
+    if not isinstance(policy, dict):
+        policy = {}
+    return {
+        "enabled": bool(policy.get("enabled", False)),
+        "preferred_round_lot_amount": _optional_float(policy.get("preferred_round_lot_amount")),
+        "penalty_points": float(policy.get("penalty_points", 3.0)),
+        "reason": str(policy.get("reason", "price_band_penalty")),
+    }
+
+
+def _affordability_adjustment(candidate: dict[str, Any], policy: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    lot_size = int(
+        (config.get("capital_utilization_policy", {}) or {}).get("buy_lot_size")
+        or (config.get("trading", {}) or {}).get("round_lot_size")
+        or 100
+    )
+    price = _optional_float(candidate.get("entry_price") or candidate.get("open") or candidate.get("close"))
+    round_lot_amount = round(price * lot_size, 2) if price is not None else None
+    threshold = policy.get("preferred_round_lot_amount")
+    enabled = bool(policy.get("enabled"))
+    if not enabled or threshold is None or round_lot_amount is None or round_lot_amount <= threshold:
+        return {
+            "enabled": enabled,
+            "round_lot_amount": round_lot_amount,
+            "preferred_round_lot_amount": threshold,
+            "penalty": 0.0,
+            "reason": "",
+        }
+    return {
+        "enabled": enabled,
+        "round_lot_amount": round_lot_amount,
+        "preferred_round_lot_amount": threshold,
+        "penalty": float(policy.get("penalty_points") or 0.0),
+        "reason": str(policy.get("reason") or "price_band_penalty"),
     }
 
 

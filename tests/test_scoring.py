@@ -166,6 +166,53 @@ def test_v2_6_relative_strength_score_is_added_once() -> None:
     assert item["score_components"]["component_total"] == item["total_score"]
 
 
+def test_affordability_filter_penalizes_high_round_lot_without_excluding(config_copy: dict) -> None:
+    config_copy["affordability_filter"] = {
+        "enabled": True,
+        "preferred_round_lot_amount": 500000,
+        "penalty_points": 3,
+        "reason": "price_band_penalty",
+    }
+    high_price = {
+        **candidate("1001", volume_ratio=3.0, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02),
+        "close": 6000,
+    }
+
+    item = score_real_candidates([high_price], "2026-03-06", config_copy, "test")["scores"][0]
+
+    assert item["round_lot_amount"] == 600000
+    assert item["preferred_round_lot_amount"] == 500000
+    assert item["price_band_penalty"] == 3
+    assert item["affordability_penalty"] == 3
+    assert item["price_band_penalty_reason"] == "price_band_penalty"
+    assert item["affordability_filter_enabled"] is True
+    assert item["penalty_score"] == -3
+    assert item["score_components"]["penalty_score"] == -3
+    assert item["score_components"]["component_total"] == item["total_score"]
+    assert item["selected"] is True
+    assert item["rejected_reason"] == ""
+
+
+def test_affordability_filter_does_not_penalize_under_threshold(config_copy: dict) -> None:
+    config_copy["affordability_filter"] = {
+        "enabled": True,
+        "preferred_round_lot_amount": 500000,
+        "penalty_points": 3,
+        "reason": "price_band_penalty",
+    }
+    affordable = {
+        **candidate("1001", volume_ratio=3.0, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02),
+        "close": 3000,
+    }
+
+    item = score_real_candidates([affordable], "2026-03-06", config_copy, "test")["scores"][0]
+
+    assert item["round_lot_amount"] == 300000
+    assert item["price_band_penalty"] == 0
+    assert item["affordability_penalty"] == 0
+    assert item["penalty_score"] == 0
+
+
 def test_regular_selection_follows_config(config_copy: dict) -> None:
     result = score_real_candidates(
         [candidate("1001", volume_ratio=3.0, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02)],

@@ -152,6 +152,12 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
                 market_context_score REAL,
                 sector_score REAL,
                 penalty_score REAL,
+                affordability_filter_enabled INTEGER,
+                round_lot_amount REAL,
+                preferred_round_lot_amount REAL,
+                price_band_penalty REAL,
+                price_band_penalty_reason TEXT,
+                affordability_penalty REAL,
                 score_components TEXT,
                 score_components_total REAL,
                 score_components_match INTEGER,
@@ -604,6 +610,12 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
         _add_column_if_missing(connection, "scoring_results", "market_context_score", "REAL")
         _add_column_if_missing(connection, "scoring_results", "sector_score", "REAL")
         _add_column_if_missing(connection, "scoring_results", "penalty_score", "REAL")
+        _add_column_if_missing(connection, "scoring_results", "affordability_filter_enabled", "INTEGER")
+        _add_column_if_missing(connection, "scoring_results", "round_lot_amount", "REAL")
+        _add_column_if_missing(connection, "scoring_results", "preferred_round_lot_amount", "REAL")
+        _add_column_if_missing(connection, "scoring_results", "price_band_penalty", "REAL")
+        _add_column_if_missing(connection, "scoring_results", "price_band_penalty_reason", "TEXT")
+        _add_column_if_missing(connection, "scoring_results", "affordability_penalty", "REAL")
         _add_column_if_missing(connection, "scoring_results", "score_components", "TEXT")
         _add_column_if_missing(connection, "scoring_results", "score_components_total", "REAL")
         _add_column_if_missing(connection, "scoring_results", "score_components_match", "INTEGER")
@@ -997,7 +1009,9 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
                 lower_shadow_rate, close_position_in_range, gap_rate,
                 candlestick_signals, candlestick_score, trend_score, volume_score,
                 rsi_score, ma_score, market_context_score, sector_score,
-                penalty_score, score_components, score_components_total,
+                penalty_score, affordability_filter_enabled, round_lot_amount,
+                preferred_round_lot_amount, price_band_penalty, price_band_penalty_reason,
+                affordability_penalty, score_components, score_components_total,
                 score_components_match, market_filter_applied, market_regime, market_filter_reason,
                 earnings_filter_checked, earnings_filter_blocked, earnings_filter_reason, earnings_announcement_date,
                 earnings_calendar_records_count, earnings_info_found, earnings_candidate_date, earnings_days_until_earnings,
@@ -1009,7 +1023,7 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
                 earnings_pipeline_reason,
                 source_provider, ai_reason, ai_risk, ai_confidence,
                 ai_score, config_version, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -1083,6 +1097,12 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
                     item.get("market_context_score"),
                     item.get("sector_score") or item.get("sector_score_adjustment"),
                     item.get("penalty_score"),
+                    1 if item.get("affordability_filter_enabled") else 0,
+                    item.get("round_lot_amount"),
+                    item.get("preferred_round_lot_amount"),
+                    item.get("price_band_penalty"),
+                    item.get("price_band_penalty_reason"),
+                    item.get("affordability_penalty"),
                     _json(item.get("score_components", {})),
                     item.get("score_components_total"),
                     1 if item.get("score_components_match") else 0 if item.get("score_components_match") is not None else None,

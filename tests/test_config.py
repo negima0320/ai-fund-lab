@@ -122,6 +122,65 @@ def test_rookie_dealer_02_v2_dot_15_alias_loads() -> None:
     assert profile["rsi_volume_hot_zone_filter"]["enabled"] is True
 
 
+def test_rookie_dealer_02_v2_capital_exposure_profiles_load() -> None:
+    expected = {
+        "rookie_dealer_02_v2_20": 0.7,
+        "rookie_dealer_02_v2_21": 0.8,
+        "rookie_dealer_02_v2_22": 1.0,
+    }
+
+    for profile_id, max_position_value_rate in expected.items():
+        profile = load_profile(profile_id)
+
+        assert profile["profile_id"] == profile_id
+        assert profile["scoring"]["use_relative_strength_score"] is True
+        assert profile["selection"]["min_score"] == 45
+        assert profile["selection"]["max_rsi_for_new_position"] == 65
+        assert profile["disable_single_order_amount_limit"] is True
+        assert profile["capital_utilization_policy"]["enabled"] is True
+        assert profile["capital_utilization_policy"]["target_exposure"] == 0.9
+        assert profile["capital_utilization_policy"]["max_position_value_rate"] == max_position_value_rate
+        assert profile["capital_utilization_policy"]["buy_as_much_as_possible"] is True
+        assert profile["trading"]["round_lot_size"] == 100
+        assert profile["safety"]["max_single_order_amount"] == 500000
+
+
+def test_rookie_dealer_02_v2_dot_20_alias_loads() -> None:
+    profile = load_profile("rookie_dealer_02_v2.20")
+
+    assert profile["profile_id"] == "rookie_dealer_02_v2_20"
+    assert profile["capital_utilization_policy"]["max_position_value_rate"] == 0.7
+
+
+def test_rookie_dealer_02_v2_affordability_profiles_load() -> None:
+    expected = {
+        "rookie_dealer_02_v2_23": 500000,
+        "rookie_dealer_02_v2_24": 400000,
+        "rookie_dealer_02_v2_25": 300000,
+    }
+
+    for profile_id, preferred_round_lot_amount in expected.items():
+        profile = load_profile(profile_id)
+
+        assert profile["profile_id"] == profile_id
+        assert profile["scoring"]["use_relative_strength_score"] is True
+        assert profile["disable_single_order_amount_limit"] is True
+        assert profile["capital_utilization_policy"]["enabled"] is True
+        assert profile["capital_utilization_policy"]["target_exposure"] == 0.9
+        assert profile["capital_utilization_policy"]["max_position_value_rate"] == 0.5
+        assert profile["affordability_filter"]["enabled"] is True
+        assert profile["affordability_filter"]["preferred_round_lot_amount"] == preferred_round_lot_amount
+        assert profile["affordability_filter"]["penalty_points"] == 3
+        assert profile["affordability_filter"]["reason"] == "price_band_penalty"
+
+
+def test_rookie_dealer_02_v2_dot_23_alias_loads() -> None:
+    profile = load_profile("rookie_dealer_02_v2.23")
+
+    assert profile["profile_id"] == "rookie_dealer_02_v2_23"
+    assert profile["affordability_filter"]["preferred_round_lot_amount"] == 500000
+
+
 def test_rookie_dealer_02_v2_2_profile_relaxes_risk_off_filter() -> None:
     profile = load_profile("rookie_dealer_02_v2_2")
 
