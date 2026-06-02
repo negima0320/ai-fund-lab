@@ -54,7 +54,7 @@
 ### Hardcoded Date Audit
 
 - target: 2026-03-06
-- match_count: 564
+- match_count: 566
 - warning: 2026-03-06 remains in config/src/docs/reports/README
 
 ### Processed Data Audit

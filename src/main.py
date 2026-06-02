@@ -9077,6 +9077,7 @@ def run_score(provider_name: str, target_date_text: str) -> None:
 
     payload = _run_timed_backtest_phase("candidate_load", lambda: read_json(candidates_path))
     candidates = payload.get("candidates", [])
+    candidate_universe_cache = _candidate_universe_cache_payload_from_rows(candidates)
     market_context = load_market_context_for_date(target_date_text, provider_name)
     dynamic_exposure_context = load_effective_dynamic_exposure_context(target_date_text, provider_name)
     target_date = date.fromisoformat(target_date_text)
@@ -9139,6 +9140,7 @@ def run_score(provider_name: str, target_date_text: str) -> None:
             "profile_name": profile_name_from(config),
             "config_version": config_version_from(config),
             **cache_payload,
+            **candidate_universe_cache,
             "candidate_count": len(candidates),
             "scored_count": len(scores),
             "selected_count": len(selected),
@@ -11438,6 +11440,32 @@ def _score_cache_payload(config: dict[str, Any], target_date_text: str) -> dict[
     }
 
 
+def _candidate_universe_cache_payload(config: dict[str, Any], target_date_text: str) -> dict[str, Any] | None:
+    path = processed_profile_path(config, f"candidates_{target_date_text}.json")
+    if not path.exists():
+        return None
+    payload = read_json(path)
+    return _candidate_universe_cache_payload_from_rows(payload.get("candidates", []))
+
+
+def _candidate_universe_cache_payload_from_rows(candidates: list[Any]) -> dict[str, Any]:
+    rows = [
+        {
+            "code": str(item.get("code") or item.get("Code") or ""),
+            "market_section": str(item.get("market_section") or item.get("section") or item.get("listing_market") or ""),
+        }
+        for item in candidates
+        if isinstance(item, dict)
+    ]
+    rows = sorted(rows, key=lambda item: (item["code"], item["market_section"]))
+    encoded = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return {
+        "candidate_universe_hash": hashlib.sha1(encoded.encode("utf-8")).hexdigest()[:20],
+        "candidate_universe_count": len(rows),
+        "candidate_universe_market_counts": market_section_counts(candidates),
+    }
+
+
 def _market_filter_hash(config: dict[str, Any]) -> str:
     payload = config.get("market_filter", {})
     return hashlib.sha1(
@@ -11821,10 +11849,15 @@ def _copy_reusable_scoring_for_active_profile(target_date_text: str) -> dict[str
     target_log = ROOT / "logs" / "scoring" / target_profile_id / f"scoring_{target_date_text}.json"
     processed_payload = _with_profile_metadata(source_payload, target_config)
     processed_payload.update(_score_cache_payload(target_config, target_date_text))
+    target_candidate_universe = _candidate_universe_cache_payload(target_config, target_date_text)
+    if target_candidate_universe:
+        processed_payload.update(target_candidate_universe)
     if source_log.exists():
         scoring_payload = _with_profile_metadata(read_json(source_log), target_config)
     else:
         scoring_payload = _scored_payload_as_scoring_log(processed_payload, "jquants", target_date_text)
+    if target_candidate_universe:
+        scoring_payload.update(target_candidate_universe)
     write_json(target_processed, processed_payload)
     if _daily_detail_logs_enabled(target_config):
         write_json(target_log, scoring_payload)
@@ -15100,6 +15133,14 @@ def _score_payload_cache_issue(payload: dict[str, Any], config: dict[str, Any], 
         return "market_filter_hash_mismatch"
     if payload.get("scoring_cache_key") != expected["scoring_cache_key"]:
         return "scoring_cache_key_mismatch"
+    expected_candidate_universe = _candidate_universe_cache_payload(config, target_date_text)
+    if expected_candidate_universe is not None:
+        if not payload.get("candidate_universe_hash"):
+            return "missing_candidate_universe_hash"
+        if payload.get("candidate_universe_hash") != expected_candidate_universe.get("candidate_universe_hash"):
+            return "candidate_universe_hash_mismatch"
+        if int(payload.get("candidate_universe_count") or 0) != int(expected_candidate_universe.get("candidate_universe_count") or 0):
+            return "candidate_universe_count_mismatch"
     return ""
 
 

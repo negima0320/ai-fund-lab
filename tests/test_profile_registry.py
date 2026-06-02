@@ -419,6 +419,73 @@ def test_scored_candidates_cache_reuses_same_profile_date_and_hash(tmp_path, mon
     assert payload["scoring_cache_key"] == cache_bits["scoring_cache_key"]
 
 
+def test_scored_candidates_cache_invalidates_when_candidate_universe_changes(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "ACTIVE_PROFILE_ID", "rookie_dealer_02_v2_47")
+    monkeypatch.setattr(main_module, "save_scoring_results", lambda *_args, **_kwargs: None)
+    config = main_module.load_profile("rookie_dealer_02_v2_47")
+    target_date = "2026-01-05"
+    candidates = [
+        {"code": "1001", "name": "Prime", "market_section": "TSEPrime", "date": target_date},
+        {"code": "2001", "name": "Standard", "market_section": "TSEStandard", "date": target_date},
+    ]
+    main_module.write_json(
+        main_module.processed_profile_path(config, f"candidates_{target_date}.json"),
+        {"date": target_date, "profile_id": config["profile_id"], "candidates": candidates},
+    )
+    stale_cache = main_module._score_cache_payload(config, target_date)
+    scored_path = main_module.processed_profile_path(config, f"scored_candidates_{target_date}.json")
+    main_module.write_json(
+        scored_path,
+        {
+            "date": target_date,
+            "provider": "jquants",
+            "profile_id": config["profile_id"],
+            "profile_name": main_module.profile_name_from(config),
+            "config_version": main_module.config_version_from(config),
+            **stale_cache,
+            "candidate_count": 1,
+            "scored_count": 1,
+            "selected_count": 0,
+            "scores": [{"code": "1001", "market_section": "TSEPrime", "selected": False, "total_score": 40}],
+            "selected": [],
+        },
+    )
+    calls = {"run_score": 0}
+
+    def fake_run_score(_provider_name: str, _target_date: str) -> None:
+        calls["run_score"] += 1
+        candidate_universe = main_module._candidate_universe_cache_payload_from_rows(candidates)
+        main_module.write_json(
+            scored_path,
+            {
+                "date": target_date,
+                "provider": "jquants",
+                "profile_id": config["profile_id"],
+                "profile_name": main_module.profile_name_from(config),
+                "config_version": main_module.config_version_from(config),
+                **main_module._score_cache_payload(config, target_date),
+                **candidate_universe,
+                "candidate_count": 2,
+                "scored_count": 2,
+                "selected_count": 1,
+                "scores": [
+                    {"code": "1001", "market_section": "TSEPrime", "selected": False, "total_score": 40},
+                    {"code": "2001", "market_section": "TSEStandard", "selected": True, "total_score": 48},
+                ],
+                "selected": [{"code": "2001", "market_section": "TSEStandard", "selected": True, "total_score": 48}],
+            },
+        )
+
+    monkeypatch.setattr(main_module, "run_score", fake_run_score)
+
+    payload = main_module.ensure_score("jquants", target_date)
+
+    assert calls["run_score"] == 1
+    assert payload["candidate_count"] == 2
+    assert any(item.get("market_section") == "TSEStandard" for item in payload["scores"])
+
+
 def test_profile_phase_time_snapshot_accounts_for_profile_total(monkeypatch) -> None:
     monkeypatch.setattr(
         main_module,
