@@ -130,6 +130,36 @@ def test_run_experiments_selects_v2_26_dynamic_exposure_profiles() -> None:
         "rookie_dealer_02_v2_40",
         "rookie_dealer_02_v2_41",
         "rookie_dealer_02_v2_42",
+        "rookie_dealer_02_v2_43",
+        "rookie_dealer_02_v2_44",
+        "rookie_dealer_02_v2_45",
+        "rookie_dealer_02_v2_46",
+        "rookie_dealer_02_v2_47",
+    ]
+
+
+def test_run_experiments_profiles_option_accepts_standard_screening_profiles() -> None:
+    registry = main_module.load_profile_registry()
+
+    profiles = main_module.select_experiment_profiles(
+        "rookie_dealer_02_v2_26",
+        registry,
+        [
+            "rookie_dealer_02_v2_26",
+            "rookie_dealer_02_v2_43",
+            "rookie_dealer_02_v2_44",
+            "rookie_dealer_02_v2_45",
+            "rookie_dealer_02_v2_46",
+            "rookie_dealer_02_v2_47",
+        ],
+    )
+
+    assert profiles == [
+        "rookie_dealer_02_v2_43",
+        "rookie_dealer_02_v2_44",
+        "rookie_dealer_02_v2_45",
+        "rookie_dealer_02_v2_46",
+        "rookie_dealer_02_v2_47",
     ]
 
 
@@ -153,6 +183,14 @@ def test_dynamic_exposure_changes_scoring_reuse_signature() -> None:
     adjusted = main_module.load_profile("rookie_dealer_02_v2_33")
 
     assert main_module._experiment_scoring_signature(base) != main_module._experiment_scoring_signature(adjusted)
+
+
+def test_standard_screening_changes_common_and_scoring_signatures() -> None:
+    base = main_module.load_profile("rookie_dealer_02_v2_41")
+    relaxed = main_module.load_profile("rookie_dealer_02_v2_47")
+
+    assert main_module._experiment_common_stage_signature(base) != main_module._experiment_common_stage_signature(relaxed)
+    assert main_module._experiment_scoring_signature(base) != main_module._experiment_scoring_signature(relaxed)
 
 
 def test_run_experiments_skip_backtest_writes_summary(tmp_path, monkeypatch) -> None:
@@ -510,6 +548,13 @@ def test_experiment_summary_row_includes_feature_activation() -> None:
         "required_plan": "free",
         "enabled_features": ["financial_context"],
         "total_trades": 10,
+        "monthly_win_rate": 0.7,
+        "winning_months": 7,
+        "losing_months": 3,
+        "average_monthly_return": 0.0185,
+        "worst_month_return": -0.084,
+        "best_month_return": 0.123,
+        "max_consecutive_losing_months": 2,
         "newly_selected_count": 0,
         "removed_count": 0,
         "selection_diff_count": 0,
@@ -538,6 +583,7 @@ def test_experiment_summary_row_includes_feature_activation() -> None:
     assert '{"financial_context":0}' in rendered
     assert '{"Prime":1,"Standard":2}' in rendered
     assert '{"Prime":1000,"Standard":-500}' in rendered
+    assert "| 70.00% | 7 | 3 | 1.85% | -8.40% | 12.30% | 2 |" in rendered
     assert "| 3 | 1 | active |" in rendered
 
 

@@ -90,7 +90,7 @@ import profile_registry as profile_registry_service
 from profile_loader import DEFAULT_PROFILE_ID, list_profiles, load_profile
 from reflection import generate_reflections
 from report import generate_daily_report
-from real_screening import screen_candidates
+from real_screening import screen_candidates, screening_market_rejection_audit
 from release_notes import generate_release_notes, render_release_notes_markdown
 from safety import can_trade
 from scoring import build_trade_decisions, score_candidates, score_real_candidates
@@ -4961,6 +4961,7 @@ def _experiment_common_stage_signature(config: dict[str, Any]) -> str:
                 "allowed_sections": sorted(allowed_market_sections(config)),
                 "allow_unknown_market": bool(config.get("market_filter", {}).get("allow_unknown_market", False)),
             },
+            "screening": config.get("screening", {}),
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -4990,6 +4991,7 @@ def _experiment_scoring_signature(config: dict[str, Any]) -> str:
         "affordability_filter": config.get("affordability_filter", {}),
         "winner_loser_rule_adjustment": config.get("winner_loser_rule_adjustment", {}),
         "dynamic_exposure": config.get("dynamic_exposure", {}),
+        "screening": config.get("screening", {}),
         "market_filter": {
             "allowed_sections": sorted(allowed_market_sections(config)),
             "allow_unknown_market": bool(config.get("market_filter", {}).get("allow_unknown_market", False)),
@@ -5351,6 +5353,7 @@ def build_experiment_batch_summary(
         scored_candidate_audit = market_section_performance.get("scored_candidate_audit", {}) if isinstance(market_section_performance.get("scored_candidate_audit"), dict) else {}
         activation = feature_analysis.get("feature_activation_audit", {})
         earnings_debug = feature_analysis.get("earnings_filter_debug", {})
+        monthly_summary = _experiment_monthly_summary(feature_analysis)
         processed_audit = _experiment_processed_data_audit(profile_id, start_date_text, end_date_text)
         date_audit = _experiment_date_range_audit(profile_id, start_date_text, end_date_text)
         coverage_audit = date_audit.get("backtest_coverage_audit", {}) if isinstance(date_audit, dict) else {}
@@ -5376,6 +5379,7 @@ def build_experiment_batch_summary(
                 "expectancy": row.get("expectancy"),
                 "max_drawdown": row.get("max_drawdown"),
                 "total_trades": row.get("total_trades"),
+                **monthly_summary,
                 "newly_selected_count": diff.get("newly_selected_count", 0),
                 "removed_count": diff.get("removed_count", 0),
                 "investor_filter_rejected_count": diff.get("investor_filter_rejected_count", 0),
@@ -5485,6 +5489,7 @@ def build_experiment_batch_summary(
         if isinstance(base_market_section_performance.get("scored_candidate_audit"), dict)
         else {}
     )
+    base_monthly_summary = _experiment_monthly_summary(base_feature_analysis)
     return {
         "base_profile": base_profile_id,
         "start_date": start_date_text,
@@ -5523,6 +5528,7 @@ def build_experiment_batch_summary(
             "outcome_diff_count": 0,
             "investor_filter_rejected_count": 0,
             "market_filter": base_row.get("market_filter", {}),
+            **base_monthly_summary,
             "market_candidate_count": base_market_coverage.get("candidate_count", {}),
             "market_scored_count": base_scored_candidate_audit.get("scored_count_by_market", base_market_coverage.get("candidate_count", {})),
             "market_selected_count": base_market_coverage.get("selected_count", {}),
@@ -5588,6 +5594,20 @@ def _experiment_feature_analysis(config: dict[str, Any], start_date_text: str, e
         return build_feature_analysis(config, ROOT, start_date_text, end_date_text)
     except Exception:
         return {}
+
+
+def _experiment_monthly_summary(feature_analysis: dict[str, Any]) -> dict[str, Any]:
+    audit = feature_analysis.get("monthly_performance_audit", {}) if isinstance(feature_analysis, dict) else {}
+    summary = audit.get("summary", {}) if isinstance(audit, dict) and isinstance(audit.get("summary"), dict) else {}
+    return {
+        "monthly_win_rate": summary.get("monthly_win_rate"),
+        "winning_months": summary.get("winning_months"),
+        "losing_months": summary.get("losing_months"),
+        "average_monthly_return": summary.get("average_monthly_return"),
+        "worst_month_return": summary.get("worst_month_return"),
+        "best_month_return": summary.get("best_month_return"),
+        "max_consecutive_losing_months": summary.get("max_consecutive_losing_months"),
+    }
 
 
 def _enabled_registry_features(item: dict[str, Any]) -> list[str]:
@@ -5949,8 +5969,8 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             "",
             "## Results",
             "",
-            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | investor_filter_rejected_count | market_filter | market_candidate_count | market_scored_count | market_selected_count | market_buy_trade_count | market_sell_trade_count | market_profit_by_section | market_profit_factor_by_section | market_filter_excluded_count | market_trade_consistency_warning | result_integrity_status | integrity_error_count | integrity_warning_count | market_filter_violation_count | trade_without_selected_count | out_of_period_trade_count | stale_cache_read_count | score_integrity_status | total_score_mismatch_count | stale_score_cache_count | future_data_leak_count | signal_entry_date_violation_count | no_trade_fallback_selected_count | selected_below_regular_min_score_count | fallback_top_pick_selected_count | invalid_below_threshold_selected_count | selection_diff_count | outcome_diff_count | indicators_last_date | candidates_last_date | scored_candidates_last_date | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | earnings_calendar_records | earnings_filter_rejected_count | earnings_filter_status | practical_effect | effect_reason | verdict | verdict_reason |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | monthly_win_rate | winning_months | losing_months | average_monthly_return | worst_month_return | best_month_return | max_consecutive_losing_months | newly_selected_count | removed_count | investor_filter_rejected_count | market_filter | market_candidate_count | market_scored_count | market_selected_count | market_buy_trade_count | market_sell_trade_count | market_profit_by_section | market_profit_factor_by_section | market_filter_excluded_count | market_trade_consistency_warning | result_integrity_status | integrity_error_count | integrity_warning_count | market_filter_violation_count | trade_without_selected_count | out_of_period_trade_count | stale_cache_read_count | score_integrity_status | total_score_mismatch_count | stale_score_cache_count | future_data_leak_count | signal_entry_date_violation_count | no_trade_fallback_selected_count | selected_below_regular_min_score_count | fallback_top_pick_selected_count | invalid_below_threshold_selected_count | selection_diff_count | outcome_diff_count | indicators_last_date | candidates_last_date | scored_candidates_last_date | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | earnings_calendar_records | earnings_filter_rejected_count | earnings_filter_status | practical_effect | effect_reason | verdict | verdict_reason |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for row in _experiment_summary_result_rows(summary):
@@ -5976,7 +5996,13 @@ def _experiment_summary_table_row(row: dict[str, Any]) -> str:
         f"{_format_optional_number(row.get('final_assets'))} | {_format_optional_number(row.get('net_cumulative_profit'))} | "
         f"{_format_optional_percent(row.get('win_rate'))} | {_format_optional_number(row.get('profit_factor'))} | "
         f"{_format_optional_percent(row.get('expectancy'))} | {_format_optional_percent(row.get('max_drawdown'))} | "
-        f"{row.get('total_trades')} | {row.get('newly_selected_count') or 0} | {row.get('removed_count') or 0} | {row.get('investor_filter_rejected_count', 0)} | "
+        f"{row.get('total_trades')} | {_format_optional_percent(row.get('monthly_win_rate'))} | "
+        f"{row.get('winning_months') if row.get('winning_months') is not None else ''} | "
+        f"{row.get('losing_months') if row.get('losing_months') is not None else ''} | "
+        f"{_format_optional_percent(row.get('average_monthly_return'))} | {_format_optional_percent(row.get('worst_month_return'))} | "
+        f"{_format_optional_percent(row.get('best_month_return'))} | "
+        f"{row.get('max_consecutive_losing_months') if row.get('max_consecutive_losing_months') is not None else ''} | "
+        f"{row.get('newly_selected_count') or 0} | {row.get('removed_count') or 0} | {row.get('investor_filter_rejected_count', 0)} | "
         f"{_compact_json(row.get('market_filter', {}))} | {_compact_json(row.get('market_candidate_count', {}))} | "
         f"{_compact_json(row.get('market_scored_count', {}))} | {_compact_json(row.get('market_selected_count', {}))} | "
         f"{_compact_json(row.get('market_buy_trade_count', {}))} | {_compact_json(row.get('market_sell_trade_count', {}))} | "
@@ -8843,8 +8869,9 @@ def run_screen(provider_name: str, target_date_text: str) -> None:
     if indicators:
         candidate_started = time.perf_counter()
         indicators = enrich_indicators_with_sector_momentum(indicators, target_date_text, provider_name)
-        result = screen_candidates(indicators, target_count=50)
+        result = screen_candidates(indicators, target_count=50, config=config)
         result["candidates"] = _fill_market_sections_from_master(result.get("candidates", []))
+        screening_market_audit = screening_market_rejection_audit(indicators, result["candidates"], target_count=50, config=config)
         _record_backtest_phase_time("candidate_filter", time.perf_counter() - candidate_started)
     else:
         result = {
@@ -8857,6 +8884,14 @@ def run_screen(provider_name: str, target_date_text: str) -> None:
                 "reason": "empty_indicator_payload",
                 "source_indicator_file": str(indicators_path.relative_to(ROOT)),
             },
+        }
+        screening_market_audit = {
+            "input_count_by_market": {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0},
+            "screening_candidate_count_by_market": {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0},
+            "screening_excluded_reason_by_market": {},
+            "screening_excluded_date_by_market": {},
+            "screening_ranking_drop_by_market": {},
+            "representative_sample": [],
         }
     candidates = result["candidates"]
     screening_log = {
@@ -8878,8 +8913,10 @@ def run_screen(provider_name: str, target_date_text: str) -> None:
             "allowed_sections": sorted(allowed_market_sections(config)),
             "allow_unknown_market": bool(config.get("market_filter", {}).get("allow_unknown_market", False)),
             "input_counts": market_filtered["input_counts"],
+            "market_filter_allowed_counts": market_filtered["allowed_counts"],
             "allowed_counts": market_filtered["allowed_counts"],
             "excluded_counts": market_filtered["excluded_counts"],
+            "screening_candidate_counts": market_section_counts(candidates),
             "candidate_counts": market_section_counts(candidates),
             "market_filter_excluded_count": market_filtered["excluded_count"],
             "unknown_market_count": market_filtered["input_counts"].get("Unknown", 0),
@@ -8887,6 +8924,10 @@ def run_screen(provider_name: str, target_date_text: str) -> None:
             "listed_info_match_count": market_filtered.get("listed_info_match_count", 0),
             "listed_info_missing_count": market_filtered.get("listed_info_missing_count", 0),
             "market_section_filled_from_master_count": market_filtered.get("market_section_filled_from_master_count", 0),
+            "screening_excluded_reason_by_market": screening_market_audit.get("screening_excluded_reason_by_market", {}),
+            "screening_excluded_date_by_market": screening_market_audit.get("screening_excluded_date_by_market", {}),
+            "screening_ranking_drop_by_market": screening_market_audit.get("screening_ranking_drop_by_market", {}),
+            "screening_representative_sample": screening_market_audit.get("representative_sample", []),
             "sample": market_filtered.get("sample", []),
         },
     }
@@ -13563,7 +13604,13 @@ def build_market_filter_audit(config: dict[str, Any], run_dates: list[str]) -> d
     listed_info_stats = _listed_stock_master_stats()
     before_counts = {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0}
     after_counts = {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0}
+    screening_counts = {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0}
     excluded_counts = {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0}
+    screening_excluded_counts = {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0}
+    screening_reason_by_market: dict[str, dict[str, int]] = {}
+    screening_date_by_market: dict[str, dict[str, int]] = {}
+    screening_ranking_drop_by_market = {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0}
+    screening_samples: list[dict[str, Any]] = []
     lookup_source: dict[str, int] = {}
     samples = []
     files_read = 0
@@ -13600,27 +13647,58 @@ def build_market_filter_audit(config: dict[str, Any], run_dates: list[str]) -> d
             _merge_count_dict(before_counts, market_section_counts(all_candidate_rows))
             listed_info_match_count += fill_stats["listed_info_match_count"]
             listed_info_missing_count += fill_stats["listed_info_missing_count"]
-        allowed_counts = coverage.get("allowed_counts", {}) if isinstance(coverage.get("allowed_counts"), dict) else {}
-        if candidates:
-            _merge_count_dict(after_counts, market_section_counts(candidates))
-        else:
-            _merge_count_dict(after_counts, allowed_counts)
         coverage_excluded_counts = coverage.get("excluded_counts", {}) if isinstance(coverage.get("excluded_counts"), dict) else {}
         if coverage_excluded_counts and any(int(value or 0) for value in coverage_excluded_counts.values()):
             _merge_count_dict(excluded_counts, coverage_excluded_counts)
         else:
             _merge_count_dict(excluded_counts, filtered["excluded_counts"])
+        market_filter_allowed_counts = coverage.get("market_filter_allowed_counts", {}) if isinstance(coverage.get("market_filter_allowed_counts"), dict) else {}
+        if not _market_counts_has_values(market_filter_allowed_counts):
+            market_filter_allowed_counts = _subtract_market_counts(input_counts, coverage_excluded_counts if coverage_excluded_counts else filtered["excluded_counts"])
+        if not _market_counts_has_values(market_filter_allowed_counts) and candidates:
+            market_filter_allowed_counts = market_section_counts(candidates)
+        _merge_count_dict(after_counts, market_filter_allowed_counts)
+        screening_candidate_counts = coverage.get("screening_candidate_counts", {}) if isinstance(coverage.get("screening_candidate_counts"), dict) else {}
+        if not screening_candidate_counts:
+            screening_candidate_counts = coverage.get("candidate_counts", {}) if isinstance(coverage.get("candidate_counts"), dict) else {}
+        if not screening_candidate_counts:
+            screening_candidate_counts = market_section_counts(candidates)
+        _merge_count_dict(screening_counts, screening_candidate_counts)
+        day_screening_excluded_counts = _subtract_market_counts(market_filter_allowed_counts, screening_candidate_counts)
+        _merge_count_dict(screening_excluded_counts, day_screening_excluded_counts)
+        screening_reason = coverage.get("screening_excluded_reason_by_market", {})
+        screening_dates = coverage.get("screening_excluded_date_by_market", {})
+        screening_ranking = coverage.get("screening_ranking_drop_by_market", {})
+        screening_sample = coverage.get("screening_representative_sample", [])
+        if not _nested_counts_has_values(screening_reason) and _market_counts_has_values(day_screening_excluded_counts):
+            recomputed_screening = _recompute_screening_rejection_audit(config, day, candidates)
+            if recomputed_screening:
+                screening_reason = recomputed_screening.get("screening_excluded_reason_by_market", {})
+                screening_dates = recomputed_screening.get("screening_excluded_date_by_market", {})
+                screening_ranking = recomputed_screening.get("screening_ranking_drop_by_market", {})
+                screening_sample = recomputed_screening.get("representative_sample", [])
+        _merge_nested_count_dict(screening_reason_by_market, screening_reason)
+        _merge_nested_count_dict(screening_date_by_market, screening_dates)
+        _merge_count_dict(screening_ranking_drop_by_market, screening_ranking if isinstance(screening_ranking, dict) else {})
+        for item in screening_sample or []:
+            if len(screening_samples) >= 50:
+                break
+            if isinstance(item, dict):
+                screening_samples.append(item)
         day_lookup_source = coverage.get("market_section_lookup_source", {}) if isinstance(coverage.get("market_section_lookup_source"), dict) else filtered.get("lookup_source", {})
         daily_breakdown.append(
             {
                 "date": day,
-                "raw_candidate_count_by_market": market_section_counts(all_candidate_rows),
-                "after_market_filter_candidate_count_by_market": market_section_counts(candidates) if candidates else allowed_counts,
+                "raw_candidate_count_by_market": input_counts if input_counts else market_section_counts(all_candidate_rows),
+                "after_market_filter_candidate_count_by_market": market_filter_allowed_counts,
+                "after_screening_candidate_count_by_market": screening_candidate_counts,
                 "excluded_count_by_market": coverage_excluded_counts if coverage_excluded_counts else filtered["excluded_counts"],
+                "screening_excluded_count_by_market": day_screening_excluded_counts,
                 "unknown_market_count": int(market_section_counts(all_candidate_rows).get("Unknown", 0) or 0),
                 "market_section_lookup_source": day_lookup_source or {"unavailable": 0},
-                "raw_candidate_count": len(all_candidate_rows),
-                "after_filter_count": len(candidates),
+                "raw_candidate_count": sum(int(value or 0) for value in (input_counts or market_section_counts(all_candidate_rows)).values()),
+                "after_filter_count": sum(int(value or 0) for value in market_filter_allowed_counts.values()),
+                "after_screening_count": sum(int(value or 0) for value in screening_candidate_counts.values()),
                 "excluded_count": len(filtered["excluded"]),
             }
         )
@@ -13651,13 +13729,20 @@ def build_market_filter_audit(config: dict[str, Any], run_dates: list[str]) -> d
                     }
                 )
     after_count = sum(after_counts.values())
+    screening_count = sum(screening_counts.values())
     excluded_count = sum(excluded_counts.values())
     unknown_market_count = int(before_counts.get("Unknown", 0) or 0)
     return {
         "raw_candidate_count": raw_candidate_count,
         "candidate_market_breakdown_before_filter": before_counts,
         "candidate_market_breakdown_after_filter": after_counts,
+        "candidate_market_breakdown_after_screening": screening_counts,
         "excluded_market_breakdown": excluded_counts,
+        "screening_excluded_market_breakdown": screening_excluded_counts,
+        "screening_excluded_reason_by_market": screening_reason_by_market,
+        "screening_excluded_date_by_market": screening_date_by_market,
+        "screening_ranking_drop_by_market": screening_ranking_drop_by_market,
+        "screening_representative_sample": screening_samples,
         "unknown_market_count": unknown_market_count,
         "market_section_missing_count": unknown_market_count,
         "market_section_lookup_source": lookup_source or {"unavailable": 0},
@@ -13672,6 +13757,7 @@ def build_market_filter_audit(config: dict[str, Any], run_dates: list[str]) -> d
         "allow_unknown_market": bool(config.get("market_filter", {}).get("allow_unknown_market", False)),
         "files_read": files_read,
         "after_filter_count": after_count,
+        "after_screening_count": screening_count,
         "excluded_count": excluded_count,
         "post_filter_validation": post_filter_validation,
         "listed_info_match_rate": round(listed_info_match_count / raw_candidate_count, 4) if raw_candidate_count else None,
@@ -13845,6 +13931,75 @@ def _market_filter_sample_with_master(item: dict[str, Any], config: dict[str, An
 def _merge_count_dict(target: dict[str, int], source: dict[str, int]) -> None:
     for key, value in source.items():
         target[key] = int(target.get(key, 0)) + int(value or 0)
+
+
+def _subtract_market_counts(left: dict[str, Any], right: dict[str, Any]) -> dict[str, int]:
+    markets = ["Prime", "Standard", "Growth", "Unknown"]
+    return {
+        market: max(0, int((left or {}).get(market, 0) or 0) - int((right or {}).get(market, 0) or 0))
+        for market in markets
+    }
+
+
+def _market_counts_has_values(counts: dict[str, Any]) -> bool:
+    return isinstance(counts, dict) and any(int(value or 0) for value in counts.values())
+
+
+def _nested_counts_has_values(counts: Any) -> bool:
+    if not isinstance(counts, dict):
+        return False
+    for value in counts.values():
+        if isinstance(value, dict):
+            if _market_counts_has_values(value):
+                return True
+            continue
+        try:
+            if int(value or 0):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _recompute_screening_rejection_audit(config: dict[str, Any], day: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    indicator_rows = _load_indicator_rows_for_screening_audit(config, day)
+    if not indicator_rows:
+        return {}
+    market_filtered = _apply_market_section_filter(indicator_rows, config)
+    allowed = market_filtered.get("allowed", [])
+    if not allowed:
+        return {}
+    return screening_market_rejection_audit(allowed, candidates, target_count=50, config=config)
+
+
+def _load_indicator_rows_for_screening_audit(config: dict[str, Any], day: str) -> list[dict[str, Any]]:
+    paths = [
+        processed_profile_path(config, f"indicators_{day}.json"),
+        _common_processed_cache_path(config, "indicators", day),
+        ROOT / "data" / "processed" / f"indicators_{day}.json",
+    ]
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            payload = read_json(path)
+        except Exception:
+            continue
+        rows = payload.get("indicators", []) if isinstance(payload, dict) else []
+        if isinstance(rows, list):
+            return [row for row in rows if isinstance(row, dict)]
+    return []
+
+
+def _merge_nested_count_dict(target: dict[str, dict[str, int]], source: Any) -> None:
+    if not isinstance(source, dict):
+        return
+    for outer_key, inner in source.items():
+        if not isinstance(inner, dict):
+            continue
+        bucket = target.setdefault(str(outer_key), {})
+        for key, value in inner.items():
+            bucket[str(key)] = int(bucket.get(str(key), 0) or 0) + int(value or 0)
 
 
 def _is_rule_based_backtest(config: dict[str, Any]) -> bool:

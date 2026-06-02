@@ -10,6 +10,7 @@ from feature_analysis import (
     _compounding_capital_flow_audit,
     _market_section_performance_audit,
     _market_section_performance_audit_lines,
+    _monthly_performance_audit,
     _price_band_affordability_audit,
     build_feature_analysis,
     render_feature_analysis_markdown,
@@ -81,10 +82,69 @@ def test_capital_utilization_audit_reports_target_exposure_blockers(config_copy:
     assert audit["no_affordable_candidate_days"] == 1
 
 
+def test_monthly_performance_audit_summarizes_returns_and_streaks(tmp_path) -> None:
+    profile_id = "monthly_profile"
+    log_dir = tmp_path / "logs" / "backtests" / profile_id / "2026-01-01_to_2026-03-31"
+    log_dir.mkdir(parents=True)
+    (log_dir / "summary.csv").write_text(
+        "date,total_assets,max_drawdown\n"
+        "2026-01-05,1000000,0\n"
+        "2026-01-30,1100000,-0.02\n"
+        "2026-02-02,1100000,-0.01\n"
+        "2026-02-27,1045000,-0.06\n"
+        "2026-03-02,1045000,-0.03\n"
+        "2026-03-31,1045000,-0.03\n",
+        encoding="utf-8",
+    )
+    (log_dir / "trades.csv").write_text(
+        "action,entry_date,exit_date,gross_profit,profit,result\n"
+        "SELL,2026-01-10,2026-01-20,50000,40000,WIN\n"
+        "SELL,2026-01-21,2026-01-28,-10000,-10000,LOSS\n"
+        "SELL,2026-02-10,2026-02-18,-20000,-20000,LOSS\n",
+        encoding="utf-8",
+    )
+    backtest_summary = {
+        "all_trades": [
+            {"action": "BUY", "entry_date": "2026-01-10"},
+            {"action": "SELL", "exit_date": "2026-01-20"},
+            {"action": "BUY", "entry_date": "2026-02-10"},
+            {"action": "SELL", "exit_date": "2026-02-18"},
+        ]
+    }
+
+    audit = _monthly_performance_audit(tmp_path, profile_id, "2026-01-01", "2026-03-31", backtest_summary)
+
+    summary = audit["summary"]
+    assert summary["total_months"] == 3
+    assert summary["winning_months"] == 1
+    assert summary["losing_months"] == 1
+    assert summary["flat_months"] == 1
+    assert summary["monthly_win_rate"] == 0.3333
+    assert summary["best_month"] == "2026-01"
+    assert summary["worst_month"] == "2026-02"
+    assert summary["max_consecutive_winning_months"] == 1
+    assert summary["max_consecutive_losing_months"] == 1
+    assert audit["months"][0]["trade_count"] == 2
+    assert audit["months"][0]["buy_trade_count"] == 1
+    assert audit["months"][0]["sell_trade_count"] == 1
+    assert audit["months"][0]["profit_factor"] == 5.0
+    rendered = render_feature_analysis_markdown(
+        {
+            "profile_id": profile_id,
+            "profile_name": profile_id,
+            "closed_trade_count": 0,
+            "monthly_performance_audit": audit,
+        }
+    )
+    assert "## Monthly Performance Audit" in rendered
+    assert "| 2026-01 |" in rendered
+
+
 def test_market_section_performance_audit_summarizes_market_sections(config_copy: dict) -> None:
     scoring_rows = [
-        {"code": "1001", "market_section": "TSEPrime", "selected": True, "close": 1000},
-        {"code": "1002", "market_section": "TSEStandard", "selected": True, "close": 2000},
+        {"date": "2026-01-05", "code": "1001", "market_section": "TSEPrime", "selected": True, "close": 1000, "total_score": 52, "rank": 1},
+        {"date": "2026-01-05", "code": "1002", "name": "Standard Winner", "market_section": "TSEStandard", "selected": True, "close": 2000, "total_score": 51, "rank": 2},
+        {"date": "2026-01-05", "code": "1004", "name": "Standard Below", "market_section": "TSEStandard", "selected": False, "close": 1500, "total_score": 44, "rank": 9},
         {"code": "1003", "market_section": "TSEGrowth", "selected": False, "close": 3000},
     ]
     backtest_summary = {
@@ -96,17 +156,48 @@ def test_market_section_performance_audit_summarizes_market_sections(config_copy
         ]
     }
 
-    audit = _market_section_performance_audit(backtest_summary, config_copy, scoring_rows)
+    audit = _market_section_performance_audit(
+        backtest_summary,
+        config_copy,
+        scoring_rows,
+        market_filter_audit={
+            "candidate_market_breakdown_before_filter": {"Prime": 1, "Standard": 4, "Growth": 1, "Unknown": 0},
+            "candidate_market_breakdown_after_filter": {"Prime": 1, "Standard": 3, "Growth": 1, "Unknown": 0},
+            "candidate_market_breakdown_after_screening": {"Prime": 1, "Standard": 2, "Growth": 1, "Unknown": 0},
+            "excluded_market_breakdown": {"Prime": 0, "Standard": 1, "Growth": 0, "Unknown": 0},
+            "screening_excluded_market_breakdown": {"Prime": 0, "Standard": 1, "Growth": 0, "Unknown": 0},
+        },
+    )
     lines = _market_section_performance_audit_lines(audit)
 
     assert audit["candidate_count_by_market"]["Prime"] == 1
-    assert audit["candidate_count_by_market"]["Standard"] == 1
+    assert audit["candidate_count_by_market"]["Standard"] == 2
     assert audit["candidate_count_by_market"]["Growth"] == 1
     assert audit["selected_count_by_market"]["Growth"] == 0
     assert audit["buy_trade_count_by_market"]["Prime"] == 1
     assert audit["gross_profit_by_market"]["Prime"] == 10000
     assert audit["gross_profit_by_market"]["Standard"] == -5000
-    assert audit["average_round_lot_amount_by_market"]["Standard"] == 200000
+    assert audit["average_round_lot_amount_by_market"]["Standard"] == 175000
+    standard = audit["standard_funnel_audit"]
+    assert standard["raw"] == 4
+    assert standard["after_market_filter"] == 3
+    assert standard["after_screening"] == 2
+    assert standard["after_scoring"] == 2
+    assert standard["score_assigned"] == 2
+    assert standard["above_min_score"] == 1
+    assert standard["selected"] == 1
+    assert standard["top_20_standard_by_total_score"][0]["code"] == "1002"
+    rendered = render_feature_analysis_markdown(
+        {
+            "profile_id": "p",
+            "profile_name": "p",
+            "closed_trade_count": 0,
+            "market_section_performance_audit": audit,
+        }
+    )
+    assert "## Standard Funnel Audit" in rendered
+    assert "- above_min_score: 1" in rendered
+    assert "| 2026-01-05 | 1002 | Standard Winner | Standard | 51.00 | 2.00 | true |" in rendered
     assert any("Standard" in line for line in lines)
 
 

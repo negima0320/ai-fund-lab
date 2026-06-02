@@ -504,6 +504,91 @@ profiles:
       relaxed_pending_target_exposure: true
       market_section_expansion: true
 
+  rookie_dealer_02_v2_43:
+    role: experiment
+    description: v2.26ベース Standard売買代金条件緩和 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      market_section_expansion: true
+      standard_screening_relaxation: true
+      standard_turnover_relaxed: true
+
+  rookie_dealer_02_v2_44:
+    role: experiment
+    description: v2.26ベース Standard出来高前日比条件緩和 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      market_section_expansion: true
+      standard_screening_relaxation: true
+      standard_volume_relaxed: true
+
+  rookie_dealer_02_v2_45:
+    role: experiment
+    description: v2.26ベース Standard移動平均条件緩和 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      market_section_expansion: true
+      standard_screening_relaxation: true
+      standard_ma_relaxed: true
+
+  rookie_dealer_02_v2_46:
+    role: experiment
+    description: v2.26ベース Standard screening複合緩和 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      market_section_expansion: true
+      standard_screening_relaxation: true
+      standard_composite_relaxed: true
+
+  rookie_dealer_02_v2_47:
+    role: experiment
+    description: v2.26ベース Standard専用screening 複合緩和 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      market_section_expansion: true
+      standard_screening_relaxation: true
+      standard_dedicated_screening: true
+
   rookie_dealer_03_growth:
     role: experiment
     description: 東証グロース市場のみを対象にする攻撃型検証

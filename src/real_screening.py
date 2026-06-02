@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from market_sections import market_section_counts, market_section_from_row
+
 
 STRICT_CONDITIONS = {
     "min_turnover_value": 500_000_000,
@@ -22,11 +24,15 @@ FALLBACK_CONDITIONS = {
 }
 
 
-def screen_candidates(indicators: list[dict[str, Any]], target_count: int = 50) -> dict[str, Any]:
+def screen_candidates(
+    indicators: list[dict[str, Any]],
+    target_count: int = 50,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     strict_passed = []
     excluded_reasons: dict[str, int] = {}
     for item in indicators:
-        reasons = _exclude_reasons(item, STRICT_CONDITIONS)
+        reasons = _exclude_reasons(item, _conditions_for_item(item, STRICT_CONDITIONS, config))
         if not reasons:
             strict_passed.append(_candidate(item, fallback=False, pass_reason="strict条件を通過"))
         else:
@@ -42,7 +48,7 @@ def screen_candidates(indicators: list[dict[str, Any]], target_count: int = 50) 
         for item in indicators:
             if item["code"] in existing_codes:
                 continue
-            reasons = _exclude_reasons(item, FALLBACK_CONDITIONS)
+            reasons = _exclude_reasons(item, _conditions_for_item(item, FALLBACK_CONDITIONS, config))
             if not reasons:
                 fallback_candidates.append(_candidate(item, fallback=True, pass_reason="fallback条件を通過"))
         fallback_passed_count = len(fallback_candidates)
@@ -52,6 +58,7 @@ def screen_candidates(indicators: list[dict[str, Any]], target_count: int = 50) 
         "conditions": {
             "strict": STRICT_CONDITIONS,
             "fallback": FALLBACK_CONDITIONS,
+            "market_overrides": _screening_market_overrides(config),
             "ranking": [
                 "volume_ratioが高い",
                 "turnover_valueが大きい",
@@ -65,6 +72,185 @@ def screen_candidates(indicators: list[dict[str, Any]], target_count: int = 50) 
         "candidates": candidates,
         "excluded_summary": excluded_reasons,
     }
+
+
+def screening_market_rejection_audit(
+    indicators: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    *,
+    target_count: int = 50,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Summarize screening-stage drops without changing candidate selection."""
+    candidate_codes = {str(item.get("code")) for item in candidates if isinstance(item, dict)}
+    strict_passed = []
+    fallback_passed = []
+    reason_by_market: dict[str, dict[str, int]] = _empty_market_reason_counts()
+    date_by_market: dict[str, dict[str, int]] = _empty_market_reason_counts()
+    sample: list[dict[str, Any]] = []
+
+    for item in indicators:
+        if not isinstance(item, dict):
+            continue
+        strict_conditions = _conditions_for_item(item, STRICT_CONDITIONS, config)
+        strict_reasons = _safe_exclude_reasons(item, strict_conditions)
+        if not strict_reasons:
+            strict_passed.append(_candidate(item, fallback=False, pass_reason="strict条件を通過"))
+            continue
+        fallback_conditions = _conditions_for_item(item, FALLBACK_CONDITIONS, config)
+        fallback_reasons = _safe_exclude_reasons(item, fallback_conditions)
+        if not fallback_reasons:
+            fallback_passed.append(_candidate(item, fallback=True, pass_reason="fallback条件を通過"))
+        if str(item.get("code")) in candidate_codes:
+            continue
+        market = _market_label(item)
+        date_text = str(item.get("date") or "")
+        reason_keys = _screening_reason_keys(strict_reasons)
+        for reason in reason_keys:
+            reason_by_market[market][reason] = int(reason_by_market[market].get(reason, 0) or 0) + 1
+        if date_text:
+            date_by_market[market][date_text] = int(date_by_market[market].get(date_text, 0) or 0) + 1
+        if market in {"Standard", "Growth"} and len(sample) < 50:
+            sample.append(
+                {
+                    "date": item.get("date"),
+                    "code": item.get("code"),
+                    "name": item.get("name"),
+                    "market_section": market_section_from_row(item),
+                    "filter_result": "market_filter_allowed_but_screening_excluded",
+                    "reject_reason": ";".join(reason_keys),
+                }
+            )
+
+    strict_ranked = _rank_candidates(strict_passed)
+    fallback_ranked = _rank_candidates(fallback_passed)
+    ranked_codes = {str(item.get("code")) for item in strict_ranked[:target_count]}
+    if len(ranked_codes) < target_count:
+        ranked_codes.update(str(item.get("code")) for item in fallback_ranked[: target_count - len(ranked_codes)])
+    ranking_drop_by_market = {market: 0 for market in _market_labels()}
+    for item in [*strict_ranked, *fallback_ranked]:
+        code = str(item.get("code"))
+        if code in candidate_codes or code in ranked_codes:
+            continue
+        market = _market_label(item)
+        ranking_drop_by_market[market] = int(ranking_drop_by_market.get(market, 0) or 0) + 1
+        reason_by_market[market]["ranking_drop"] = int(reason_by_market[market].get("ranking_drop", 0) or 0) + 1
+        date_text = str(item.get("date") or "")
+        if date_text:
+            date_by_market[market][date_text] = int(date_by_market[market].get(date_text, 0) or 0) + 1
+        if market in {"Standard", "Growth"} and len(sample) < 50:
+            sample.append(
+                {
+                    "date": item.get("date"),
+                    "code": item.get("code"),
+                    "name": item.get("name"),
+                    "market_section": market_section_from_row(item),
+                    "filter_result": "market_filter_allowed_but_screening_excluded",
+                    "reject_reason": "ranking_drop",
+                }
+            )
+
+    return {
+        "input_count_by_market": market_section_counts(indicators),
+        "screening_candidate_count_by_market": market_section_counts(candidates),
+        "screening_excluded_reason_by_market": reason_by_market,
+        "screening_excluded_date_by_market": date_by_market,
+        "screening_ranking_drop_by_market": ranking_drop_by_market,
+        "representative_sample": sample,
+        "market_overrides": _screening_market_overrides(config),
+    }
+
+
+def _empty_market_reason_counts() -> dict[str, dict[str, int]]:
+    return {market: {} for market in _market_labels()}
+
+
+def _market_labels() -> list[str]:
+    return ["Prime", "Standard", "Growth", "Unknown"]
+
+
+def _market_label(item: dict[str, Any]) -> str:
+    section = market_section_from_row(item)
+    return {
+        "TSEPrime": "Prime",
+        "TSEStandard": "Standard",
+        "TSEGrowth": "Growth",
+    }.get(section, "Unknown")
+
+
+def _safe_exclude_reasons(item: dict[str, Any], conditions: dict[str, float]) -> list[str]:
+    try:
+        return _exclude_reasons(item, conditions)
+    except (KeyError, TypeError, ValueError):
+        return ["missing_required_price_or_indicator"]
+
+
+def _conditions_for_item(
+    item: dict[str, Any],
+    base_conditions: dict[str, Any],
+    config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    conditions = dict(base_conditions)
+    overrides = _market_override_for_item(item, config)
+    if not overrides:
+        return conditions
+    for key, value in overrides.items():
+        if key in {"strict", "fallback"} and isinstance(value, dict):
+            continue
+        conditions[key] = value
+    stage_key = "fallback" if base_conditions is FALLBACK_CONDITIONS else "strict"
+    stage_overrides = overrides.get(stage_key)
+    if isinstance(stage_overrides, dict):
+        conditions.update(stage_overrides)
+    return conditions
+
+
+def _market_override_for_item(item: dict[str, Any], config: dict[str, Any] | None) -> dict[str, Any]:
+    overrides = _screening_market_overrides(config)
+    if not overrides:
+        return {}
+    section = market_section_from_row(item)
+    market = _market_label(item)
+    for key in [section, market]:
+        value = overrides.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _screening_market_overrides(config: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(config, dict):
+        return {}
+    screening = config.get("screening", {})
+    if not isinstance(screening, dict):
+        return {}
+    overrides = screening.get("market_overrides", {})
+    return overrides if isinstance(overrides, dict) else {}
+
+
+def _screening_reason_keys(reasons: list[str]) -> list[str]:
+    keys = [_screening_reason_key(reason) for reason in reasons]
+    return keys or ["unknown"]
+
+
+def _screening_reason_key(reason: str) -> str:
+    mapping = {
+        "売買代金不足": "trading_value_low",
+        "出来高前日比不足": "volume_ratio_low",
+        "終値が5日移動平均以下": "close_below_ma5",
+        "5日移動平均が25日移動平均以下": "ma5_below_ma25",
+        "RSI範囲外": "rsi_out_of_range",
+        "直近5営業日の値動きが大きすぎる": "volatility_too_high",
+        "missing_required_price_or_indicator": "missing_required_price_or_indicator",
+    }
+    return mapping.get(str(reason), "unknown")
+
+
+def _bool_condition(conditions: dict[str, Any], key: str, default: bool = True) -> bool:
+    value = conditions.get(key, default)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"false", "0", "no", "off"}
+    return bool(value)
 
 
 def _candidate(item: dict[str, Any], fallback: bool, pass_reason: str) -> dict[str, Any]:
@@ -156,15 +342,15 @@ def _candidate(item: dict[str, Any], fallback: bool, pass_reason: str) -> dict[s
     }
 
 
-def _exclude_reasons(item: dict[str, Any], conditions: dict[str, float]) -> list[str]:
+def _exclude_reasons(item: dict[str, Any], conditions: dict[str, Any]) -> list[str]:
     reasons = []
     if float(item["turnover_value"]) < conditions["min_turnover_value"]:
         reasons.append("売買代金不足")
     if item["volume_ratio"] is None or float(item["volume_ratio"]) < conditions["min_volume_ratio"]:
         reasons.append("出来高前日比不足")
-    if float(item["close"]) <= float(item["ma5"]):
+    if _bool_condition(conditions, "require_close_above_ma5", True) and float(item["close"]) <= float(item["ma5"]):
         reasons.append("終値が5日移動平均以下")
-    if float(item["ma5"]) <= float(item["ma25"]):
+    if _bool_condition(conditions, "require_ma5_above_ma25", True) and float(item["ma5"]) <= float(item["ma25"]):
         reasons.append("5日移動平均が25日移動平均以下")
     if not (conditions["rsi_min"] <= float(item["rsi"]) <= conditions["rsi_max"]):
         reasons.append("RSI範囲外")

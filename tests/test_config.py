@@ -312,6 +312,27 @@ def test_rookie_dealer_02_v2_41_to_42_market_section_expansion_profiles_load() -
     assert load_profile("rookie_dealer_02_v2.42")["profile_id"] == "rookie_dealer_02_v2_42"
 
 
+def test_rookie_dealer_02_v2_43_to_47_standard_screening_profiles_load() -> None:
+    profile_43 = load_profile("rookie_dealer_02_v2_43")
+    profile_44 = load_profile("rookie_dealer_02_v2_44")
+    profile_45 = load_profile("rookie_dealer_02_v2_45")
+    profile_46 = load_profile("rookie_dealer_02_v2_46")
+    profile_47 = load_profile("rookie_dealer_02_v2_47")
+
+    for profile in [profile_43, profile_44, profile_45, profile_46, profile_47]:
+        assert profile["market_filter"]["allowed_sections"] == ["TSEPrime", "TSEStandard"]
+        assert "TSEStandard" in profile["screening"]["market_overrides"]
+        assert "TSEPrime" not in profile["screening"]["market_overrides"]
+        assert profile["capital_utilization_policy"]["allocation_strategy"] == "relaxed_pending_target_exposure"
+
+    assert profile_43["screening"]["market_overrides"]["TSEStandard"]["min_turnover_value"] == 300000000
+    assert profile_44["screening"]["market_overrides"]["TSEStandard"]["min_volume_ratio"] == 1.2
+    assert profile_45["screening"]["market_overrides"]["TSEStandard"]["require_close_above_ma5"] is False
+    assert profile_46["screening"]["market_overrides"]["TSEStandard"]["require_ma5_above_ma25"] is False
+    assert profile_47["screening"]["market_overrides"]["TSEStandard"]["rsi_max"] == 75
+    assert load_profile("rookie_dealer_02_v2.47")["profile_id"] == "rookie_dealer_02_v2_47"
+
+
 def test_rookie_dealer_02_v2_2_profile_relaxes_risk_off_filter() -> None:
     profile = load_profile("rookie_dealer_02_v2_2")
 

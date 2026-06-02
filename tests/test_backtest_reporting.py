@@ -1129,12 +1129,83 @@ def test_market_filter_audit_reads_candidate_breakdowns(config_copy: dict, tmp_p
 
     assert audit["raw_candidate_count"] == 4
     assert audit["candidate_market_breakdown_before_filter"]["Prime"] == 2
-    assert audit["candidate_market_breakdown_after_filter"]["Prime"] == 1
+    assert audit["candidate_market_breakdown_after_filter"]["Prime"] == 2
+    assert audit["candidate_market_breakdown_after_screening"]["Prime"] == 1
     assert audit["excluded_market_breakdown"]["Standard"] == 1
     assert audit["unknown_market_count"] == 1
     assert audit["post_filter_validation"]["status"] == "OK"
-    assert audit["daily_breakdown"][0]["raw_candidate_count_by_market"]["Prime"] == 1
-    assert audit["daily_breakdown"][0]["after_market_filter_candidate_count_by_market"]["Prime"] == 1
+    assert audit["daily_breakdown"][0]["raw_candidate_count_by_market"]["Prime"] == 2
+    assert audit["daily_breakdown"][0]["after_market_filter_candidate_count_by_market"]["Prime"] == 2
+    assert audit["daily_breakdown"][0]["after_screening_candidate_count_by_market"]["Prime"] == 1
+
+
+def test_market_filter_audit_recomputes_screening_reasons_from_indicators(config_copy: dict, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    config_copy["market_filter"] = {"allowed_sections": ["TSEPrime", "TSEStandard"], "allow_unknown_market": False}
+    main_module.write_json(
+        main_module.processed_profile_path(config_copy, "indicators_2026-01-05.json"),
+        {
+            "indicators": [
+                {
+                    "date": "2026-01-05",
+                    "code": "1001",
+                    "name": "Prime",
+                    "market_section": "TSEPrime",
+                    "section": "TSEPrime",
+                    "close": 110,
+                    "ma5": 105,
+                    "ma25": 100,
+                    "rsi": 55,
+                    "volume": 1000000,
+                    "volume_ratio": 3.0,
+                    "turnover_value": 800000000,
+                    "five_day_volatility": 0.04,
+                },
+                {
+                    "date": "2026-01-05",
+                    "code": "2001",
+                    "name": "Standard Low Liquidity",
+                    "market_section": "TSEStandard",
+                    "section": "TSEStandard",
+                    "close": 90,
+                    "ma5": 100,
+                    "ma25": 105,
+                    "rsi": 80,
+                    "volume": 100000,
+                    "volume_ratio": 0.8,
+                    "turnover_value": 100000000,
+                    "five_day_volatility": 0.04,
+                },
+            ]
+        },
+    )
+    main_module.write_json(
+        main_module.processed_profile_path(config_copy, "candidates_2026-01-05.json"),
+        {
+            "date": "2026-01-05",
+            "candidates": [{"date": "2026-01-05", "code": "1001", "market_section": "TSEPrime"}],
+            "market_coverage": {
+                "input_counts": {"Prime": 1, "Standard": 1, "Growth": 0, "Unknown": 0},
+                "market_filter_allowed_counts": {"Prime": 1, "Standard": 1, "Growth": 0, "Unknown": 0},
+                "excluded_counts": {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0},
+                "screening_candidate_counts": {"Prime": 1, "Standard": 0, "Growth": 0, "Unknown": 0},
+            },
+        },
+    )
+
+    audit = main_module.build_market_filter_audit(config_copy, ["2026-01-05"])
+
+    assert audit["candidate_market_breakdown_after_filter"]["Standard"] == 1
+    assert audit["candidate_market_breakdown_after_screening"]["Standard"] == 0
+    assert audit["screening_excluded_market_breakdown"]["Standard"] == 1
+    reasons = audit["screening_excluded_reason_by_market"]["Standard"]
+    assert reasons["trading_value_low"] == 1
+    assert reasons["volume_ratio_low"] == 1
+    assert reasons["close_below_ma5"] == 1
+    assert reasons["ma5_below_ma25"] == 1
+    assert reasons["rsi_out_of_range"] == 1
+    assert audit["screening_excluded_date_by_market"]["Standard"]["2026-01-05"] == 1
+    assert audit["screening_representative_sample"][0]["code"] == "2001"
 
 
 def test_market_filter_audit_restores_missing_market_sections_from_master(config_copy: dict, tmp_path, monkeypatch) -> None:
@@ -1171,6 +1242,7 @@ def test_market_filter_audit_restores_missing_market_sections_from_master(config
     assert audit["raw_candidate_count"] == 2
     assert audit["candidate_market_breakdown_before_filter"]["Prime"] == 1
     assert audit["candidate_market_breakdown_after_filter"]["Prime"] == 1
+    assert audit["candidate_market_breakdown_after_screening"]["Prime"] == 1
     assert audit["candidate_market_breakdown_after_filter"]["Unknown"] == 0
     assert audit["excluded_market_breakdown"]["Unknown"] == 1
     assert audit["listed_info_total_count"] == 2
@@ -1182,6 +1254,8 @@ def test_market_filter_audit_restores_missing_market_sections_from_master(config
     assert audit["post_filter_validation"]["status"] == "OK"
     assert audit["daily_breakdown"][0]["raw_candidate_count_by_market"]["Prime"] == 1
     assert audit["daily_breakdown"][0]["raw_candidate_count_by_market"]["Unknown"] == 1
+    assert audit["daily_breakdown"][0]["after_market_filter_candidate_count_by_market"]["Prime"] == 1
+    assert audit["daily_breakdown"][0]["after_screening_candidate_count_by_market"]["Prime"] == 1
 
 
 def test_candidate_payload_with_market_sections_updates_candidates_and_coverage(config_copy: dict, tmp_path, monkeypatch) -> None:
