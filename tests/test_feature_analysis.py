@@ -12,6 +12,7 @@ from feature_analysis import (
     _market_section_performance_audit_lines,
     _monthly_performance_audit,
     _price_band_affordability_audit,
+    _standard_scoring_funnel_audit,
     build_feature_analysis,
     render_feature_analysis_markdown,
 )
@@ -199,6 +200,118 @@ def test_market_section_performance_audit_summarizes_market_sections(config_copy
     assert "- above_min_score: 1" in rendered
     assert "| 2026-01-05 | 1002 | Standard Winner | Standard | 51.00 | 2.00 | true |" in rendered
     assert any("Standard" in line for line in lines)
+
+
+def test_standard_scoring_funnel_audit_reports_candidates_missing_from_scored_output(
+    config_copy: dict,
+    tmp_path,
+) -> None:
+    profile_id = "rookie_dealer_02_v2_47"
+    profile_dir = tmp_path / "data" / "processed" / profile_id
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "candidates_2026-01-05.json").write_text(
+        json.dumps(
+            {
+                "date": "2026-01-05",
+                "candidates": [
+                    {
+                        "code": "1001",
+                        "name": "Prime Scored",
+                        "market_section": "TSEPrime",
+                        "close": 1000,
+                        "volume_ratio": 2.5,
+                        "rsi": 55,
+                    },
+                    {
+                        "code": "1002",
+                        "name": "Standard Omitted",
+                        "market_section": "TSEStandard",
+                        "close": 1200,
+                        "volume_ratio": 2.8,
+                        "rsi": 58,
+                    },
+                    {
+                        "code": "1003",
+                        "name": "Standard Missing Indicator",
+                        "market_section": "TSEStandard",
+                        "volume_ratio": 3.1,
+                        "rsi": 62,
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (profile_dir / "scored_candidates_2026-01-05.json").write_text(
+        json.dumps(
+            {
+                "date": "2026-01-05",
+                "storage_mode": "compact",
+                "storage_omitted_score_count": 2,
+                "scores": [
+                    {
+                        "code": "1001",
+                        "name": "Prime Scored",
+                        "market_section": "TSEPrime",
+                        "total_score": 52,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    audit = _standard_scoring_funnel_audit(tmp_path, profile_id, "2026-01-01", "2026-01-31", config_copy)
+    rendered = render_feature_analysis_markdown(
+        {
+            "profile_id": profile_id,
+            "profile_name": profile_id,
+            "closed_trade_count": 0,
+            "standard_scoring_funnel_audit": audit,
+        }
+    )
+
+    assert audit["after_screening_count"] == 2
+    assert audit["after_scoring_count"] == 0
+    assert audit["after_scoring_input_filter_count"] == 2
+    assert audit["scoring_input_exclusion_reasons"]["Standard"]["storage_pruned_rejected_score"] == 2
+    assert audit["standard_scoring_excluded_samples"][0]["code"] == "1002"
+    assert "## Standard Scoring Funnel Audit" in rendered
+    assert "| Standard | storage_pruned_rejected_score | 2 |" in rendered
+    assert "| 2026-01-05 | 1002 | Standard Omitted | Standard | storage_pruned_rejected_score |" in rendered
+
+
+def test_standard_scoring_funnel_audit_reports_missing_scored_payload(tmp_path, config_copy: dict) -> None:
+    profile_id = "rookie_dealer_02_v2_47"
+    profile_dir = tmp_path / "data" / "processed" / profile_id
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "candidates_2026-01-06.json").write_text(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "code": "2001",
+                        "name": "Standard No Score File",
+                        "market_section": "TSEStandard",
+                        "close": 900,
+                        "volume_ratio": 2.2,
+                        "rsi": 50,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    audit = _standard_scoring_funnel_audit(tmp_path, profile_id, "2026-01-01", "2026-01-31", config_copy)
+
+    assert audit["after_screening_count"] == 1
+    assert audit["after_scoring_count"] == 0
+    assert audit["scored_payload_missing_count"] == 1
+    assert audit["scoring_input_exclusion_reasons"]["Standard"]["scored_candidates_missing"] == 1
 
 
 def test_market_section_performance_audit_fills_unknown_from_master(config_copy: dict, tmp_path) -> None:

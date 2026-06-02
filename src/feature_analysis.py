@@ -204,6 +204,10 @@ def build_feature_analysis(
             market_filter_audit=integrity_audits.get("market_filter_audit", {}),
         ),
     )
+    standard_scoring_funnel_audit = timed(
+        "feature_analysis_score_integrity_sec",
+        lambda: _standard_scoring_funnel_audit(root, profile_id, start_date, end_date, config),
+    )
     allocation_strategy_audit = timed(
         "feature_analysis_result_integrity_sec",
         lambda: _allocation_strategy_audit(root, profile_id, start_date, end_date, backtest_summary, config),
@@ -404,6 +408,7 @@ def build_feature_analysis(
         "investor_context_filter": investor_context_filter,
         "capital_utilization_audit": capital_utilization_audit,
         "market_section_performance_audit": market_section_performance_audit,
+        "standard_scoring_funnel_audit": standard_scoring_funnel_audit,
         "allocation_strategy_audit": allocation_strategy_audit,
         "dynamic_exposure_audit": dynamic_exposure_audit,
         "affordable_fallback_buy_audit": affordable_fallback_buy_audit,
@@ -497,6 +502,10 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "## Standard Funnel Audit",
         "",
         *_standard_funnel_audit_lines((analysis.get("market_section_performance_audit", {}) or {}).get("standard_funnel_audit", {})),
+        "",
+        "## Standard Scoring Funnel Audit",
+        "",
+        *_standard_scoring_funnel_audit_lines(analysis.get("standard_scoring_funnel_audit", {})),
         "",
         "## Scored Candidate Audit",
         "",
@@ -5411,6 +5420,145 @@ def _standard_funnel_audit(
     }
 
 
+def _standard_scoring_funnel_audit(
+    root: Path,
+    profile_id: str,
+    start_date: str | None,
+    end_date: str | None,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    profile_dir = root / "data" / "processed" / profile_id
+    market_section_master = _market_section_master_by_code(root)
+    after_screening_count = 0
+    after_scoring_count = 0
+    reasons: dict[str, dict[str, int]] = {}
+    samples: list[dict[str, Any]] = []
+    days_checked = 0
+    scored_payload_missing_count = 0
+    for candidate_path in sorted(profile_dir.glob("candidates_*.json")) if profile_dir.exists() else []:
+        day = _date_from_filename(candidate_path)
+        if start_date and day and day < start_date:
+            continue
+        if end_date and day and day > end_date:
+            continue
+        candidate_payload = _read_json_object(candidate_path)
+        candidate_rows = [
+            row
+            for row in _rows_from_processed_payload(candidate_payload, "candidates")
+            if isinstance(row, dict)
+        ]
+        standard_candidates = [
+            row
+            for row in candidate_rows
+            if _market_section_label(row, market_section_master) == "Standard"
+        ]
+        if not standard_candidates:
+            continue
+        days_checked += 1
+        after_screening_count += len(standard_candidates)
+        scored_path = profile_dir / f"scored_candidates_{day}.json"
+        scored_payload = _read_json_object(scored_path)
+        if not scored_payload:
+            scored_payload_missing_count += 1
+        scored_rows = [
+            row
+            for row in _rows_from_processed_payload(scored_payload, "scored_candidates")
+            if isinstance(row, dict)
+        ]
+        scored_codes = {_normalize_code(row.get("code") or row.get("Code")) for row in scored_rows}
+        standard_scored_rows = [
+            row
+            for row in scored_rows
+            if _market_section_label(row, market_section_master) == "Standard"
+        ]
+        after_scoring_count += len(standard_scored_rows)
+        scored_meta = scored_payload if isinstance(scored_payload, dict) else {}
+        for row in standard_candidates:
+            code = _normalize_code(row.get("code") or row.get("Code"))
+            if code in scored_codes:
+                continue
+            reason = _standard_scoring_input_exclusion_reason(row, scored_meta, scored_path.exists(), config)
+            _increment_nested_count(reasons, "Standard", reason)
+            if len(samples) < 20:
+                samples.append(
+                    {
+                        "date": day or row.get("date"),
+                        "code": code,
+                        "name": row.get("name") or row.get("company_name") or row.get("company") or row.get("CoName"),
+                        "market_section": _market_section_label(row, market_section_master),
+                        "reason": reason,
+                    }
+                )
+    excluded_count = sum(sum(reason_counts.values()) for reason_counts in reasons.values())
+    return {
+        "status": "OK",
+        "days_checked": days_checked,
+        "scored_payload_missing_count": scored_payload_missing_count,
+        "after_screening_count": after_screening_count,
+        "after_scoring_input_filter_count": excluded_count,
+        "after_scoring_count": after_scoring_count,
+        "scoring_input_exclusion_reasons": reasons,
+        "standard_scoring_excluded_samples": samples,
+    }
+
+
+def _read_json_object(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _increment_nested_count(target: dict[str, dict[str, int]], market: str, reason: str) -> None:
+    target.setdefault(market, {})
+    target[market][reason] = int(target[market].get(reason, 0) or 0) + 1
+
+
+def _standard_scoring_input_exclusion_reason(
+    candidate: dict[str, Any],
+    scored_payload: dict[str, Any],
+    scored_path_exists: bool,
+    config: dict[str, Any] | None,
+) -> str:
+    if not scored_path_exists:
+        return "scored_candidates_missing"
+    storage_omitted = int(scored_payload.get("storage_omitted_score_count") or 0) if isinstance(scored_payload, dict) else 0
+    storage_mode = str(scored_payload.get("storage_mode") or "").strip() if isinstance(scored_payload, dict) else ""
+    if storage_omitted > 0:
+        return "storage_pruned_rejected_score"
+    if storage_mode in {"compact", "analysis"}:
+        return "storage_mode_selected_only"
+    missing = _standard_scoring_missing_prerequisites(candidate)
+    if missing:
+        if {"close", "adjusted_close", "price"} & set(missing):
+            return "indicator_missing"
+        return "score_prerequisite_missing"
+    relative_strength = (config or {}).get("relative_strength")
+    if isinstance(relative_strength, dict) and relative_strength.get("enabled"):
+        if all(_number(candidate.get(key)) is None for key in ("relative_strength_5d", "relative_strength_10d", "relative_strength_20d", "relative_strength_score")):
+            return "relative_strength_missing"
+    investor_context = (config or {}).get("investor_context")
+    if isinstance(investor_context, dict) and investor_context.get("enabled"):
+        if _number(candidate.get("investor_context_score")) is None and candidate.get("investor_context_source") is None:
+            return "investor_context_missing"
+    financial_context = (config or {}).get("financial_context")
+    if isinstance(financial_context, dict) and financial_context.get("enabled"):
+        if candidate.get("financial_context") is None and candidate.get("financial_summary") is None:
+            return "financial_context_missing"
+    return "ranking_input_filter_or_unknown"
+
+
+def _standard_scoring_missing_prerequisites(candidate: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    if _number(candidate.get("close") or candidate.get("adjusted_close") or candidate.get("price")) is None:
+        missing.append("close")
+    if _number(candidate.get("volume_ratio")) is None:
+        missing.append("volume_ratio")
+    if _number(candidate.get("rsi")) is None:
+        missing.append("rsi")
+    return missing
+
+
 def _trade_market_audit(
     events: list[Any],
     config: dict[str, Any] | None,
@@ -6955,6 +7103,58 @@ def _standard_funnel_audit_lines(audit: dict[str, Any]) -> list[str]:
             f"{row.get('market_section') or 'Unknown'} | {_format_number(row.get('total_score'))} | "
             f"{_format_number(row.get('score_rank'))} | {str(bool(row.get('selected'))).lower()} |"
         )
+    return lines
+
+
+def _standard_scoring_funnel_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- audit: unavailable"]
+    lines = [
+        f"- after_screening_count: {audit.get('after_screening_count', 0)}",
+        f"- after_scoring_input_filter_count: {audit.get('after_scoring_input_filter_count', 0)}",
+        f"- after_scoring_count: {audit.get('after_scoring_count', 0)}",
+        f"- days_checked: {audit.get('days_checked', 0)}",
+        f"- scored_payload_missing_count: {audit.get('scored_payload_missing_count', 0)}",
+        "",
+        "### Scoring Input Exclusion Reasons",
+        "",
+        "| market | reason | count |",
+        "| --- | --- | ---: |",
+    ]
+    reasons = audit.get("scoring_input_exclusion_reasons", {})
+    added_reason = False
+    if isinstance(reasons, dict):
+        for market in sorted(reasons):
+            counts = reasons.get(market, {})
+            if not isinstance(counts, dict):
+                continue
+            for reason, count in sorted(counts.items(), key=lambda item: (-int(item[1] or 0), str(item[0]))):
+                lines.append(f"| {market} | {reason} | {int(count or 0)} |")
+                added_reason = True
+    if not added_reason:
+        lines.append("| - | - | 0 |")
+    lines.extend(
+        [
+            "",
+            "### Standard Scoring Excluded Samples",
+            "",
+            "| date | code | name | market_section | reason |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
+    samples = audit.get("standard_scoring_excluded_samples", [])
+    added_sample = False
+    if isinstance(samples, list):
+        for row in samples[:20]:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                f"| {row.get('date') or ''} | {row.get('code') or ''} | {row.get('name') or ''} | "
+                f"{row.get('market_section') or 'Unknown'} | {row.get('reason') or 'unknown'} |"
+            )
+            added_sample = True
+    if not added_sample:
+        lines.append("| - | - | - | - | - |")
     return lines
 
 
