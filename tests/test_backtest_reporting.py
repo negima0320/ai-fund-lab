@@ -149,7 +149,7 @@ def test_backtest_indicator_recalculation_fetches_missing_price_history(monkeypa
     )
     calls = {"loads": 0, "fetch": None}
 
-    def fake_load_cached_price_history(fetch_dates):
+    def fake_load_cached_price_history(fetch_dates, _config=None):
         calls["loads"] += 1
         if calls["loads"] == 1:
             return []
@@ -300,6 +300,52 @@ def test_cached_jquants_price_files_are_used_as_backtest_trading_days(monkeypatc
         "market_section": "TSEPrime",
         "listing_market": "TSEPrime",
     }.items() <= rows[0].items()
+
+
+def test_cached_price_memory_cache_is_profile_market_filter_aware(monkeypatch, config_copy, tmp_path) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    main_module.RUNTIME_MEMORY_CACHE.clear()
+    raw_dir = tmp_path / "data" / "raw"
+    raw_dir.mkdir(parents=True)
+    main_module.write_json(
+        raw_dir / "listed_stocks_jquants.json",
+        {
+            "stocks": [
+                {"code": "1001", "section": "TSEPrime", "name": "Prime"},
+                {"code": "2001", "section": "TSEStandard", "name": "Standard"},
+                {"code": "3001", "section": "TSEGrowth", "name": "Growth"},
+            ]
+        },
+    )
+    main_module.write_json(
+        raw_dir / "prices_2026-05-29.json",
+        {
+            "prices": [
+                {"date": "2026-05-29", "code": "1001", "close": 100},
+                {"date": "2026-05-29", "code": "2001", "close": 200},
+                {"date": "2026-05-29", "code": "3001", "close": 300},
+            ]
+        },
+    )
+    prime_config = dict(config_copy)
+    prime_config["market_filter"] = {"allowed_sections": ["TSEPrime"], "allow_unknown_market": False}
+    expanded_config = dict(config_copy)
+    expanded_config["market_filter"] = {
+        "allowed_sections": ["TSEPrime", "TSEStandard", "TSEGrowth"],
+        "allow_unknown_market": False,
+    }
+
+    prime_rows = main_module.load_cached_prime_prices(date(2026, 5, 29), prime_config)
+    expanded_rows = main_module.load_cached_prime_prices(date(2026, 5, 29), expanded_config)
+
+    assert [row["code"] for row in prime_rows] == ["1001"]
+    assert [row["code"] for row in expanded_rows] == ["1001", "2001", "3001"]
+    assert main_module.market_section_counts(expanded_rows) == {
+        "Prime": 1,
+        "Standard": 1,
+        "Growth": 1,
+        "Unknown": 0,
+    }
 
 
 def test_screen_writes_empty_candidates_when_indicators_are_empty(monkeypatch, config_copy, tmp_path) -> None:
@@ -738,6 +784,69 @@ def test_backtest_result_integrity_audit_detects_trade_without_selected(config_c
     assert audit["result_integrity_status"] == "WARNING"
 
 
+def test_backtest_result_integrity_treats_affordable_fallback_buy_as_selected(config_copy: dict, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(main_module, "BACKTEST_JSON_READ_AUDIT", {"out_of_range_count": 0})
+    monkeypatch.setattr(
+        main_module,
+        "COMMON_CACHE_METRICS",
+        {
+            "cache_reused_from_common_count": 0,
+            "profile_specific_cache_count": 0,
+            "generated_cache_size": 0,
+            "indicator_cache_source": {},
+            "candidate_cache_source": {},
+        },
+    )
+    backtest_dir = tmp_path / "logs" / "backtests" / main_module.profile_id_from(config_copy) / "2026-01-01_to_2026-03-06"
+    backtest_dir.mkdir(parents=True)
+    main_module.write_json(
+        main_module.processed_profile_path(config_copy, "scored_candidates_2026-01-05.json"),
+        {
+            "selected": [
+                {
+                    "date": "2026-01-05",
+                    "code": "1001",
+                    "selected": True,
+                    "market_section": "Prime",
+                }
+            ],
+            "scores": [
+                {
+                    "date": "2026-01-05",
+                    "code": "1002",
+                    "selected": False,
+                    "market_section": "Prime",
+                }
+            ],
+        },
+    )
+
+    audit = main_module.build_backtest_result_integrity_audit(
+        config_copy,
+        [
+            {
+                "action": "BUY",
+                "order_status": "FILLED",
+                "signal_date": "2026-01-05",
+                "entry_date": "2026-01-06",
+                "code": "1002",
+                "market_section": "Prime",
+                "affordable_fallback_buy_selected": True,
+                "affordable_fallback_original_code": "1001",
+            }
+        ],
+        backtest_dir,
+        "2026-01-01",
+        "2026-03-06",
+        [{"date": "2026-01-05"}],
+    )
+
+    assert audit["buy_trade_count"] == 1
+    assert audit["trade_without_selected_count"] == 0
+    assert audit["market_filter_violation_count"] == 0
+
+
 def test_backtest_result_integrity_audit_ok_for_portfolio_limited_selected_without_trade(
     config_copy: dict, tmp_path, monkeypatch
 ) -> None:
@@ -1024,6 +1133,8 @@ def test_market_filter_audit_reads_candidate_breakdowns(config_copy: dict, tmp_p
     assert audit["excluded_market_breakdown"]["Standard"] == 1
     assert audit["unknown_market_count"] == 1
     assert audit["post_filter_validation"]["status"] == "OK"
+    assert audit["daily_breakdown"][0]["raw_candidate_count_by_market"]["Prime"] == 1
+    assert audit["daily_breakdown"][0]["after_market_filter_candidate_count_by_market"]["Prime"] == 1
 
 
 def test_market_filter_audit_restores_missing_market_sections_from_master(config_copy: dict, tmp_path, monkeypatch) -> None:
@@ -1069,6 +1180,8 @@ def test_market_filter_audit_restores_missing_market_sections_from_master(config
     assert audit["market_section_filled_from_master_count"] == 1
     assert audit["samples"][0]["market_section"] == "TSEPrime"
     assert audit["post_filter_validation"]["status"] == "OK"
+    assert audit["daily_breakdown"][0]["raw_candidate_count_by_market"]["Prime"] == 1
+    assert audit["daily_breakdown"][0]["raw_candidate_count_by_market"]["Unknown"] == 1
 
 
 def test_candidate_payload_with_market_sections_updates_candidates_and_coverage(config_copy: dict, tmp_path, monkeypatch) -> None:

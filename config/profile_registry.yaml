@@ -250,6 +250,260 @@ profiles:
       capital_utilization: true
       affordability_filter: true
 
+  rookie_dealer_02_v2_26:
+    role: experiment
+    description: pending_buy_amount控除を緩和 allocation_limit 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_19
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+
+  rookie_dealer_02_v2_27:
+    role: experiment
+    description: 同日候補を均等予算配分する allocation_limit 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_19
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      same_day_equal_budget: true
+
+  rookie_dealer_02_v2_28:
+    role: experiment
+    description: 同日候補を安い単元株優先で資金配分する検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_19
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      round_lot_priority: true
+
+  rookie_dealer_02_v2_29:
+    role: experiment
+    description: v2.26ベース max_position_value_rate 0.60 target_exposure 0.90 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      position_value_rate_relaxed: true
+
+  rookie_dealer_02_v2_30:
+    role: experiment
+    description: v2.26ベース max_position_value_rate 0.70 target_exposure 0.90 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      position_value_rate_relaxed: true
+
+  rookie_dealer_02_v2_31:
+    role: experiment
+    description: v2.26ベース max_position_value_rate 0.60 target_exposure 0.95 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      position_value_rate_relaxed: true
+      target_exposure_relaxed: true
+
+  rookie_dealer_02_v2_32:
+    role: experiment
+    description: v2.26ベース max_position_value_rate 0.70 target_exposure 0.95 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      position_value_rate_relaxed: true
+      target_exposure_relaxed: true
+
+  rookie_dealer_02_v2_33:
+    role: experiment
+    description: v2.26ベース strong_bullのみ target_exposure 0.95 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      dynamic_exposure: true
+
+  rookie_dealer_02_v2_34:
+    role: experiment
+    description: v2.26ベース strong_bull 0.95 / bull 0.90 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      dynamic_exposure: true
+
+  rookie_dealer_02_v2_35:
+    role: experiment
+    description: v2.26ベース bull強化 + bear抑制 + strong_bear停止 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      dynamic_exposure: true
+
+  rookie_dealer_02_v2_36:
+    role: experiment
+    description: v2.26ベース strong_bear停止 + その他積極運用 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      dynamic_exposure: true
+
+  rookie_dealer_02_v2_37:
+    role: experiment
+    description: v2.26ベース affordable fallback buy 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      affordable_fallback_buy: true
+
+  rookie_dealer_02_v2_38:
+    role: experiment
+    description: v2.37 + affordable fallback min_total_score 50 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      affordable_fallback_buy: true
+
+  rookie_dealer_02_v2_39:
+    role: experiment
+    description: v2.37 + affordable fallback min_total_score 55 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      affordable_fallback_buy: true
+
+  rookie_dealer_02_v2_40:
+    role: experiment
+    description: v2.37 + affordable fallback 同日スコア上位20件以内 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      affordable_fallback_buy: true
+
+  rookie_dealer_02_v2_41:
+    role: experiment
+    description: v2.26ベース TSEPrime + TSEStandard 市場区分拡張検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      market_section_expansion: true
+
+  rookie_dealer_02_v2_42:
+    role: experiment
+    description: v2.26ベース TSEPrime + TSEStandard + TSEGrowth 市場区分拡張検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      market_section_expansion: true
+
   rookie_dealer_03_growth:
     role: experiment
     description: 東証グロース市場のみを対象にする攻撃型検証

@@ -16,6 +16,8 @@ except ModuleNotFoundError:  # pragma: no cover
     yaml = None
 
 from db import get_database_path
+from market_sections import SECTION_LABELS, market_section_from_row
+from market_regime import REGIME_ORDER, classify_market_regime, dynamic_exposure_policy, dynamic_exposure_target, effective_market_context_for_signal
 from trade_metrics import is_closed_trade_for_metrics
 
 
@@ -31,6 +33,7 @@ SCORE_COMPONENT_KEYS = [
     "candlestick_score",
     "sector_score",
     "market_context_score",
+    "winner_loser_rule_score",
     "relative_strength_score",
     "investor_context_score",
     "penalty_score",
@@ -55,6 +58,7 @@ EFFECTIVE_RANGE_COMPONENTS = [
     "relative_strength_score",
     "investor_context_score",
     "market_context_score",
+    "winner_loser_rule_score",
     "penalty_score",
     "rsi_score",
     "volume_score",
@@ -66,6 +70,7 @@ COMPONENT_CONFIGURED_MAX = {
     "relative_strength_score": 10,
     "investor_context_score": 5,
     "market_context_score": 0,
+    "winner_loser_rule_score": 0,
     "penalty_score": 0,
     "rsi_score": 10,
     "volume_score": 10,
@@ -189,6 +194,28 @@ def build_feature_analysis(
         "feature_analysis_result_integrity_sec",
         lambda: _capital_utilization_audit(root, profile_id, start_date, end_date, backtest_summary, config, scoring_rows),
     )
+    market_section_performance_audit = timed(
+        "feature_analysis_result_integrity_sec",
+        lambda: _market_section_performance_audit(
+            backtest_summary,
+            config,
+            scoring_rows,
+            root=root,
+            market_filter_audit=integrity_audits.get("market_filter_audit", {}),
+        ),
+    )
+    allocation_strategy_audit = timed(
+        "feature_analysis_result_integrity_sec",
+        lambda: _allocation_strategy_audit(root, profile_id, start_date, end_date, backtest_summary, config),
+    )
+    dynamic_exposure_audit = timed(
+        "feature_analysis_result_integrity_sec",
+        lambda: _dynamic_exposure_audit(root, profile_id, start_date, end_date, backtest_summary, config),
+    )
+    affordable_fallback_buy_audit = timed(
+        "feature_analysis_result_integrity_sec",
+        lambda: _affordable_fallback_buy_audit(backtest_summary, config),
+    )
     compounding_capital_flow_audit = timed(
         "feature_analysis_result_integrity_sec",
         lambda: _compounding_capital_flow_audit(root, profile_id, start_date, end_date, backtest_summary, config),
@@ -196,6 +223,10 @@ def build_feature_analysis(
     price_band_affordability_audit = timed(
         "feature_analysis_score_component_sec",
         lambda: _price_band_affordability_audit(config, scoring_rows, backtest_summary),
+    )
+    winner_loser_rule_adjustment_audit = timed(
+        "feature_analysis_score_component_sec",
+        lambda: _winner_loser_rule_adjustment_audit(config, scoring_rows, records),
     )
     api_field_usage_audit = timed(
         "feature_analysis_score_component_sec",
@@ -368,8 +399,13 @@ def build_feature_analysis(
         "investor_context_analysis": investor_context_analysis,
         "investor_context_filter": investor_context_filter,
         "capital_utilization_audit": capital_utilization_audit,
+        "market_section_performance_audit": market_section_performance_audit,
+        "allocation_strategy_audit": allocation_strategy_audit,
+        "dynamic_exposure_audit": dynamic_exposure_audit,
+        "affordable_fallback_buy_audit": affordable_fallback_buy_audit,
         "compounding_capital_flow_audit": compounding_capital_flow_audit,
         "price_band_affordability_audit": price_band_affordability_audit,
+        "winner_loser_rule_adjustment_audit": winner_loser_rule_adjustment_audit,
         "market_filter_audit": integrity_audits.get("market_filter_audit", {}),
         "backtest_result_integrity_audit": integrity_audits.get("backtest_result_integrity_audit", {}),
         "score_integrity_audit": integrity_audits.get("score_integrity_audit", {}),
@@ -441,6 +477,38 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "",
         *_capital_utilization_audit_lines(analysis.get("capital_utilization_audit", {})),
         "",
+        "## Market Section Performance Audit",
+        "",
+        *_market_section_performance_audit_lines(analysis.get("market_section_performance_audit", {})),
+        "",
+        "## Candidate Universe Audit",
+        "",
+        *_candidate_universe_audit_lines((analysis.get("market_section_performance_audit", {}) or {}).get("candidate_universe_audit", {})),
+        "",
+        "## Scored Candidate Audit",
+        "",
+        *_scored_candidate_audit_lines((analysis.get("market_section_performance_audit", {}) or {}).get("scored_candidate_audit", {})),
+        "",
+        "## Selected Candidate Audit",
+        "",
+        *_selected_candidate_audit_lines((analysis.get("market_section_performance_audit", {}) or {}).get("selected_candidate_audit", {})),
+        "",
+        "## Trade Market Audit",
+        "",
+        *_trade_market_audit_lines((analysis.get("market_section_performance_audit", {}) or {}).get("trade_market_audit", {})),
+        "",
+        "## Allocation Strategy Audit",
+        "",
+        *_allocation_strategy_audit_lines(analysis.get("allocation_strategy_audit", {})),
+        "",
+        "## Dynamic Exposure Audit",
+        "",
+        *_dynamic_exposure_audit_lines(analysis.get("dynamic_exposure_audit", {})),
+        "",
+        "## Affordable Fallback Buy Audit",
+        "",
+        *_affordable_fallback_buy_audit_lines(analysis.get("affordable_fallback_buy_audit", {})),
+        "",
         "## Compounding / Capital Flow Audit",
         "",
         *_compounding_capital_flow_audit_lines(analysis.get("compounding_capital_flow_audit", {})),
@@ -448,6 +516,10 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "## Price Band / Affordability Audit",
         "",
         *_price_band_affordability_audit_lines(analysis.get("price_band_affordability_audit", {})),
+        "",
+        "## Winner / Loser Rule Adjustment Audit",
+        "",
+        *_winner_loser_rule_adjustment_audit_lines(analysis.get("winner_loser_rule_adjustment_audit", {})),
         "",
         "## Backtest Result Integrity Audit",
         "",
@@ -669,6 +741,9 @@ def _feature_record(trade: dict[str, Any], entry_market: dict[str, Any] | None =
         "volume_score": _component_value(trade, score_components, "volume_score"),
         "candlestick_score": _component_value(trade, score_components, "candlestick_score"),
         "market_context_score": _component_value(trade, score_components, "market_context_score"),
+        "winner_loser_rule_score": _component_value(trade, score_components, "winner_loser_rule_score"),
+        "winner_loser_rule_name": trade.get("winner_loser_rule_name"),
+        "winner_loser_rule_reason": trade.get("winner_loser_rule_reason"),
         "relative_strength_score": _component_value(trade, score_components, "relative_strength_score"),
         "investor_context_score": investor_context_score_raw if investor_context_score_raw is not None else investor_context_score_component,
         "investor_context_component_score": investor_context_score_component,
@@ -1586,6 +1661,7 @@ def build_feature_activation_audit(
     features = config.get("features", {}) if isinstance(config.get("features"), dict) else {}
     scoring = config.get("scoring", {}) if isinstance(config.get("scoring"), dict) else {}
     earnings_filter = config.get("earnings_filter", {}) if isinstance(config.get("earnings_filter"), dict) else {}
+    dynamic_exposure = dynamic_exposure_policy(config)
     registry_features = registry_features or {}
     items = {
         "relative_strength": _activation_item(
@@ -1615,6 +1691,13 @@ def build_feature_activation_audit(
             registry_enabled=_registry_feature_enabled(registry_features, "earnings_filter"),
             trigger_count=_earnings_filter_rejected_count(scoring_rows),
             trigger_label="rejected_count",
+        ),
+        "dynamic_exposure": _activation_item(
+            data_enabled=bool(dynamic_exposure.get("enabled", False)),
+            scoring_enabled=None,
+            registry_enabled=_registry_feature_enabled(registry_features, "dynamic_exposure"),
+            trigger_count=_dynamic_exposure_trigger_count(config, records, scoring_rows),
+            trigger_label="trigger_count",
         ),
     }
     return {
@@ -4428,11 +4511,11 @@ def _score_formula_audit(
     relative_strength_enabled = _relative_strength_enabled(config)
     investor_context_enabled = _investor_context_enabled(config)
     return {
-        "total_score_formula": "total_score = technical_score + relative_strength_score + investor_context_score + market_context_score + penalty_score",
+        "total_score_formula": "total_score = technical_score + relative_strength_score + investor_context_score + market_context_score + winner_loser_rule_score + penalty_score",
         "expanded_formula": (
             "technical_score = clamp(ma_score + rsi_score + volume_score + "
             "candlestick_score + sector_score, 0, 50); "
-            "total_score = technical_score + relative_strength_score + investor_context_score + market_context_score + penalty_score"
+            "total_score = technical_score + relative_strength_score + investor_context_score + market_context_score + winner_loser_rule_score + penalty_score"
         ),
         "expected_score_range": _expected_score_range(relative_strength_enabled, investor_context_enabled),
         "relative_strength_enabled": relative_strength_enabled,
@@ -4466,6 +4549,7 @@ def _score_effective_range_audit(
         "relative_strength_score",
         "investor_context_score",
         "market_context_score",
+        "winner_loser_rule_score",
         "penalty_score",
     }
     effective_max_score = sum(
@@ -4564,7 +4648,7 @@ def _component_status(component: str, values: list[float]) -> str:
     if not values:
         return "no_data"
     if all(value == 0 for value in values):
-        if component in {"market_context_score", "penalty_score", "relative_strength_score", "investor_context_score"}:
+        if component in {"market_context_score", "winner_loser_rule_score", "penalty_score", "relative_strength_score", "investor_context_score"}:
             return "inactive"
         return "zero"
     return "active"
@@ -5001,6 +5085,9 @@ def _capital_utilization_audit(
         for amount in (_round_lot_amount(item, config) for item in buys)
         if amount is not None
     ]
+    market_section_master = _market_section_master_by_code(root)
+    selected_round_lot_amount_by_market = _average_by_market(scoring_rows or [], config, selected_only=True, market_section_master=market_section_master)
+    bought_round_lot_amount_by_market = _average_by_market(buys, config, selected_only=False, market_section_master=market_section_master)
     buy_as_much_as_possible_count = sum(
         1
         for item in buys
@@ -5039,6 +5126,8 @@ def _capital_utilization_audit(
         "affordable_under_500k_count": sum(1 for amount in selected_round_lot_amounts if amount <= 500000),
         "selected_round_lot_amount_breakdown": _round_lot_amount_breakdown(selected_round_lot_amounts),
         "bought_round_lot_amount_breakdown": _round_lot_amount_breakdown(bought_round_lot_amounts),
+        "average_round_lot_amount_by_market": selected_round_lot_amount_by_market,
+        "bought_round_lot_amount_by_market": bought_round_lot_amount_by_market,
         "average_position_count": _average(position_counts),
         "max_position_count": max(position_counts) if position_counts else None,
         "skipped_buy_count": len(skipped),
@@ -5089,6 +5178,832 @@ def _capital_skip_reason(value: Any) -> str:
     if "最大保有" in text or "ポジション" in text or "max_positions" in lowered:
         return "max_positions_limit"
     return text
+
+
+def _market_section_performance_audit(
+    backtest_summary: dict[str, Any],
+    config: dict[str, Any] | None = None,
+    scoring_rows: list[dict[str, Any]] | None = None,
+    root: Path | None = None,
+    market_filter_audit: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    rows = scoring_rows or []
+    market_section_master = _market_section_master_by_code(root)
+    events = backtest_summary.get("all_trades", []) if isinstance(backtest_summary, dict) else []
+    if not isinstance(events, list):
+        events = []
+    buy_trades = [
+        item
+        for item in events
+        if isinstance(item, dict) and str(item.get("action") or "").upper() == "BUY"
+    ]
+    sell_trades = [
+        item
+        for item in events
+        if isinstance(item, dict)
+        and str(item.get("action") or "").upper() == "SELL"
+    ]
+    candidate_universe_audit = _candidate_universe_audit(market_filter_audit or {})
+    scored_candidate_audit = _scored_candidate_audit(rows, config, market_section_master)
+    selected_candidate_audit = _selected_candidate_audit(rows, config, market_section_master)
+    trade_market_audit = _trade_market_audit(events, config, market_section_master)
+    return {
+        "status": "OK",
+        "market_section_master_lookup_count": len(market_section_master),
+        "candidate_count_by_market": _count_by_market(rows, market_section_master),
+        "selected_count_by_market": _count_by_market([row for row in rows if bool(row.get("selected"))], market_section_master),
+        "buy_trade_count_by_market": _count_by_market(buy_trades, market_section_master),
+        "win_rate_by_market": _win_rate_by_market(sell_trades, market_section_master),
+        "gross_profit_by_market": _gross_profit_by_market(sell_trades, market_section_master),
+        "profit_factor_by_market": _profit_factor_by_market(sell_trades, market_section_master),
+        "average_round_lot_amount_by_market": _average_by_market(rows, config, selected_only=False, market_section_master=market_section_master),
+        "stage_funnel_by_market": _market_stage_funnel(candidate_universe_audit, scored_candidate_audit, selected_candidate_audit, trade_market_audit),
+        "candidate_universe_audit": candidate_universe_audit,
+        "scored_candidate_audit": scored_candidate_audit,
+        "selected_candidate_audit": selected_candidate_audit,
+        "trade_market_audit": trade_market_audit,
+    }
+
+
+def _market_section_master_by_code(root: Path | None) -> dict[str, str]:
+    if root is None:
+        return {}
+    for path in [
+        root / "data" / "raw" / "listed_stocks_jquants.json",
+        root / "data" / "raw" / "prime_stocks_jquants.json",
+    ]:
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        records = _listed_stock_records_from_payload(payload)
+        lookup: dict[str, str] = {}
+        for record in records:
+            code = str(
+                record.get("code")
+                or record.get("Code")
+                or record.get("LocalCode")
+                or ""
+            )
+            if not code:
+                continue
+            section = market_section_from_row(record)
+            if section != "Unknown":
+                lookup[code] = section
+        if lookup:
+            return lookup
+    return {}
+
+
+def _listed_stock_records_from_payload(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        for key in ("stocks", "listed_info", "data", "records"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _market_section_label(row: dict[str, Any], market_section_master: dict[str, str] | None = None) -> str:
+    section = market_section_from_row(row)
+    if section == "Unknown" and market_section_master:
+        section = market_section_master.get(str(row.get("code") or ""), "Unknown")
+    return SECTION_LABELS.get(section, "Unknown")
+
+
+def _count_by_market(rows: list[dict[str, Any]], market_section_master: dict[str, str] | None = None) -> dict[str, int]:
+    counts = {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0}
+    for row in rows:
+        label = _market_section_label(row, market_section_master)
+        counts[label] = counts.get(label, 0) + 1
+    return counts
+
+
+def _candidate_universe_audit(market_filter_audit: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(market_filter_audit, dict) or not market_filter_audit:
+        return {"status": "unavailable", "reason": "market_filter_audit unavailable"}
+    daily = market_filter_audit.get("daily_breakdown", [])
+    return {
+        "status": "OK",
+        "allowed_sections": market_filter_audit.get("allowed_sections", []),
+        "raw_candidate_count_by_market": market_filter_audit.get("candidate_market_breakdown_before_filter", {}),
+        "after_market_filter_candidate_count_by_market": market_filter_audit.get("candidate_market_breakdown_after_filter", {}),
+        "excluded_count_by_market": market_filter_audit.get("excluded_market_breakdown", {}),
+        "unknown_market_count": market_filter_audit.get("unknown_market_count", 0),
+        "market_section_lookup_source_breakdown": market_filter_audit.get("market_section_lookup_source", {}),
+        "daily_breakdown": daily if isinstance(daily, list) else [],
+    }
+
+
+def _scored_candidate_audit(
+    rows: list[dict[str, Any]],
+    config: dict[str, Any] | None,
+    market_section_master: dict[str, str] | None,
+) -> dict[str, Any]:
+    grouped = _group_market_rows(rows, market_section_master)
+    return {
+        "status": "OK",
+        "scored_count_by_market": {market: len(grouped.get(market, [])) for market in _market_labels()},
+        "average_total_score_by_market": {
+            market: _average([value for value in (_number(row.get("total_score")) for row in grouped.get(market, [])) if value is not None])
+            for market in _market_labels()
+        },
+        "median_total_score_by_market": {
+            market: _median([value for value in (_number(row.get("total_score")) for row in grouped.get(market, [])) if value is not None])
+            for market in _market_labels()
+        },
+        "top_score_by_market": {
+            market: _max_or_none([value for value in (_number(row.get("total_score")) for row in grouped.get(market, [])) if value is not None])
+            for market in _market_labels()
+        },
+        "top_20_candidates_by_total_score": _top_scored_candidate_samples(rows, config, market_section_master),
+        "selected_count_by_market": _count_by_market([row for row in rows if bool(row.get("selected"))], market_section_master),
+    }
+
+
+def _selected_candidate_audit(
+    rows: list[dict[str, Any]],
+    config: dict[str, Any] | None,
+    market_section_master: dict[str, str] | None,
+) -> dict[str, Any]:
+    selected = [row for row in rows if bool(row.get("selected"))]
+    grouped = _group_market_rows(selected, market_section_master)
+    return {
+        "status": "OK",
+        "selected_count_by_market": {market: len(grouped.get(market, [])) for market in _market_labels()},
+        "selected_average_score_by_market": {
+            market: _average([value for value in (_number(row.get("total_score")) for row in grouped.get(market, [])) if value is not None])
+            for market in _market_labels()
+        },
+        "selected_average_round_lot_amount_by_market": _average_by_market(selected, config, market_section_master=market_section_master),
+        "selected_sample_rows": [_candidate_sample_row(row, config, market_section_master) for row in selected[:50]],
+    }
+
+
+def _trade_market_audit(
+    events: list[Any],
+    config: dict[str, Any] | None,
+    market_section_master: dict[str, str] | None,
+) -> dict[str, Any]:
+    rows = [row for row in events if isinstance(row, dict)]
+    buy_trades = [row for row in rows if str(row.get("action") or "").upper() == "BUY"]
+    sell_trades = [row for row in rows if str(row.get("action") or "").upper() == "SELL"]
+    skipped_buy = [row for row in rows if str(row.get("action") or "").upper() == "SKIP_BUY"]
+    return {
+        "status": "OK",
+        "buy_trade_count_by_market": _count_by_market(buy_trades, market_section_master),
+        "sell_trade_count_by_market": _count_by_market(sell_trades, market_section_master),
+        "win_rate_by_market": _win_rate_by_market(sell_trades, market_section_master),
+        "gross_profit_by_market": _gross_profit_by_market(sell_trades, market_section_master),
+        "profit_factor_by_market": _profit_factor_by_market(sell_trades, market_section_master),
+        "average_round_lot_amount_by_market": _average_by_market(buy_trades, config, market_section_master=market_section_master),
+        "skipped_buy_reason_by_market": _skipped_buy_reason_by_market(skipped_buy, market_section_master),
+        "trade_sample_rows": [_trade_market_sample_row(row, config, market_section_master) for row in sell_trades[:50]],
+    }
+
+
+def _market_stage_funnel(
+    candidate_universe_audit: dict[str, Any],
+    scored_candidate_audit: dict[str, Any],
+    selected_candidate_audit: dict[str, Any],
+    trade_market_audit: dict[str, Any],
+) -> dict[str, dict[str, int]]:
+    after_filter = candidate_universe_audit.get("after_market_filter_candidate_count_by_market", {}) if isinstance(candidate_universe_audit, dict) else {}
+    scored = scored_candidate_audit.get("scored_count_by_market", {}) if isinstance(scored_candidate_audit, dict) else {}
+    selected = selected_candidate_audit.get("selected_count_by_market", {}) if isinstance(selected_candidate_audit, dict) else {}
+    buys = trade_market_audit.get("buy_trade_count_by_market", {}) if isinstance(trade_market_audit, dict) else {}
+    sells = trade_market_audit.get("sell_trade_count_by_market", {}) if isinstance(trade_market_audit, dict) else {}
+    return {
+        market: {
+            "after_market_filter": int(after_filter.get(market, 0) or 0),
+            "scored": int(scored.get(market, 0) or 0),
+            "selected": int(selected.get(market, 0) or 0),
+            "buy_trades": int(buys.get(market, 0) or 0),
+            "sell_trades": int(sells.get(market, 0) or 0),
+            "market_filter_to_scoring_drop": max(0, int(after_filter.get(market, 0) or 0) - int(scored.get(market, 0) or 0)),
+            "scoring_to_selection_drop": max(0, int(scored.get(market, 0) or 0) - int(selected.get(market, 0) or 0)),
+            "selection_to_buy_gap": max(0, int(selected.get(market, 0) or 0) - int(buys.get(market, 0) or 0)),
+        }
+        for market in _market_labels()
+    }
+
+
+def _skipped_buy_reason_by_market(
+    rows: list[dict[str, Any]],
+    market_section_master: dict[str, str] | None,
+) -> dict[str, dict[str, int]]:
+    grouped: dict[str, dict[str, int]] = {market: {} for market in _market_labels()}
+    for row in rows:
+        market = _market_section_label(row, market_section_master)
+        reason = str(row.get("skipped_reason") or row.get("reason") or "unknown")
+        grouped.setdefault(market, {})
+        grouped[market][reason] = int(grouped[market].get(reason, 0) or 0) + 1
+    return grouped
+
+
+def _market_labels() -> list[str]:
+    return ["Prime", "Standard", "Growth", "Unknown"]
+
+
+def _max_or_none(values: list[float]) -> float | None:
+    return max(values) if values else None
+
+
+def _top_scored_candidate_samples(
+    rows: list[dict[str, Any]],
+    config: dict[str, Any] | None,
+    market_section_master: dict[str, str] | None,
+) -> list[dict[str, Any]]:
+    sorted_rows = sorted(
+        rows,
+        key=lambda row: (
+            -(_number(row.get("total_score")) if _number(row.get("total_score")) is not None else -999999),
+            str(row.get("date") or ""),
+            str(row.get("code") or ""),
+        ),
+    )
+    return [_candidate_sample_row(row, config, market_section_master) for row in sorted_rows[:20]]
+
+
+def _candidate_sample_row(
+    row: dict[str, Any],
+    config: dict[str, Any] | None,
+    market_section_master: dict[str, str] | None,
+) -> dict[str, Any]:
+    return {
+        "date": row.get("date") or row.get("signal_date"),
+        "code": row.get("code"),
+        "name": row.get("name"),
+        "market_section": _market_section_label(row, market_section_master),
+        "total_score": _number(row.get("total_score")),
+        "round_lot_amount": _round_lot_amount(row, config),
+        "selected": bool(row.get("selected")),
+    }
+
+
+def _trade_market_sample_row(
+    row: dict[str, Any],
+    config: dict[str, Any] | None,
+    market_section_master: dict[str, str] | None,
+) -> dict[str, Any]:
+    return {
+        "entry_date": row.get("entry_date") or row.get("date"),
+        "exit_date": row.get("exit_date"),
+        "code": row.get("code"),
+        "name": row.get("name"),
+        "market_section": _market_section_label(row, market_section_master),
+        "gross_profit": _record_gross_profit(row),
+        "profit": _number(row.get("profit")),
+        "round_lot_amount": _round_lot_amount(row, config),
+    }
+
+
+def _average_by_market(
+    rows: list[dict[str, Any]],
+    config: dict[str, Any] | None = None,
+    *,
+    selected_only: bool = False,
+    market_section_master: dict[str, str] | None = None,
+) -> dict[str, float | None]:
+    values: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        if selected_only and not bool(row.get("selected")):
+            continue
+        amount = _round_lot_amount(row, config)
+        if amount is None:
+            continue
+        values[_market_section_label(row, market_section_master)].append(amount)
+    return {label: _average(values.get(label, [])) for label in ["Prime", "Standard", "Growth", "Unknown"]}
+
+
+def _win_rate_by_market(rows: list[dict[str, Any]], market_section_master: dict[str, str] | None = None) -> dict[str, float | None]:
+    grouped = _group_market_rows(rows, market_section_master)
+    return {label: _win_rate(grouped.get(label, [])) for label in ["Prime", "Standard", "Growth", "Unknown"]}
+
+
+def _gross_profit_by_market(rows: list[dict[str, Any]], market_section_master: dict[str, str] | None = None) -> dict[str, float]:
+    grouped = _group_market_rows(rows, market_section_master)
+    return {
+        label: round(sum((_record_gross_profit(row) or 0.0) for row in grouped.get(label, [])), 2)
+        for label in ["Prime", "Standard", "Growth", "Unknown"]
+    }
+
+
+def _profit_factor_by_market(rows: list[dict[str, Any]], market_section_master: dict[str, str] | None = None) -> dict[str, float | None]:
+    grouped = _group_market_rows(rows, market_section_master)
+    return {label: _profit_factor_gross(grouped.get(label, [])) for label in ["Prime", "Standard", "Growth", "Unknown"]}
+
+
+def _group_market_rows(rows: list[dict[str, Any]], market_section_master: dict[str, str] | None = None) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[_market_section_label(row, market_section_master)].append(row)
+    return grouped
+
+
+def _allocation_strategy_audit(
+    root: Path,
+    profile_id: str,
+    start_date: str | None,
+    end_date: str | None,
+    backtest_summary: dict[str, Any],
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not start_date or not end_date:
+        return {"status": "unavailable", "reason": "start_date/end_date are required"}
+    log_dir = root / "logs" / "backtests" / profile_id / f"{start_date}_to_{end_date}"
+    summary_rows = _read_csv_rows(log_dir / "summary.csv")
+    events = backtest_summary.get("all_trades", []) if isinstance(backtest_summary, dict) else []
+    if not isinstance(events, list):
+        events = []
+    policy = config.get("capital_utilization_policy", {}) if isinstance(config, dict) else {}
+    if not isinstance(policy, dict):
+        policy = {}
+    allocation_strategy = str(policy.get("allocation_strategy") or "sequential")
+    target_exposure = _number(policy.get("target_exposure"))
+
+    exposure_ratios: list[float] = []
+    target_exposure_gaps: list[float] = []
+    position_counts: list[float] = []
+    cash_by_date: dict[str, float] = {}
+    for row in summary_rows:
+        day = str(row.get("date") or "")
+        total_assets = _number(row.get("total_assets"))
+        cash = _number(row.get("cash"))
+        positions_value = _number(row.get("positions_value") or row.get("holding_market_value"))
+        position_count = _number(row.get("open_positions_count"))
+        if day and cash is not None:
+            cash_by_date[day] = cash
+        if total_assets and total_assets > 0 and positions_value is not None:
+            exposure = positions_value / total_assets
+            exposure_ratios.append(exposure)
+            if target_exposure is not None:
+                target_exposure_gaps.append(max(0.0, target_exposure - exposure))
+        if position_count is not None:
+            position_counts.append(position_count)
+
+    skipped = [item for item in events if isinstance(item, dict) and str(item.get("action") or "").upper() == "SKIP_BUY"]
+    selected_unaffordable = [
+        item
+        for item in skipped
+        if _capital_skip_reason(item.get("skipped_reason") or item.get("reason")) == "selected_but_not_affordable"
+    ]
+    buys = [item for item in events if isinstance(item, dict) and str(item.get("action") or "").upper() == "BUY"]
+    buy_amounts = [_trade_amount(item) for item in buys]
+    buy_amounts = [value for value in buy_amounts if value is not None]
+    cash_after_buy = [cash_by_date[day] for day in {_trade_date(item) for item in buys} if day in cash_by_date]
+
+    min_cash_buffer = _number(policy.get("min_cash_buffer")) or 0.0
+    pending_buy_blocked_count = 0
+    allocation_limits: list[float] = []
+    for item in selected_unaffordable:
+        allocation_limit = _number(item.get("allocation_limit"))
+        if allocation_limit is not None:
+            allocation_limits.append(allocation_limit)
+        required_buy_amount = _round_lot_amount(item, config)
+        cash = cash_by_date.get(_trade_date(item))
+        if (
+            allocation_limit is not None
+            and required_buy_amount is not None
+            and cash is not None
+            and cash - min_cash_buffer >= required_buy_amount
+            and allocation_limit < required_buy_amount
+        ):
+            pending_buy_blocked_count += 1
+
+    return {
+        "status": "OK",
+        "source": {
+            "summary_csv": str((log_dir / "summary.csv").relative_to(root)) if (log_dir / "summary.csv").exists() else "",
+            "backtest_summary": str((log_dir / "backtest_summary.json").relative_to(root)),
+        },
+        "allocation_strategy": allocation_strategy,
+        "selected_but_not_affordable_count": len(selected_unaffordable),
+        "pending_buy_blocked_count": pending_buy_blocked_count,
+        "allocation_limit_lt_100k_count": sum(1 for value in allocation_limits if value < 100000),
+        "allocation_limit_lt_200k_count": sum(1 for value in allocation_limits if value < 200000),
+        "allocation_limit_lt_300k_count": sum(1 for value in allocation_limits if value < 300000),
+        "average_market_exposure": _average(exposure_ratios),
+        "target_exposure_gap_average": _average(target_exposure_gaps),
+        "average_position_count": _average(position_counts),
+        "max_position_count": max(position_counts) if position_counts else None,
+        "buy_trade_count": len(buys),
+        "total_buy_amount": round(sum(buy_amounts), 2) if buy_amounts else 0,
+        "average_order_amount": _average(buy_amounts),
+        "cash_after_buy_average": _average(cash_after_buy),
+    }
+
+
+def _allocation_strategy_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- status: unavailable"]
+    keys = [
+        "status",
+        "allocation_strategy",
+        "selected_but_not_affordable_count",
+        "pending_buy_blocked_count",
+        "allocation_limit_lt_100k_count",
+        "allocation_limit_lt_200k_count",
+        "allocation_limit_lt_300k_count",
+        "average_market_exposure",
+        "target_exposure_gap_average",
+        "average_position_count",
+        "max_position_count",
+        "buy_trade_count",
+        "total_buy_amount",
+        "average_order_amount",
+        "cash_after_buy_average",
+    ]
+    lines = []
+    for key in keys:
+        value = audit.get(key)
+        lines.append(f"- {key}: {value if isinstance(value, str) else _format_number(value)}")
+    return lines
+
+
+def _dynamic_exposure_trigger_count(
+    config: dict[str, Any],
+    records: list[dict[str, Any]],
+    scoring_rows: list[dict[str, Any]],
+) -> int:
+    policy = dynamic_exposure_policy(config)
+    if not bool(policy.get("enabled", False)):
+        return 0
+    targets = policy.get("target_exposure_by_regime")
+    if not isinstance(targets, dict) or not targets:
+        return 0
+    rows = scoring_rows or records or []
+    count = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        regime = _row_market_regime(row, {})
+        if regime in targets:
+            count += 1
+    return count
+
+
+def _dynamic_exposure_audit(
+    root: Path,
+    profile_id: str,
+    start_date: str | None,
+    end_date: str | None,
+    backtest_summary: dict[str, Any],
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    policy = dynamic_exposure_policy(config or {})
+    if not start_date or not end_date:
+        return {"enabled": bool(policy.get("enabled", False)), "status": "unavailable", "reason": "start_date/end_date are required"}
+    log_dir = root / "logs" / "backtests" / profile_id / f"{start_date}_to_{end_date}"
+    summary_rows = _read_csv_rows(log_dir / "summary.csv")
+    events = backtest_summary.get("all_trades", []) if isinstance(backtest_summary, dict) else []
+    if not isinstance(events, list):
+        events = []
+    contexts = _load_market_contexts_for_audit(root, start_date, end_date)
+    targets = policy.get("target_exposure_by_regime") if isinstance(policy.get("target_exposure_by_regime"), dict) else {}
+    default_target = ((config or {}).get("capital_utilization_policy", {}) or {}).get("target_exposure")
+    regime_day_count: dict[str, int] = defaultdict(int)
+    exposure_values: dict[str, list[float]] = defaultdict(list)
+    cash_ratio_values: dict[str, list[float]] = defaultdict(list)
+    reached_days: dict[str, int] = defaultdict(int)
+    source_lags: list[float] = []
+    source_fallback_count = 0
+    same_day_context_used_count = 0
+    future_data_leak_guard_errors: list[dict[str, Any]] = []
+    regime_source_samples: list[dict[str, Any]] = []
+    for row in summary_rows:
+        day = str(row.get("date") or "")
+        source = _dynamic_exposure_source_for_row(row, contexts, day)
+        regime = source["regime"]
+        _accumulate_dynamic_source_audit(
+            source,
+            day,
+            source_lags,
+            regime_source_samples,
+            future_data_leak_guard_errors,
+        )
+        source_fallback_count += int(bool(source.get("fallback_used")))
+        same_day_context_used_count += int(bool(source.get("same_day_used")))
+        regime_day_count[regime] += 1
+        total_assets = _number(row.get("total_assets"))
+        cash = _number(row.get("cash"))
+        positions_value = _number(row.get("positions_value") or row.get("holding_market_value"))
+        if total_assets and total_assets > 0:
+            if positions_value is not None:
+                exposure = positions_value / total_assets
+                exposure_values[regime].append(exposure)
+                target, _triggered = dynamic_exposure_target(config or {}, regime, default_target)
+                if target is not None and exposure >= target:
+                    reached_days[regime] += 1
+            if cash is not None:
+                cash_ratio_values[regime].append(cash / total_assets)
+
+    trade_count: dict[str, int] = defaultdict(int)
+    buy_count: dict[str, int] = defaultdict(int)
+    skipped_count: dict[str, int] = defaultdict(int)
+    selected_unaffordable_count: dict[str, int] = defaultdict(int)
+    profit_values: dict[str, list[float]] = defaultdict(list)
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        day = str(event.get("signal_date") or event.get("date") or _trade_date(event) or "")
+        source = _dynamic_exposure_source_for_row(event, contexts, day)
+        regime = source["regime"]
+        _accumulate_dynamic_source_audit(
+            source,
+            day,
+            source_lags,
+            regime_source_samples,
+            future_data_leak_guard_errors,
+        )
+        source_fallback_count += int(bool(source.get("fallback_used")))
+        same_day_context_used_count += int(bool(source.get("same_day_used")))
+        action = str(event.get("action") or "").upper()
+        if action in {"BUY", "SELL"}:
+            trade_count[regime] += 1
+        if action == "BUY":
+            buy_count[regime] += 1
+        elif action == "SELL":
+            profit = _number(event.get("gross_profit") or event.get("profit") or event.get("net_profit"))
+            if profit is not None:
+                profit_values[regime].append(profit)
+        elif action == "SKIP_BUY":
+            skipped_count[regime] += 1
+            if _capital_skip_reason(event.get("skipped_reason") or event.get("reason")) == "selected_but_not_affordable":
+                selected_unaffordable_count[regime] += 1
+
+    dynamic_trigger_days = sum(count for regime, count in regime_day_count.items() if regime in targets)
+    future_data_leak_guard_status = "OK" if not future_data_leak_guard_errors and same_day_context_used_count == 0 else "ERROR"
+    return {
+        "enabled": bool(policy.get("enabled", False)),
+        "status": "OK",
+        "source": {
+            "summary_csv": str((log_dir / "summary.csv").relative_to(root)) if (log_dir / "summary.csv").exists() else "",
+            "backtest_summary": str((log_dir / "backtest_summary.json").relative_to(root)),
+            "market_context_dir": "data/processed/market_context_YYYY-MM-DD.json",
+        },
+        "target_exposure_by_regime": dict(targets),
+        "regime_day_count": _ordered_regime_dict(regime_day_count),
+        "regime_trade_count": _ordered_regime_dict(trade_count),
+        "average_market_exposure_by_regime": _ordered_regime_average(exposure_values),
+        "average_cash_ratio_by_regime": _ordered_regime_average(cash_ratio_values),
+        "buy_trade_count_by_regime": _ordered_regime_dict(buy_count),
+        "total_profit_by_regime": _ordered_regime_sum(profit_values),
+        "skipped_buy_count_by_regime": _ordered_regime_dict(skipped_count),
+        "selected_but_not_affordable_by_regime": _ordered_regime_dict(selected_unaffordable_count),
+        "target_exposure_reached_days_by_regime": _ordered_regime_dict(reached_days),
+        "dynamic_exposure_trigger_count": dynamic_trigger_days,
+        "regime_source_date_mode": "previous_trading_day",
+        "regime_source_date_lag_days_average": _average(source_lags),
+        "regime_source_date_fallback_count": source_fallback_count,
+        "same_day_market_context_used_count": same_day_context_used_count,
+        "future_data_leak_guard_status": future_data_leak_guard_status,
+        "future_data_leak_guard_errors": future_data_leak_guard_errors[:20],
+        "regime_source_date_sample": regime_source_samples[:20],
+        "classification_note": "Uses the latest market_context strictly before signal_date; falls back farther back only when the previous context is missing.",
+    }
+
+
+def _dynamic_exposure_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- status: unavailable"]
+    lines = [
+        f"- enabled: {audit.get('enabled')}",
+        f"- status: {audit.get('status')}",
+        f"- target_exposure_by_regime: {json.dumps(audit.get('target_exposure_by_regime', {}), ensure_ascii=False)}",
+        f"- dynamic_exposure_trigger_count: {_format_number(audit.get('dynamic_exposure_trigger_count'))}",
+        f"- regime_day_count: {json.dumps(audit.get('regime_day_count', {}), ensure_ascii=False)}",
+        f"- regime_trade_count: {json.dumps(audit.get('regime_trade_count', {}), ensure_ascii=False)}",
+        f"- average_market_exposure_by_regime: {json.dumps(audit.get('average_market_exposure_by_regime', {}), ensure_ascii=False)}",
+        f"- average_cash_ratio_by_regime: {json.dumps(audit.get('average_cash_ratio_by_regime', {}), ensure_ascii=False)}",
+        f"- buy_trade_count_by_regime: {json.dumps(audit.get('buy_trade_count_by_regime', {}), ensure_ascii=False)}",
+        f"- total_profit_by_regime: {json.dumps(audit.get('total_profit_by_regime', {}), ensure_ascii=False)}",
+        f"- skipped_buy_count_by_regime: {json.dumps(audit.get('skipped_buy_count_by_regime', {}), ensure_ascii=False)}",
+        f"- selected_but_not_affordable_by_regime: {json.dumps(audit.get('selected_but_not_affordable_by_regime', {}), ensure_ascii=False)}",
+        f"- target_exposure_reached_days_by_regime: {json.dumps(audit.get('target_exposure_reached_days_by_regime', {}), ensure_ascii=False)}",
+        f"- regime_source_date_mode: {audit.get('regime_source_date_mode')}",
+        f"- regime_source_date_lag_days_average: {_format_number(audit.get('regime_source_date_lag_days_average'))}",
+        f"- regime_source_date_fallback_count: {_format_number(audit.get('regime_source_date_fallback_count'))}",
+        f"- same_day_market_context_used_count: {_format_number(audit.get('same_day_market_context_used_count'))}",
+        f"- future_data_leak_guard_status: {audit.get('future_data_leak_guard_status')}",
+        f"- future_data_leak_guard_errors: {json.dumps(audit.get('future_data_leak_guard_errors', []), ensure_ascii=False)}",
+        f"- regime_source_date_sample: {json.dumps(audit.get('regime_source_date_sample', []), ensure_ascii=False)}",
+    ]
+    if audit.get("classification_note"):
+        lines.append(f"- note: {audit.get('classification_note')}")
+    return lines
+
+
+def _affordable_fallback_buy_audit(backtest_summary: dict[str, Any], config: dict[str, Any] | None = None) -> dict[str, Any]:
+    policy = (config or {}).get("affordable_fallback_buy", {})
+    enabled = bool(policy.get("enabled", False)) if isinstance(policy, dict) else False
+    events = backtest_summary.get("all_trades", []) if isinstance(backtest_summary, dict) else []
+    if not isinstance(events, list):
+        events = []
+    attempts = [item for item in events if isinstance(item, dict) and bool(item.get("affordable_fallback_attempted"))]
+    raw_buys = [
+        item
+        for item in events
+        if isinstance(item, dict)
+        and str(item.get("action") or "").upper() == "BUY"
+        and bool(item.get("affordable_fallback_buy_selected"))
+    ]
+    replacement_keys = {
+        (
+            str(item.get("entry_date") or item.get("date") or item.get("signal_date") or ""),
+            str(item.get("affordable_fallback_replaced_by_code") or ""),
+            str(item.get("code") or ""),
+        )
+        for item in attempts
+        if item.get("affordable_fallback_replaced_by_code")
+    }
+    buys = [
+        item
+        for item in raw_buys
+        if (
+            str(item.get("entry_date") or item.get("date") or item.get("signal_date") or ""),
+            str(item.get("code") or ""),
+            str(item.get("affordable_fallback_original_code") or ""),
+        )
+        in replacement_keys
+    ]
+    label_only_buys = [item for item in raw_buys if item not in buys]
+    no_candidate = [item for item in attempts if bool(item.get("affordable_fallback_no_candidate"))]
+    min_score = _number(((config or {}).get("selection", {}) or {}).get("min_score")) or 0.0
+    round_lot_amounts = [_number(item.get("affordable_fallback_round_lot_amount")) for item in buys]
+    buy_amounts = [_number(item.get("amount")) for item in buys]
+    fallback_scores = [_number(item.get("total_score") if item.get("total_score") is not None else item.get("score")) for item in buys]
+    fallback_ranks = [_number(item.get("daily_score_rank") if item.get("daily_score_rank") is not None else item.get("rank")) for item in buys]
+    score_below_min_count = sum(int(_number(item.get("fallback_score_below_min_count")) or 0) for item in attempts)
+    rank_out_of_range_count = sum(int(_number(item.get("fallback_rank_out_of_range_count")) or 0) for item in attempts)
+    samples = []
+    for item in buys[:20]:
+        samples.append(
+            {
+                "date": item.get("signal_date") or item.get("date") or item.get("entry_date"),
+                "original_code": item.get("affordable_fallback_original_code"),
+                "fallback_code": item.get("code"),
+                "fallback_name": item.get("name"),
+                "total_score": _number(item.get("total_score") or item.get("score")),
+                "round_lot_amount": _number(item.get("affordable_fallback_round_lot_amount")),
+                "allocation_limit": _number(item.get("allocation_limit")),
+                "reason": item.get("affordable_fallback_reason"),
+            }
+        )
+    return {
+        "enabled": enabled,
+        "fallback_attempt_count": len(attempts),
+        "fallback_selected_count": len(buys),
+        "fallback_buy_trade_count": len(buys),
+        "fallback_label_only_count": len(label_only_buys),
+        "fallback_score_below_min_count": score_below_min_count,
+        "fallback_rank_out_of_range_count": rank_out_of_range_count,
+        "fallback_no_affordable_candidate_count": len(no_candidate),
+        "fallback_score_below_regular_min_count": sum(1 for item in buys if (_number(item.get("total_score") or item.get("score")) or 0) < min_score),
+        "fallback_average_total_score": _average([value for value in fallback_scores if value is not None]),
+        "fallback_average_rank": _average([value for value in fallback_ranks if value is not None]),
+        "fallback_average_round_lot_amount": _average([value for value in round_lot_amounts if value is not None]),
+        "fallback_total_buy_amount": round(sum(value for value in buy_amounts if value is not None), 2),
+        "exposure_before_average": None,
+        "exposure_after_average": None,
+        "fallback_samples": samples,
+    }
+
+
+def _affordable_fallback_buy_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- status: unavailable"]
+    keys = [
+        "enabled",
+        "fallback_attempt_count",
+        "fallback_selected_count",
+        "fallback_buy_trade_count",
+        "fallback_label_only_count",
+        "fallback_score_below_min_count",
+        "fallback_rank_out_of_range_count",
+        "fallback_no_affordable_candidate_count",
+        "fallback_score_below_regular_min_count",
+        "fallback_average_total_score",
+        "fallback_average_rank",
+        "fallback_average_round_lot_amount",
+        "fallback_total_buy_amount",
+        "exposure_before_average",
+        "exposure_after_average",
+    ]
+    lines = [f"- {key}: {audit.get(key) if isinstance(audit.get(key), bool) else _format_number(audit.get(key))}" for key in keys]
+    lines.extend(
+        [
+            "",
+            "| date | original_code | fallback_code | fallback_name | total_score | round_lot_amount | allocation_limit | reason |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: | --- |",
+        ]
+    )
+    samples = audit.get("fallback_samples", []) or []
+    if not samples:
+        lines.append("| - | - | - | - | - | - | - | - |")
+    for row in samples:
+        lines.append(
+            f"| {row.get('date') or ''} | {row.get('original_code') or ''} | {row.get('fallback_code') or ''} | "
+            f"{row.get('fallback_name') or ''} | {_format_number(row.get('total_score'))} | "
+            f"{_format_number(row.get('round_lot_amount'))} | {_format_number(row.get('allocation_limit'))} | "
+            f"{row.get('reason') or ''} |"
+        )
+    return lines
+
+
+def _load_market_contexts_for_audit(root: Path, start_date: str, end_date: str) -> dict[str, dict[str, Any]]:
+    contexts: dict[str, dict[str, Any]] = {}
+    for path in sorted((root / "data" / "processed").glob("market_context_*.json")):
+        date = path.stem.replace("market_context_", "")
+        if date > end_date:
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            contexts[date] = payload
+    return contexts
+
+
+def _row_market_regime(row: dict[str, Any], market_context: dict[str, Any] | None) -> str:
+    existing = str(row.get("dynamic_exposure_regime") or row.get("classified_market_regime") or "")
+    if existing:
+        return existing
+    context = market_context or {}
+    advance_ratio = row.get("advance_ratio", context.get("advance_ratio"))
+    average_change_rate = row.get("market_average_change_rate", context.get("average_change_rate"))
+    fallback = row.get("market_regime", context.get("market_regime"))
+    return classify_market_regime(advance_ratio, average_change_rate, fallback)
+
+
+def _dynamic_exposure_source_for_row(row: dict[str, Any], contexts: dict[str, dict[str, Any]], signal_date: str) -> dict[str, Any]:
+    source_date = str(row.get("dynamic_exposure_source_date") or "")
+    if source_date:
+        lag = _number(row.get("dynamic_exposure_source_lag_days"))
+        same_day = bool(row.get("dynamic_exposure_same_day_context_used")) or (bool(signal_date) and source_date >= signal_date)
+        return {
+            "signal_date": signal_date,
+            "source_date": source_date,
+            "regime": _row_market_regime(row, contexts.get(source_date, {})),
+            "lag_days": lag,
+            "fallback_used": bool(row.get("dynamic_exposure_source_fallback_used")),
+            "same_day_used": same_day,
+        }
+    resolved = effective_market_context_for_signal(signal_date, contexts)
+    return {
+        "signal_date": signal_date,
+        "source_date": resolved.get("source_date", ""),
+        "regime": resolved.get("regime", "unknown"),
+        "lag_days": resolved.get("lag_days"),
+        "fallback_used": bool(resolved.get("fallback_used")),
+        "same_day_used": bool(resolved.get("same_day_used")),
+    }
+
+
+def _accumulate_dynamic_source_audit(
+    source: dict[str, Any],
+    signal_date: str,
+    source_lags: list[float],
+    samples: list[dict[str, Any]],
+    errors: list[dict[str, Any]],
+) -> None:
+    lag = _number(source.get("lag_days"))
+    if lag is not None:
+        source_lags.append(lag)
+    sample = {
+        "signal_date": signal_date,
+        "source_date": source.get("source_date", ""),
+        "regime": source.get("regime", "unknown"),
+        "lag_days": lag,
+        "fallback_used": bool(source.get("fallback_used")),
+    }
+    if len(samples) < 20:
+        samples.append(sample)
+    source_date = str(source.get("source_date") or "")
+    if source.get("same_day_used") or (source_date and signal_date and source_date >= signal_date):
+        errors.append({**sample, "reason": "dynamic_exposure_source_date_not_before_signal_date"})
+
+
+def _ordered_regime_keys(mapping: dict[str, Any]) -> list[str]:
+    extras = sorted(key for key in mapping.keys() if key not in REGIME_ORDER)
+    return [key for key in REGIME_ORDER if key in mapping] + extras
+
+
+def _ordered_regime_dict(mapping: dict[str, int]) -> dict[str, int]:
+    return {key: int(mapping.get(key, 0) or 0) for key in _ordered_regime_keys(mapping)}
+
+
+def _ordered_regime_average(mapping: dict[str, list[float]]) -> dict[str, float | None]:
+    return {key: _average(mapping.get(key, [])) for key in _ordered_regime_keys(mapping)}
+
+
+def _ordered_regime_sum(mapping: dict[str, list[float]]) -> dict[str, float]:
+    return {key: round(sum(mapping.get(key, [])), 2) for key in _ordered_regime_keys(mapping)}
 
 
 def _compounding_capital_flow_audit(
@@ -5402,6 +6317,116 @@ def _price_band_affordability_audit(
     }
 
 
+def _winner_loser_rule_adjustment_audit(
+    config: dict[str, Any],
+    scoring_rows: list[dict[str, Any]],
+    records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    policy = config.get("winner_loser_rule_adjustment", {})
+    if not isinstance(policy, dict):
+        policy = {}
+    enabled = bool(policy.get("enabled", False))
+    rule_name = str(policy.get("rule_name") or "")
+    triggered_rows = [
+        row
+        for row in scoring_rows
+        if _bool_or_none(row.get("winner_loser_rule_triggered")) is True
+        or abs(_number(row.get("winner_loser_rule_score")) or _number(row.get("winner_loser_rule_adjustment")) or 0) > 0
+    ]
+    selected_triggered = [row for row in triggered_rows if bool(row.get("selected"))]
+    matching_records = [record for record in records if _winner_loser_policy_matches_record(record, policy)]
+    gross_profit_values = [_record_gross_profit(record) or 0.0 for record in matching_records]
+    return {
+        "enabled": enabled,
+        "rule_name": rule_name,
+        "score_adjustment": _number(policy.get("score_adjustment")),
+        "condition": _winner_loser_policy_condition(policy),
+        "scoring_rows_count": len(scoring_rows),
+        "triggered_count": len(triggered_rows),
+        "selected_triggered_count": len(selected_triggered),
+        "closed_trade_matched_count": len(matching_records),
+        "closed_trade_matched_win_count": sum(1 for value in gross_profit_values if value > 0),
+        "closed_trade_matched_loss_count": sum(1 for value in gross_profit_values if value <= 0),
+        "closed_trade_matched_gross_profit": round(sum(gross_profit_values), 2),
+        "closed_trade_matched_avg_gross_profit_rate": _average(_valid_numbers(record.get("gross_profit_rate") for record in matching_records)),
+        "selected_triggered_samples": [
+            {
+                "date": row.get("date"),
+                "code": row.get("code"),
+                "name": row.get("name"),
+                "sector_name": row.get("sector_name"),
+                "volume_ratio": _number(row.get("volume_ratio")),
+                "winner_loser_rule_score": _number(row.get("winner_loser_rule_score")) or _number(row.get("winner_loser_rule_adjustment")) or 0,
+                "total_score": _number(row.get("total_score")),
+                "selected": bool(row.get("selected")),
+            }
+            for row in triggered_rows[:20]
+        ],
+        "note": "損益影響は既存closed tradesの条件一致集計であり、A/B再実行前の推定です。",
+    }
+
+
+def _winner_loser_policy_matches_record(record: dict[str, Any], policy: dict[str, Any]) -> bool:
+    if not policy or not bool(policy.get("enabled", False)):
+        return False
+    volume_ratio = _number(record.get("volume_ratio"))
+    min_volume_ratio = _number(policy.get("volume_ratio_min"))
+    max_volume_ratio = _number(policy.get("volume_ratio_max"))
+    if min_volume_ratio is not None and (volume_ratio is None or volume_ratio < min_volume_ratio):
+        return False
+    if max_volume_ratio is not None and (volume_ratio is None or volume_ratio > max_volume_ratio):
+        return False
+    sector_name = str(policy.get("sector_name") or "")
+    if sector_name and str(record.get("sector_name") or "") != sector_name:
+        return False
+    return True
+
+
+def _winner_loser_policy_condition(policy: dict[str, Any]) -> str:
+    if not policy:
+        return ""
+    parts = []
+    if policy.get("volume_ratio_min") is not None:
+        parts.append(f"volume_ratio >= {policy.get('volume_ratio_min')}")
+    if policy.get("volume_ratio_max") is not None:
+        parts.append(f"volume_ratio <= {policy.get('volume_ratio_max')}")
+    if policy.get("sector_name"):
+        parts.append(f"sector_name == {policy.get('sector_name')}")
+    return " AND ".join(parts) if parts else "N/A"
+
+
+def _winner_loser_rule_adjustment_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- status: unavailable"]
+    lines = [
+        f"- enabled: {str(bool(audit.get('enabled'))).lower()}",
+        f"- rule_name: {audit.get('rule_name') or 'N/A'}",
+        f"- score_adjustment: {_format_number(audit.get('score_adjustment'))}",
+        f"- condition: {audit.get('condition') or 'N/A'}",
+        f"- scoring_rows_count: {audit.get('scoring_rows_count', 0)}",
+        f"- triggered_count: {audit.get('triggered_count', 0)}",
+        f"- selected_triggered_count: {audit.get('selected_triggered_count', 0)}",
+        f"- closed_trade_matched_count: {audit.get('closed_trade_matched_count', 0)}",
+        f"- closed_trade_matched_win_count: {audit.get('closed_trade_matched_win_count', 0)}",
+        f"- closed_trade_matched_loss_count: {audit.get('closed_trade_matched_loss_count', 0)}",
+        f"- closed_trade_matched_gross_profit: {_format_number(audit.get('closed_trade_matched_gross_profit'))}",
+        f"- closed_trade_matched_avg_gross_profit_rate: {_format_number(audit.get('closed_trade_matched_avg_gross_profit_rate'))}",
+        f"- note: {audit.get('note') or ''}",
+        "",
+        "### selected_triggered_samples",
+        "",
+        "| date | code | name | sector_name | volume_ratio | rule_score | total_score | selected |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | --- |",
+    ]
+    for row in audit.get("selected_triggered_samples", [])[:20]:
+        lines.append(
+            f"| {row.get('date')} | {row.get('code')} | {row.get('name')} | {row.get('sector_name')} | "
+            f"{_format_number(row.get('volume_ratio'))} | {_format_number(row.get('winner_loser_rule_score'))} | "
+            f"{_format_number(row.get('total_score'))} | {str(bool(row.get('selected'))).lower()} |"
+        )
+    return lines
+
+
 def _capital_utilization_audit_lines(audit: dict[str, Any]) -> list[str]:
     if not audit:
         return ["- audit: unavailable"]
@@ -5419,6 +6444,8 @@ def _capital_utilization_audit_lines(audit: dict[str, Any]) -> list[str]:
         f"- affordable_under_500k_count: {audit.get('affordable_under_500k_count', 0)}",
         f"- selected_round_lot_amount_breakdown: {json.dumps(audit.get('selected_round_lot_amount_breakdown', {}), ensure_ascii=False, sort_keys=True)}",
         f"- bought_round_lot_amount_breakdown: {json.dumps(audit.get('bought_round_lot_amount_breakdown', {}), ensure_ascii=False, sort_keys=True)}",
+        f"- average_round_lot_amount_by_market: {json.dumps(audit.get('average_round_lot_amount_by_market', {}), ensure_ascii=False, sort_keys=True)}",
+        f"- bought_round_lot_amount_by_market: {json.dumps(audit.get('bought_round_lot_amount_by_market', {}), ensure_ascii=False, sort_keys=True)}",
         f"- average_position_count: {_format_number(audit.get('average_position_count'))}",
         f"- max_position_count: {_format_number(audit.get('max_position_count'))}",
         f"- skipped_buy_count: {audit.get('skipped_buy_count', 0)}",
@@ -5441,6 +6468,178 @@ def _capital_utilization_audit_lines(audit: dict[str, Any]) -> list[str]:
     source = audit.get("source", {})
     if isinstance(source, dict):
         lines.append(f"- source: {json.dumps(source, ensure_ascii=False, sort_keys=True)}")
+    return lines
+
+
+def _market_section_performance_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- audit: unavailable"]
+    if audit.get("status") != "OK":
+        return [f"- status: {audit.get('status', 'unavailable')}", f"- reason: {audit.get('reason', '')}"]
+    markets = ["Prime", "Standard", "Growth", "Unknown"]
+    lines = [
+        "| market | candidate_count | selected_count | buy_trade_count | win_rate | gross_profit | profit_factor | average_round_lot_amount |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for market in markets:
+        lines.append(
+            f"| {market} | "
+            f"{int((audit.get('candidate_count_by_market') or {}).get(market, 0) or 0)} | "
+            f"{int((audit.get('selected_count_by_market') or {}).get(market, 0) or 0)} | "
+            f"{int((audit.get('buy_trade_count_by_market') or {}).get(market, 0) or 0)} | "
+            f"{_format_number((audit.get('win_rate_by_market') or {}).get(market))} | "
+            f"{_format_number((audit.get('gross_profit_by_market') or {}).get(market))} | "
+            f"{_format_profit_factor((audit.get('profit_factor_by_market') or {}).get(market))} | "
+            f"{_format_number((audit.get('average_round_lot_amount_by_market') or {}).get(market))} |"
+        )
+    lines.extend(
+        [
+            "",
+            "### Stage Funnel By Market",
+            "",
+            "| market | after_market_filter | scored | selected | buy_trades | sell_trades | market_filter_to_scoring_drop | scoring_to_selection_drop | selection_to_buy_gap |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for market in markets:
+        funnel = (audit.get("stage_funnel_by_market") or {}).get(market, {})
+        lines.append(
+            f"| {market} | "
+            f"{int(funnel.get('after_market_filter', 0) or 0)} | {int(funnel.get('scored', 0) or 0)} | "
+            f"{int(funnel.get('selected', 0) or 0)} | {int(funnel.get('buy_trades', 0) or 0)} | "
+            f"{int(funnel.get('sell_trades', 0) or 0)} | {int(funnel.get('market_filter_to_scoring_drop', 0) or 0)} | "
+            f"{int(funnel.get('scoring_to_selection_drop', 0) or 0)} | {int(funnel.get('selection_to_buy_gap', 0) or 0)} |"
+        )
+    return lines
+
+
+def _candidate_universe_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- audit: unavailable"]
+    if audit.get("status") != "OK":
+        return [f"- status: {audit.get('status', 'unavailable')}", f"- reason: {audit.get('reason', '')}"]
+    lines = [
+        f"- allowed_sections: {json.dumps(audit.get('allowed_sections', []), ensure_ascii=False, sort_keys=True)}",
+        f"- raw_candidate_count_by_market: {json.dumps(audit.get('raw_candidate_count_by_market', {}), ensure_ascii=False, sort_keys=True)}",
+        f"- after_market_filter_candidate_count_by_market: {json.dumps(audit.get('after_market_filter_candidate_count_by_market', {}), ensure_ascii=False, sort_keys=True)}",
+        f"- excluded_count_by_market: {json.dumps(audit.get('excluded_count_by_market', {}), ensure_ascii=False, sort_keys=True)}",
+        f"- unknown_market_count: {audit.get('unknown_market_count', 0)}",
+        f"- market_section_lookup_source_breakdown: {json.dumps(audit.get('market_section_lookup_source_breakdown', {}), ensure_ascii=False, sort_keys=True)}",
+        "",
+        "### Daily Candidate Universe",
+        "",
+        "| date | raw Prime | raw Standard | raw Growth | raw Unknown | after Prime | after Standard | after Growth | after Unknown | excluded Prime | excluded Standard | excluded Growth | excluded Unknown | lookup row | lookup master | lookup unknown |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    daily = audit.get("daily_breakdown", []) or []
+    if not daily:
+        lines.append("| - | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |")
+    for row in daily[:80]:
+        raw = row.get("raw_candidate_count_by_market", {}) if isinstance(row, dict) else {}
+        after = row.get("after_market_filter_candidate_count_by_market", {}) if isinstance(row, dict) else {}
+        excluded = row.get("excluded_count_by_market", {}) if isinstance(row, dict) else {}
+        lookup = row.get("market_section_lookup_source", {}) if isinstance(row, dict) else {}
+        lines.append(
+            f"| {row.get('date', '')} | "
+            f"{int(raw.get('Prime', 0) or 0)} | {int(raw.get('Standard', 0) or 0)} | {int(raw.get('Growth', 0) or 0)} | {int(raw.get('Unknown', 0) or 0)} | "
+            f"{int(after.get('Prime', 0) or 0)} | {int(after.get('Standard', 0) or 0)} | {int(after.get('Growth', 0) or 0)} | {int(after.get('Unknown', 0) or 0)} | "
+            f"{int(excluded.get('Prime', 0) or 0)} | {int(excluded.get('Standard', 0) or 0)} | {int(excluded.get('Growth', 0) or 0)} | {int(excluded.get('Unknown', 0) or 0)} | "
+            f"{int(lookup.get('row', 0) or 0)} | {int(lookup.get('master', 0) or 0)} | {int(lookup.get('unknown', 0) or 0)} |"
+        )
+    return lines
+
+
+def _scored_candidate_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- audit: unavailable"]
+    lines = [
+        "| market | scored_count | avg_total_score | median_total_score | top_score | selected_count |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for market in _market_labels():
+        lines.append(
+            f"| {market} | "
+            f"{int((audit.get('scored_count_by_market') or {}).get(market, 0) or 0)} | "
+            f"{_format_number((audit.get('average_total_score_by_market') or {}).get(market))} | "
+            f"{_format_number((audit.get('median_total_score_by_market') or {}).get(market))} | "
+            f"{_format_number((audit.get('top_score_by_market') or {}).get(market))} | "
+            f"{int((audit.get('selected_count_by_market') or {}).get(market, 0) or 0)} |"
+        )
+    lines.extend(["", "### Top 20 Candidates By Total Score", "", *_candidate_sample_table_lines(audit.get("top_20_candidates_by_total_score", []))])
+    return lines
+
+
+def _selected_candidate_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- audit: unavailable"]
+    lines = [
+        "| market | selected_count | avg_score | avg_round_lot_amount |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+    for market in _market_labels():
+        lines.append(
+            f"| {market} | "
+            f"{int((audit.get('selected_count_by_market') or {}).get(market, 0) or 0)} | "
+            f"{_format_number((audit.get('selected_average_score_by_market') or {}).get(market))} | "
+            f"{_format_number((audit.get('selected_average_round_lot_amount_by_market') or {}).get(market))} |"
+        )
+    lines.extend(["", "### Selected Samples", "", *_candidate_sample_table_lines(audit.get("selected_sample_rows", []))])
+    return lines
+
+
+def _candidate_sample_table_lines(rows: list[dict[str, Any]]) -> list[str]:
+    lines = [
+        "| date | code | name | market_section | total_score | round_lot_amount | selected |",
+        "| --- | --- | --- | --- | ---: | ---: | --- |",
+    ]
+    if not rows:
+        lines.append("| - | - | - | - | - | - | - |")
+        return lines
+    for row in rows[:50]:
+        lines.append(
+            f"| {row.get('date') or ''} | {row.get('code') or ''} | {row.get('name') or ''} | "
+            f"{row.get('market_section') or 'Unknown'} | {_format_number(row.get('total_score'))} | "
+            f"{_format_number(row.get('round_lot_amount'))} | {str(bool(row.get('selected'))).lower()} |"
+        )
+    return lines
+
+
+def _trade_market_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- audit: unavailable"]
+    lines = [
+        "| market | buy_trade_count | sell_trade_count | win_rate | gross_profit | profit_factor | avg_round_lot_amount |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for market in _market_labels():
+        lines.append(
+            f"| {market} | "
+            f"{int((audit.get('buy_trade_count_by_market') or {}).get(market, 0) or 0)} | "
+            f"{int((audit.get('sell_trade_count_by_market') or {}).get(market, 0) or 0)} | "
+            f"{_format_number((audit.get('win_rate_by_market') or {}).get(market))} | "
+            f"{_format_number((audit.get('gross_profit_by_market') or {}).get(market))} | "
+            f"{_format_profit_factor((audit.get('profit_factor_by_market') or {}).get(market))} | "
+            f"{_format_number((audit.get('average_round_lot_amount_by_market') or {}).get(market))} |"
+        )
+    lines.extend(["", f"- skipped_buy_reason_by_market: {json.dumps(audit.get('skipped_buy_reason_by_market', {}), ensure_ascii=False, sort_keys=True)}"])
+    lines.extend(
+        [
+            "",
+            "### Trade Samples",
+            "",
+            "| entry_date | exit_date | code | name | market_section | gross_profit | profit |",
+            "| --- | --- | --- | --- | --- | ---: | ---: |",
+        ]
+    )
+    samples = audit.get("trade_sample_rows", []) or []
+    if not samples:
+        lines.append("| - | - | - | - | - | - | - |")
+    for row in samples[:50]:
+        lines.append(
+            f"| {row.get('entry_date') or ''} | {row.get('exit_date') or ''} | {row.get('code') or ''} | "
+            f"{row.get('name') or ''} | {row.get('market_section') or 'Unknown'} | "
+            f"{_format_number(row.get('gross_profit'))} | {_format_number(row.get('profit'))} |"
+        )
     return lines
 
 

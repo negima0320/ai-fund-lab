@@ -194,6 +194,14 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
                 order_status TEXT,
                 live_trading INTEGER,
                 safety_checked INTEGER,
+                affordable_fallback_buy_selected INTEGER,
+                affordable_fallback_original_code TEXT,
+                affordable_fallback_original_name TEXT,
+                affordable_fallback_reason TEXT,
+                affordable_fallback_round_lot_amount REAL,
+                affordable_fallback_attempted INTEGER,
+                affordable_fallback_replaced_by_code TEXT,
+                affordable_fallback_no_candidate INTEGER,
                 config_version TEXT,
                 created_at TEXT NOT NULL
             );
@@ -557,6 +565,14 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
         _add_column_if_missing(connection, "trades", "order_status", "TEXT")
         _add_column_if_missing(connection, "trades", "live_trading", "INTEGER")
         _add_column_if_missing(connection, "trades", "safety_checked", "INTEGER")
+        _add_column_if_missing(connection, "trades", "affordable_fallback_buy_selected", "INTEGER")
+        _add_column_if_missing(connection, "trades", "affordable_fallback_original_code", "TEXT")
+        _add_column_if_missing(connection, "trades", "affordable_fallback_original_name", "TEXT")
+        _add_column_if_missing(connection, "trades", "affordable_fallback_reason", "TEXT")
+        _add_column_if_missing(connection, "trades", "affordable_fallback_round_lot_amount", "REAL")
+        _add_column_if_missing(connection, "trades", "affordable_fallback_attempted", "INTEGER")
+        _add_column_if_missing(connection, "trades", "affordable_fallback_replaced_by_code", "TEXT")
+        _add_column_if_missing(connection, "trades", "affordable_fallback_no_candidate", "INTEGER")
         _add_column_if_missing(connection, "trades", "config_version", "TEXT")
         _add_column_if_missing(connection, "portfolio_snapshots", "gross_cumulative_profit", "REAL")
         _add_column_if_missing(connection, "portfolio_snapshots", "net_cumulative_profit", "REAL")
@@ -932,6 +948,14 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                     trade.get("order_status") or trade.get("status"),
                     1 if trade.get("live_trading") else 0,
                     1 if trade.get("safety_checked") else 0,
+                    1 if trade.get("affordable_fallback_buy_selected") else 0,
+                    trade.get("affordable_fallback_original_code"),
+                    trade.get("affordable_fallback_original_name"),
+                    trade.get("affordable_fallback_reason"),
+                    trade.get("affordable_fallback_round_lot_amount"),
+                    1 if trade.get("affordable_fallback_attempted") else 0,
+                    trade.get("affordable_fallback_replaced_by_code"),
+                    1 if trade.get("affordable_fallback_no_candidate") else 0,
                     trade.get("config_version") or default_config_version,
                     _now(),
                 )
@@ -969,8 +993,12 @@ def save_trades(config: dict[str, Any], root: Path, trade_date: str, trades: lis
                 buy_commission, sell_commission, total_commission, taxable_profit,
                 estimated_tax, net_profit, net_profit_rate, dealer_comment,
                 broker_provider, order_status, live_trading, safety_checked,
+                affordable_fallback_buy_selected, affordable_fallback_original_code,
+                affordable_fallback_original_name, affordable_fallback_reason,
+                affordable_fallback_round_lot_amount, affordable_fallback_attempted,
+                affordable_fallback_replaced_by_code, affordable_fallback_no_candidate,
                 config_version, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )

@@ -60,7 +60,18 @@ def normalize_market_section(value: Any) -> str:
 
 
 def market_section_from_row(row: dict[str, Any]) -> str:
-    for key in ("section", "market_section", "listing_market", "market", "MarketCodeName", "Section"):
+    for key in (
+        "section",
+        "market_section",
+        "listing_market",
+        "market",
+        "Mkt",
+        "MktNm",
+        "MarketCode",
+        "MarketCodeName",
+        "MarketName",
+        "Section",
+    ):
         value = row.get(key)
         if value:
             section = normalize_market_section(value)

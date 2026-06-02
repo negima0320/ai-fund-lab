@@ -82,6 +82,7 @@ from jquants_plan import (
     resolve_jquants_plan,
 )
 from market_context import build_market_context, neutral_market_context
+from market_regime import effective_market_context_for_signal
 from news_provider import build_news_provider
 from paper_trade import execute_paper_trade_day, execute_real_data_paper_trade, initial_live_paper_state, initial_paper_state
 from portfolio import build_daily_summary
@@ -4987,6 +4988,8 @@ def _experiment_scoring_signature(config: dict[str, Any]) -> str:
         "selection": config.get("selection", {}),
         "volume_filter": config.get("volume_filter", {}),
         "affordability_filter": config.get("affordability_filter", {}),
+        "winner_loser_rule_adjustment": config.get("winner_loser_rule_adjustment", {}),
+        "dynamic_exposure": config.get("dynamic_exposure", {}),
         "market_filter": {
             "allowed_sections": sorted(allowed_market_sections(config)),
             "allow_unknown_market": bool(config.get("market_filter", {}).get("allow_unknown_market", False)),
@@ -5343,6 +5346,9 @@ def build_experiment_batch_summary(
         )
         diff = _experiment_diff(base_profile_id, profile_id, db_path, start_date_text, end_date_text) if db_path.exists() else {}
         feature_analysis = _experiment_feature_analysis(load_profile(profile_id), start_date_text, end_date_text) if db_path.exists() else {}
+        market_section_performance = feature_analysis.get("market_section_performance_audit", {}) if isinstance(feature_analysis.get("market_section_performance_audit"), dict) else {}
+        trade_market_audit = market_section_performance.get("trade_market_audit", {}) if isinstance(market_section_performance.get("trade_market_audit"), dict) else {}
+        scored_candidate_audit = market_section_performance.get("scored_candidate_audit", {}) if isinstance(market_section_performance.get("scored_candidate_audit"), dict) else {}
         activation = feature_analysis.get("feature_activation_audit", {})
         earnings_debug = feature_analysis.get("earnings_filter_debug", {})
         processed_audit = _experiment_processed_data_audit(profile_id, start_date_text, end_date_text)
@@ -5375,7 +5381,12 @@ def build_experiment_batch_summary(
                 "investor_filter_rejected_count": diff.get("investor_filter_rejected_count", 0),
                 "market_filter": row.get("market_filter", {}),
                 "market_candidate_count": row_market_coverage.get("candidate_count", {}),
+                "market_scored_count": scored_candidate_audit.get("scored_count_by_market", row_market_coverage.get("candidate_count", {})),
                 "market_selected_count": row_market_coverage.get("selected_count", {}),
+                "market_buy_trade_count": trade_market_audit.get("buy_trade_count_by_market", {}),
+                "market_sell_trade_count": trade_market_audit.get("sell_trade_count_by_market", {}),
+                "market_profit_by_section": trade_market_audit.get("gross_profit_by_market", {}),
+                "market_profit_factor_by_section": trade_market_audit.get("profit_factor_by_market", {}),
                 "market_filter_excluded_count": market_filter_excluded_count,
                 "market_trade_consistency_warning": market_trade_consistency_warning,
                 "result_integrity_status": result_integrity.get("result_integrity_status", ""),
@@ -5458,6 +5469,22 @@ def build_experiment_batch_summary(
         base_date_audit,
     )
     base_processed_audit = _experiment_processed_data_audit(base_profile_id, start_date_text, end_date_text)
+    base_feature_analysis = _experiment_feature_analysis(load_profile(base_profile_id), start_date_text, end_date_text) if db_path.exists() else {}
+    base_market_section_performance = (
+        base_feature_analysis.get("market_section_performance_audit", {})
+        if isinstance(base_feature_analysis.get("market_section_performance_audit"), dict)
+        else {}
+    )
+    base_trade_market_audit = (
+        base_market_section_performance.get("trade_market_audit", {})
+        if isinstance(base_market_section_performance.get("trade_market_audit"), dict)
+        else {}
+    )
+    base_scored_candidate_audit = (
+        base_market_section_performance.get("scored_candidate_audit", {})
+        if isinstance(base_market_section_performance.get("scored_candidate_audit"), dict)
+        else {}
+    )
     return {
         "base_profile": base_profile_id,
         "start_date": start_date_text,
@@ -5497,7 +5524,12 @@ def build_experiment_batch_summary(
             "investor_filter_rejected_count": 0,
             "market_filter": base_row.get("market_filter", {}),
             "market_candidate_count": base_market_coverage.get("candidate_count", {}),
+            "market_scored_count": base_scored_candidate_audit.get("scored_count_by_market", base_market_coverage.get("candidate_count", {})),
             "market_selected_count": base_market_coverage.get("selected_count", {}),
+            "market_buy_trade_count": base_trade_market_audit.get("buy_trade_count_by_market", {}),
+            "market_sell_trade_count": base_trade_market_audit.get("sell_trade_count_by_market", {}),
+            "market_profit_by_section": base_trade_market_audit.get("gross_profit_by_market", {}),
+            "market_profit_factor_by_section": base_trade_market_audit.get("profit_factor_by_market", {}),
             "market_filter_excluded_count": base_market_filter_excluded_count,
             "market_trade_consistency_warning": _market_trade_consistency_warning(base_market_coverage, base_row.get("total_trades")),
             "practical_effect": "baseline",
@@ -5917,8 +5949,8 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             "",
             "## Results",
             "",
-            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | investor_filter_rejected_count | market_filter | market_candidate_count | market_selected_count | market_filter_excluded_count | market_trade_consistency_warning | result_integrity_status | integrity_error_count | integrity_warning_count | market_filter_violation_count | trade_without_selected_count | out_of_period_trade_count | stale_cache_read_count | score_integrity_status | total_score_mismatch_count | stale_score_cache_count | future_data_leak_count | signal_entry_date_violation_count | no_trade_fallback_selected_count | selected_below_regular_min_score_count | fallback_top_pick_selected_count | invalid_below_threshold_selected_count | selection_diff_count | outcome_diff_count | indicators_last_date | candidates_last_date | scored_candidates_last_date | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | earnings_calendar_records | earnings_filter_rejected_count | earnings_filter_status | practical_effect | effect_reason | verdict | verdict_reason |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | newly_selected_count | removed_count | investor_filter_rejected_count | market_filter | market_candidate_count | market_scored_count | market_selected_count | market_buy_trade_count | market_sell_trade_count | market_profit_by_section | market_profit_factor_by_section | market_filter_excluded_count | market_trade_consistency_warning | result_integrity_status | integrity_error_count | integrity_warning_count | market_filter_violation_count | trade_without_selected_count | out_of_period_trade_count | stale_cache_read_count | score_integrity_status | total_score_mismatch_count | stale_score_cache_count | future_data_leak_count | signal_entry_date_violation_count | no_trade_fallback_selected_count | selected_below_regular_min_score_count | fallback_top_pick_selected_count | invalid_below_threshold_selected_count | selection_diff_count | outcome_diff_count | indicators_last_date | candidates_last_date | scored_candidates_last_date | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | earnings_calendar_records | earnings_filter_rejected_count | earnings_filter_status | practical_effect | effect_reason | verdict | verdict_reason |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for row in _experiment_summary_result_rows(summary):
@@ -5946,7 +5978,10 @@ def _experiment_summary_table_row(row: dict[str, Any]) -> str:
         f"{_format_optional_percent(row.get('expectancy'))} | {_format_optional_percent(row.get('max_drawdown'))} | "
         f"{row.get('total_trades')} | {row.get('newly_selected_count') or 0} | {row.get('removed_count') or 0} | {row.get('investor_filter_rejected_count', 0)} | "
         f"{_compact_json(row.get('market_filter', {}))} | {_compact_json(row.get('market_candidate_count', {}))} | "
-        f"{_compact_json(row.get('market_selected_count', {}))} | {row.get('market_filter_excluded_count', 0)} | "
+        f"{_compact_json(row.get('market_scored_count', {}))} | {_compact_json(row.get('market_selected_count', {}))} | "
+        f"{_compact_json(row.get('market_buy_trade_count', {}))} | {_compact_json(row.get('market_sell_trade_count', {}))} | "
+        f"{_compact_json(row.get('market_profit_by_section', {}))} | {_compact_json(row.get('market_profit_factor_by_section', {}))} | "
+        f"{row.get('market_filter_excluded_count', 0)} | "
         f"{row.get('market_trade_consistency_warning', '') or '-'} | "
         f"{row.get('result_integrity_status', '') or '-'} | {row.get('integrity_error_count', 0)} | "
         f"{row.get('integrity_warning_count', 0)} | "
@@ -6452,8 +6487,8 @@ def _build_profile_diff_analysis_for_pair(
     target_rows = _load_scoring_rows_for_profile(db_path, target_profile_id, start_date_text, end_date_text)
     base_trade_rows = _load_trade_rows_for_profile(db_path, base_profile_id, start_date_text, end_date_text)
     target_trade_rows = _load_trade_rows_for_profile(db_path, target_profile_id, start_date_text, end_date_text)
-    base_selected = _selected_key_map(base_rows)
-    target_selected = _selected_key_map(target_rows)
+    base_selected = _selected_key_map_with_execution_fallback(base_rows, base_trade_rows)
+    target_selected = _selected_key_map_with_execution_fallback(target_rows, target_trade_rows)
     newly_selected_keys = sorted(set(target_selected) - set(base_selected))
     removed_keys = sorted(set(base_selected) - set(target_selected))
     outcome_diff = _trade_outcome_diff(base_trade_rows, target_trade_rows)
@@ -6536,7 +6571,7 @@ def _load_scoring_rows_for_profile(db_path: Path, profile_id: str, start_date_te
 def _load_trade_rows_for_profile(db_path: Path, profile_id: str, start_date_text: str, end_date_text: str) -> list[dict[str, Any]]:
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
-        return [
+        rows = [
             dict(row)
             for row in connection.execute(
                 """
@@ -6549,6 +6584,65 @@ def _load_trade_rows_for_profile(db_path: Path, profile_id: str, start_date_text
                 (profile_id, start_date_text, end_date_text),
             )
         ]
+    return _merge_backtest_summary_fallback_trade_rows(rows, profile_id, start_date_text, end_date_text)
+
+
+def _merge_backtest_summary_fallback_trade_rows(
+    rows: list[dict[str, Any]],
+    profile_id: str,
+    start_date_text: str,
+    end_date_text: str,
+) -> list[dict[str, Any]]:
+    summary_path = ROOT / "logs" / "backtests" / profile_id / f"{start_date_text}_to_{end_date_text}" / "backtest_summary.json"
+    if not summary_path.exists():
+        return rows
+    try:
+        payload = read_json(summary_path)
+    except Exception:
+        return rows
+    events = payload.get("all_trades", []) if isinstance(payload, dict) else []
+    if not isinstance(events, list):
+        return rows
+    fallback_events = [
+        event
+        for event in events
+        if isinstance(event, dict)
+        and (
+            bool(event.get("affordable_fallback_buy_selected"))
+            or bool(event.get("affordable_fallback_attempted"))
+            or bool(event.get("affordable_fallback_no_candidate"))
+        )
+        and _trade_row_in_period(event, start_date_text, end_date_text)
+    ]
+    if not fallback_events:
+        return rows
+    merged = list(rows)
+    by_key = {_trade_merge_key(row): row for row in merged}
+    for event in fallback_events:
+        row = {**event, "profile_id": event.get("profile_id") or profile_id}
+        key = _trade_merge_key(row)
+        if key in by_key:
+            by_key[key].update({name: value for name, value in row.items() if name.startswith("affordable_fallback_")})
+            continue
+        merged.append(row)
+        by_key[key] = row
+    return merged
+
+
+def _trade_row_in_period(row: dict[str, Any], start_date_text: str, end_date_text: str) -> bool:
+    row_date = str(row.get("exit_date") or row.get("entry_date") or row.get("date") or row.get("signal_date") or "")
+    return bool(row_date) and start_date_text <= row_date <= end_date_text
+
+
+def _trade_merge_key(row: dict[str, Any]) -> tuple[str, str, str, str, str, str]:
+    return (
+        str(row.get("action") or ""),
+        str(row.get("code") or ""),
+        str(row.get("signal_date") or ""),
+        str(row.get("entry_date") or row.get("date") or ""),
+        str(row.get("exit_date") or ""),
+        str(row.get("trade_id") or ""),
+    )
 
 
 def _selected_key_map(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
@@ -6556,6 +6650,43 @@ def _selected_key_map(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[
         (str(row.get("date")), str(row.get("code"))): row
         for row in rows
         if bool(row.get("selected"))
+    }
+
+
+def _selected_key_map_with_execution_fallback(
+    scoring_rows: list[dict[str, Any]],
+    trade_rows: list[dict[str, Any]],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    selected = _selected_key_map(scoring_rows)
+    for trade in trade_rows:
+        if str(trade.get("action") or "").upper() != "BUY":
+            continue
+        if not bool(trade.get("affordable_fallback_buy_selected")):
+            continue
+        code = str(trade.get("code") or "")
+        signal_date = str(trade.get("signal_date") or trade.get("entry_date") or trade.get("date") or "")
+        if not code or not signal_date:
+            continue
+        key = (signal_date, code)
+        selected.setdefault(key, _execution_fallback_selection_row(trade, signal_date))
+    return selected
+
+
+def _execution_fallback_selection_row(trade: dict[str, Any], signal_date: str) -> dict[str, Any]:
+    return {
+        "date": signal_date,
+        "code": trade.get("code"),
+        "name": trade.get("name"),
+        "rank": trade.get("rank"),
+        "total_score": trade.get("total_score") if trade.get("total_score") is not None else trade.get("score"),
+        "market_regime": trade.get("market_regime"),
+        "rejected_reason": None,
+        "reason": trade.get("reason") or trade.get("selected_reason") or "affordable_fallback_buy",
+        "selected": True,
+        "selection_source": "affordable_fallback_buy",
+        "affordable_fallback_buy_selected": True,
+        "affordable_fallback_original_code": trade.get("affordable_fallback_original_code"),
+        "affordable_fallback_reason": trade.get("affordable_fallback_reason"),
     }
 
 
@@ -6580,7 +6711,11 @@ def _closed_trade_key_map(rows: list[dict[str, Any]]) -> dict[tuple[str, str], d
 def _trade_outcome_diff(base_rows: list[dict[str, Any]], target_rows: list[dict[str, Any]]) -> dict[str, Any]:
     base_trades = _closed_trade_key_map(base_rows)
     target_trades = _closed_trade_key_map(target_rows)
+    base_buys = _buy_trade_key_map(base_rows)
+    target_buys = _buy_trade_key_map(target_rows)
     common_keys = sorted(set(base_trades) & set(target_trades))
+    newly_bought_keys = sorted(set(target_buys) - set(base_buys))
+    removed_buy_keys = sorted(set(base_buys) - set(target_buys))
     different_exit_date = []
     different_exit_reason = []
     different_profit = []
@@ -6604,9 +6739,12 @@ def _trade_outcome_diff(base_rows: list[dict[str, Any]], target_rows: list[dict[
             different_holding_days.append(_trade_outcome_diff_record(key, base, target, ["holding_days"]))
         if changes:
             outcome_diffs.append(_trade_outcome_diff_record(key, base, target, changes))
+    outcome_diff_count = len(outcome_diffs) + len(newly_bought_keys) + len(removed_buy_keys)
     return {
         "same_entry_count": len(common_keys),
-        "outcome_diff_count": len(outcome_diffs),
+        "outcome_diff_count": outcome_diff_count,
+        "new_buy_trade_count": len(newly_bought_keys),
+        "removed_buy_trade_count": len(removed_buy_keys),
         "same_entry_different_exit_date_count": len(different_exit_date),
         "same_entry_different_exit_reason_count": len(different_exit_reason),
         "same_entry_different_profit_count": len(different_profit),
@@ -6615,7 +6753,45 @@ def _trade_outcome_diff(base_rows: list[dict[str, Any]], target_rows: list[dict[
         "same_entry_different_exit_reason": different_exit_reason[:50],
         "same_entry_different_profit": different_profit[:50],
         "same_entry_different_holding_days": different_holding_days[:50],
+        "new_buy_trades": [_buy_trade_diff_record(key, target_buys[key]) for key in newly_bought_keys[:50]],
+        "removed_buy_trades": [_buy_trade_diff_record(key, base_buys[key]) for key in removed_buy_keys[:50]],
         "outcome_diffs": outcome_diffs[:50],
+    }
+
+
+def _buy_trade_key_map(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+    result = {}
+    for row in rows:
+        if str(row.get("action") or "").upper() != "BUY":
+            continue
+        if not row.get("code"):
+            continue
+        entry_date = str(row.get("entry_date") or row.get("date") or row.get("signal_date") or "")
+        if not entry_date:
+            continue
+        key = (entry_date, str(row.get("code")))
+        if key not in result:
+            result[key] = row
+            continue
+        suffix = 2
+        while (key[0], f"{key[1]}#{suffix}") in result:
+            suffix += 1
+        result[(key[0], f"{key[1]}#{suffix}")] = row
+    return result
+
+
+def _buy_trade_diff_record(key: tuple[str, str], row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "entry_date": key[0],
+        "signal_date": row.get("signal_date"),
+        "code": str(row.get("code") or key[1]).split("#", 1)[0],
+        "name": row.get("name"),
+        "amount": row.get("amount"),
+        "shares": row.get("shares"),
+        "total_score": row.get("total_score") if row.get("total_score") is not None else row.get("score"),
+        "reason": row.get("reason") or row.get("selected_reason"),
+        "affordable_fallback_buy_selected": bool(row.get("affordable_fallback_buy_selected")),
+        "affordable_fallback_original_code": row.get("affordable_fallback_original_code"),
     }
 
 
@@ -6737,6 +6913,9 @@ def _selection_diff_record(row: dict[str, Any]) -> dict[str, Any]:
         "market_regime": row.get("market_regime"),
         "rejected_reason": row.get("rejected_reason"),
         "reason": row.get("reason"),
+        "selection_source": row.get("selection_source"),
+        "affordable_fallback_original_code": row.get("affordable_fallback_original_code"),
+        "affordable_fallback_reason": row.get("affordable_fallback_reason"),
     }
 
 
@@ -8474,7 +8653,7 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
     lookback_days = 60 if indicator_mode == "full" else 35
     fetch_dates = previous_business_dates(target_date, lookback_days)
     if BACKTEST_MODE_ACTIVE:
-        price_rows = load_cached_price_history(fetch_dates)
+        price_rows = load_cached_price_history(fetch_dates, config)
         if not price_rows:
             fetch_start = fetch_dates[0] if fetch_dates else target_date
             print(
@@ -8482,12 +8661,12 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
                 f"attempting backtest price fetch from {fetch_start.isoformat()} to {target_date_text}."
             )
             ensure_price_history_for_backtest("jquants", fetch_start, target_date, fetch_start)
-            price_rows = load_cached_price_history(fetch_dates)
+            price_rows = load_cached_price_history(fetch_dates, config)
         if not price_rows:
             missing_dates = [
                 item.isoformat()
                 for item in fetch_dates
-                if load_cached_prime_prices(item) is None
+                if load_cached_prime_prices(item, config) is None
             ]
             sample = ", ".join(missing_dates[:5])
             detail = f" missing_dates_sample=[{sample}]" if sample else ""
@@ -8517,7 +8696,7 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
             )
             _print_fetch_statistics(provider)
         except RuntimeError as exc:
-            price_rows = load_cached_price_history(fetch_dates)
+            price_rows = load_cached_price_history(fetch_dates, config)
             if price_rows:
                 print(f"J-Quants indicator source fetch failed; using cached price history. reason={exc}")
             else:
@@ -8858,6 +9037,7 @@ def run_score(provider_name: str, target_date_text: str) -> None:
     payload = _run_timed_backtest_phase("candidate_load", lambda: read_json(candidates_path))
     candidates = payload.get("candidates", [])
     market_context = load_market_context_for_date(target_date_text, provider_name)
+    dynamic_exposure_context = load_effective_dynamic_exposure_context(target_date_text, provider_name)
     target_date = date.fromisoformat(target_date_text)
     if candidates:
         earnings_payload = _load_earnings_calendar_for_date(target_date, config)
@@ -8874,6 +9054,7 @@ def run_score(provider_name: str, target_date_text: str) -> None:
             config,
             provider_name,
             market_context=market_context,
+            dynamic_exposure_context=dynamic_exposure_context,
         )
         _record_backtest_phase_time("score_merge", time.perf_counter() - score_started)
     else:
@@ -8888,6 +9069,7 @@ def run_score(provider_name: str, target_date_text: str) -> None:
             "selected_count": 0,
             "selection_config": {},
             "market_context": market_context,
+            "dynamic_exposure_context": dynamic_exposure_context,
             "market_filter": {},
             "skip_reason": "empty_candidates",
         }
@@ -9036,6 +9218,36 @@ def load_market_context_for_date(target_date_text: str, provider_name: str) -> d
     if path.exists():
         return read_json(path)
     return neutral_market_context(target_date_text, provider_name, "market_context未生成のためneutralとして扱います。")
+
+
+def load_effective_dynamic_exposure_context(signal_date_text: str, provider_name: str) -> dict[str, Any]:
+    paths = []
+    for path in sorted((ROOT / "data" / "processed").glob("market_context_*.json")):
+        day = path.stem.replace("market_context_", "")
+        if day < signal_date_text:
+            paths.append((day, path))
+    if not paths:
+        resolved = effective_market_context_for_signal(signal_date_text, {})
+        resolved["market_context"] = neutral_market_context(
+            signal_date_text,
+            provider_name,
+            "dynamic_exposure用の過去market_contextが見つからないためunknownとして扱います。",
+        )
+        return resolved
+    source_date, path = paths[-1]
+    try:
+        payload = read_json(path)
+    except Exception:
+        payload = {}
+    contexts = {source_date: payload if isinstance(payload, dict) else {}}
+    resolved = effective_market_context_for_signal(signal_date_text, contexts)
+    if not resolved.get("market_context"):
+        resolved["market_context"] = neutral_market_context(
+            signal_date_text,
+            provider_name,
+            "dynamic_exposure用の過去market_contextが読めないためunknownとして扱います。",
+        )
+    return resolved
 
 
 def _latest_portfolio_summary_for_ai_decision() -> dict[str, Any]:
@@ -11268,7 +11480,10 @@ def _prepare_execution_candidates(
 ) -> list[dict[str, Any]]:
     model = _backtest_execution_model(config)
     price_source = model["entry_price_source"]
-    entry_prices = {str(item.get("code")): item for item in load_cached_prime_prices(date.fromisoformat(entry_date_text))}
+    entry_prices = {
+        str(item.get("code")): item
+        for item in (load_cached_prime_prices(date.fromisoformat(entry_date_text), config) or [])
+    }
     prepared: list[dict[str, Any]] = []
     for item in scored_candidates:
         code = str(item.get("code"))
@@ -11608,10 +11823,16 @@ RUNTIME_SCORE_FIELDS = {
     "selection_reason", "selected_reason", "rejected_reason", "fallback",
     "affordability_filter_enabled", "round_lot_amount", "preferred_round_lot_amount",
     "price_band_penalty", "price_band_penalty_reason", "affordability_penalty",
+    "winner_loser_rule_adjustment_enabled", "winner_loser_rule_triggered",
+    "winner_loser_rule_name", "winner_loser_rule_score", "winner_loser_rule_reason",
+    "winner_loser_rule_adjustment",
     "candlestick_signals", "candlestick_score", "trend_score", "ma_score",
     "volume_score", "rsi_score", "market_context_score", "sector_score",
     "penalty_score", "score_components_total", "score_components_match",
-    "market_regime", "market_filter_applied", "market_filter_reason",
+    "market_regime", "advance_ratio", "market_average_change_rate", "classified_market_regime",
+    "dynamic_exposure_regime", "dynamic_exposure_source_date", "dynamic_exposure_source_date_mode",
+    "dynamic_exposure_source_lag_days", "dynamic_exposure_source_fallback_used",
+    "dynamic_exposure_same_day_context_used", "market_filter_applied", "market_filter_reason",
     "source_provider", "config_version",
 }
 
@@ -11642,6 +11863,10 @@ RUNTIME_TRADE_FIELDS = {
     "exit_price", "shares", "amount", "profit", "profit_rate", "exit_reason",
     "result", "score", "total_score", "technical_score", "rsi", "volume_ratio",
     "selected_reason", "reason", "broker_provider", "order_status", "status",
+    "affordable_fallback_buy_selected", "affordable_fallback_original_code",
+    "affordable_fallback_reason", "affordable_fallback_round_lot_amount",
+    "affordable_fallback_original_name", "affordable_fallback_attempted",
+    "affordable_fallback_replaced_by_code", "affordable_fallback_no_candidate",
     "config_version",
 }
 
@@ -11654,8 +11879,13 @@ ANALYSIS_TRADE_FIELDS = RUNTIME_TRADE_FIELDS | {
     "overseas_net_buy_4w_sum", "overseas_net_buy_4w_trend", "investor_context_score",
     "ma_score", "rsi_score", "volume_score", "candlestick_score",
     "market_context_score", "sector_score", "penalty_score",
+    "winner_loser_rule_score", "winner_loser_rule_name", "winner_loser_rule_reason",
     "score_components_total", "score_components_match", "market_regime",
-    "advance_ratio", "candlestick_signals",
+    "advance_ratio", "market_average_change_rate", "classified_market_regime",
+    "dynamic_exposure_enabled", "dynamic_exposure_regime", "dynamic_target_exposure",
+    "dynamic_exposure_triggered", "dynamic_exposure_source_date", "dynamic_exposure_source_date_mode",
+    "dynamic_exposure_source_lag_days", "dynamic_exposure_source_fallback_used",
+    "dynamic_exposure_same_day_context_used", "candlestick_signals",
     "earnings_filter_checked", "earnings_filter_blocked", "earnings_filter_reason",
     "earnings_announcement_date", "earnings_info_found", "earnings_candidate_date",
     "earnings_days_until_earnings", "gross_profit", "gross_profit_rate",
@@ -13342,6 +13572,7 @@ def build_market_filter_audit(config: dict[str, Any], run_dates: list[str]) -> d
     listed_info_missing_count = 0
     market_section_filled_from_master_count = 0
     post_filter_validation = {"status": "OK", "unknown_market_count": 0, "violation_count": 0, "sample": []}
+    daily_breakdown = []
     for day in run_dates:
         payload = _load_candidate_payload_for_market_audit(config, day)
         if not payload:
@@ -13379,6 +13610,20 @@ def build_market_filter_audit(config: dict[str, Any], run_dates: list[str]) -> d
             _merge_count_dict(excluded_counts, coverage_excluded_counts)
         else:
             _merge_count_dict(excluded_counts, filtered["excluded_counts"])
+        day_lookup_source = coverage.get("market_section_lookup_source", {}) if isinstance(coverage.get("market_section_lookup_source"), dict) else filtered.get("lookup_source", {})
+        daily_breakdown.append(
+            {
+                "date": day,
+                "raw_candidate_count_by_market": market_section_counts(all_candidate_rows),
+                "after_market_filter_candidate_count_by_market": market_section_counts(candidates) if candidates else allowed_counts,
+                "excluded_count_by_market": coverage_excluded_counts if coverage_excluded_counts else filtered["excluded_counts"],
+                "unknown_market_count": int(market_section_counts(all_candidate_rows).get("Unknown", 0) or 0),
+                "market_section_lookup_source": day_lookup_source or {"unavailable": 0},
+                "raw_candidate_count": len(all_candidate_rows),
+                "after_filter_count": len(candidates),
+                "excluded_count": len(filtered["excluded"]),
+            }
+        )
         validation = _candidate_market_filter_validation(candidates, config)
         post_filter_validation["unknown_market_count"] += int(validation.get("unknown_market_count", 0) or 0)
         post_filter_validation["violation_count"] += int(validation.get("violation_count", 0) or 0)
@@ -13416,6 +13661,7 @@ def build_market_filter_audit(config: dict[str, Any], run_dates: list[str]) -> d
         "unknown_market_count": unknown_market_count,
         "market_section_missing_count": unknown_market_count,
         "market_section_lookup_source": lookup_source or {"unavailable": 0},
+        "daily_breakdown": daily_breakdown,
         "listed_info_total_count": listed_info_stats["total_count"],
         "listed_info_loaded_count": listed_info_stats["loaded_count"],
         "listed_info_match_count": listed_info_match_count,
@@ -13948,6 +14194,16 @@ def build_backtest_result_integrity_audit(
         for trade in all_trades
         if str(trade.get("action") or "").upper() == "SELL" and _trade_is_filled_or_unknown(trade)
     ]
+    affordable_fallback_selected_rows = [
+        {**trade, "selected": True, "date": str(trade.get("signal_date") or trade.get("date") or "")}
+        for trade in buy_trades
+        if bool(trade.get("affordable_fallback_buy_selected"))
+    ]
+    for row in affordable_fallback_selected_rows:
+        key = _selection_trade_key(row)
+        if key:
+            selected_keys.add(key)
+            selected_by_key.setdefault(key, row)
     buy_missing_key_count = sum(1 for trade in buy_trades if not _trade_selection_key(trade))
     buy_keys = {_trade_selection_key(trade) for trade in buy_trades if _trade_selection_key(trade)}
     selected_without_trade = selected_keys - buy_keys
@@ -14650,6 +14906,11 @@ def _score_row_has_future_data(row: dict[str, Any]) -> bool:
     signal_text = str(row.get("signal_date") or row.get("date") or "")
     if not signal_text:
         return False
+    dynamic_source_date = str(row.get("dynamic_exposure_source_date") or "")
+    if dynamic_source_date and dynamic_source_date >= signal_text:
+        return True
+    if bool(row.get("dynamic_exposure_same_day_context_used", False)):
+        return True
     for key in ["earnings_announcement_date", "earnings_candidate_date", "investor_context_week", "financial_source_date"]:
         value = row.get(key)
         if value and str(value) > signal_text:
@@ -16082,25 +16343,27 @@ def jquants_error_category(exc: Exception) -> str:
     return "temporary API error"
 
 
-def load_cached_prime_prices(fetch_date: date) -> Any:
+def load_cached_prime_prices(fetch_date: date, config: dict[str, Any] | None = None) -> Any:
+    effective_config = config or load_config(CONFIG_PATH)
     path = ROOT / "data" / "raw" / f"prices_{fetch_date.isoformat()}.json"
     if not path.exists():
-        return load_cached_prime_prices_from_jquants_cache(fetch_date)
-    cache_key = _runtime_file_cache_key(path)
+        return load_cached_prime_prices_from_jquants_cache(fetch_date, effective_config)
+    cache_key = (_runtime_file_cache_key(path), _listed_stock_lookup_cache_key(effective_config))
     cache = RUNTIME_MEMORY_CACHE.setdefault("raw_prices_by_date", {})
     cached = cache.get(cache_key) if isinstance(cache, dict) else None
     if cached is not None:
         _record_runtime_memory_cache("raw_prices_by_date", hit=True, size=len(cache))
         return cached
     payload = read_json(path)
-    rows = _enrich_cached_prices_with_market(payload.get("prices", [])) or None
+    rows = _enrich_cached_prices_with_market(payload.get("prices", []), effective_config) or None
     if isinstance(cache, dict):
         cache[cache_key] = rows
         _record_runtime_memory_cache("raw_prices_by_date", hit=False, size=len(cache))
     return rows
 
 
-def load_cached_prime_prices_from_jquants_cache(fetch_date: date) -> list[dict[str, Any]] | None:
+def load_cached_prime_prices_from_jquants_cache(fetch_date: date, config: dict[str, Any] | None = None) -> list[dict[str, Any]] | None:
+    effective_config = config or load_config(CONFIG_PATH)
     path = ROOT / "data" / "cache" / "jquants" / "prices" / f"{fetch_date.isoformat()}.json"
     if not path.exists():
         return None
@@ -16108,16 +16371,16 @@ def load_cached_prime_prices_from_jquants_cache(fetch_date: date) -> list[dict[s
     records = payload.get("records", []) if isinstance(payload, dict) else []
     if not records:
         return None
-    prime_codes = _cached_prime_stock_codes()
+    prime_codes = _cached_prime_stock_codes(effective_config)
     normalized = [_normalize_daily_price(record) for record in records]
     if prime_codes:
         normalized = [record for record in normalized if record.get("code") in prime_codes]
-    normalized = _enrich_cached_prices_with_market(normalized)
+    normalized = _enrich_cached_prices_with_market(normalized, effective_config)
     return normalized or None
 
 
-def _enrich_cached_prices_with_market(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    stock_by_code = _allowed_stock_master_by_code(load_config(CONFIG_PATH))
+def _enrich_cached_prices_with_market(rows: list[dict[str, Any]], config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    stock_by_code = _allowed_stock_master_by_code(config or load_config(CONFIG_PATH))
     if not stock_by_code:
         return rows
     enriched = []
@@ -16132,8 +16395,8 @@ def _enrich_cached_prices_with_market(rows: list[dict[str, Any]]) -> list[dict[s
     return enriched
 
 
-def _cached_prime_stock_codes() -> set[str]:
-    return set(_allowed_stock_master_by_code(load_config(CONFIG_PATH)).keys())
+def _cached_prime_stock_codes(config: dict[str, Any] | None = None) -> set[str]:
+    return set(_allowed_stock_master_by_code(config or load_config(CONFIG_PATH)).keys())
 
 
 def _listed_stock_master_path() -> Path:
@@ -16399,10 +16662,10 @@ def _merge_unsupported_ranges(ranges: list[dict[str, Any]]) -> list[dict[str, An
     return merged
 
 
-def load_cached_price_history(fetch_dates: list[date]) -> list[dict[str, Any]]:
+def load_cached_price_history(fetch_dates: list[date], config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     rows = []
     for fetch_date in fetch_dates:
-        cached_rows = load_cached_prime_prices(fetch_date)
+        cached_rows = load_cached_prime_prices(fetch_date, config)
         if cached_rows:
             rows.extend(cached_rows)
     return rows
@@ -16849,6 +17112,8 @@ def _profile_read_reason_breakdown(audit: dict[str, Any]) -> dict[str, dict[str,
 
 
 def _json_read_path_relevant_for_period_warning(path: Path) -> bool:
+    if _json_read_category(path) == "market_context":
+        return False
     try:
         parts = path.relative_to(ROOT).parts
     except ValueError:
@@ -18543,6 +18808,9 @@ def write_trades_csv(path: Path, trades: list[dict[str, Any]]) -> None:
         "volume_score",
         "candlestick_score",
         "market_context_score",
+        "winner_loser_rule_score",
+        "winner_loser_rule_name",
+        "winner_loser_rule_reason",
         "investor_context_score",
         "sector_score",
         "penalty_score",
@@ -18568,6 +18836,14 @@ def write_trades_csv(path: Path, trades: list[dict[str, Any]]) -> None:
         "earnings_announcement_date",
         "selected_reason",
         "reason",
+        "affordable_fallback_buy_selected",
+        "affordable_fallback_original_code",
+        "affordable_fallback_original_name",
+        "affordable_fallback_reason",
+        "affordable_fallback_round_lot_amount",
+        "affordable_fallback_attempted",
+        "affordable_fallback_replaced_by_code",
+        "affordable_fallback_no_candidate",
         "broker_provider",
         "order_status",
         "config_version",

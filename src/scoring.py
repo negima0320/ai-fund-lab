@@ -8,6 +8,7 @@ from typing import Any
 from candlestick import detect_candlestick_signals
 from earnings_calendar import EARNINGS_FILTER_REJECTED_REASON, earnings_filter_result
 from market_sections import allowed_market_sections, market_section_counts, market_section_from_row
+from market_regime import classify_market_regime
 
 
 def score_candidates(screening_log: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
@@ -153,15 +154,26 @@ def score_real_candidates(
     config: dict[str, Any],
     source_provider: str,
     market_context: dict[str, Any] | None = None,
+    dynamic_exposure_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     scored = []
     selection_config = _selection_config(config)
     volume_filter = _volume_filter_config(config)
     rsi_volume_hot_zone_filter = _rsi_volume_hot_zone_filter_config(config)
     affordability_filter = _affordability_filter_config(config)
+    winner_loser_rule_adjustment = _winner_loser_rule_adjustment_config(config)
     market_filter = _market_filter_config(config)
     market_regime = str((market_context or {}).get("market_regime") or "neutral")
     advance_ratio = _optional_float((market_context or {}).get("advance_ratio"))
+    market_average_change_rate = _optional_float((market_context or {}).get("average_change_rate"))
+    classified_market_regime = classify_market_regime(advance_ratio, market_average_change_rate, market_regime)
+    dynamic_context = dynamic_exposure_context or {}
+    dynamic_market_context = dynamic_context.get("market_context") if isinstance(dynamic_context.get("market_context"), dict) else {}
+    dynamic_regime = str(dynamic_context.get("regime") or "") or classify_market_regime(
+        _optional_float(dynamic_market_context.get("advance_ratio")),
+        _optional_float(dynamic_market_context.get("average_change_rate")),
+        dynamic_market_context.get("market_regime"),
+    )
     earnings_calendar_records_count = len(config.get("_earnings_calendar_records") or [])
     earnings_pipeline = {}
     earnings_metadata = config.get("_earnings_calendar_metadata")
@@ -188,14 +200,16 @@ def score_real_candidates(
             rsi_volume_hot_zone_filter,
         )
         affordability = _affordability_adjustment(candidate, affordability_filter, config)
+        winner_loser_rule = _winner_loser_rule_adjustment(candidate, winner_loser_rule_adjustment)
         total_penalty = rsi_selection["penalty"] + affordability["penalty"]
-        total = max(0, total_before_selection_adjustment - total_penalty)
+        total = max(0, total_before_selection_adjustment - total_penalty + winner_loser_rule["score_adjustment"])
         score_components = _score_components(
             technical_parts=technical_parts,
             market_context_score=market_context_score,
             relative_strength_score=relative_strength_score,
             investor_context_score=investor_context_score,
             penalty_score=-total_penalty,
+            winner_loser_rule_score=winner_loser_rule["score_adjustment"],
             total_score=total,
         )
         confidence = _real_confidence(candidate, technical)
@@ -213,6 +227,9 @@ def score_real_candidates(
                 f"{score_reason}、100株購入金額が{affordability['preferred_round_lot_amount']:.0f}円を超えたため"
                 f"資金効率ペナルティ{affordability['penalty']:.0f}点"
             )
+        if winner_loser_rule["score_adjustment"]:
+            direction = "加点" if winner_loser_rule["score_adjustment"] > 0 else "減点"
+            score_reason = f"{score_reason}、{winner_loser_rule['reason']}のため{direction}{abs(winner_loser_rule['score_adjustment']):.0f}点"
         if rsi_selection["excluded"]:
             score_reason = f"{score_reason}、RSI過熱のため新規買付見送り"
         if volume_selection["excluded"]:
@@ -291,6 +308,11 @@ def score_real_candidates(
                 "preferred_round_lot_amount": affordability["preferred_round_lot_amount"],
                 "price_band_penalty": affordability["penalty"],
                 "price_band_penalty_reason": affordability["reason"],
+                "winner_loser_rule_adjustment_enabled": winner_loser_rule["enabled"],
+                "winner_loser_rule_triggered": winner_loser_rule["triggered"],
+                "winner_loser_rule_name": winner_loser_rule["rule_name"],
+                "winner_loser_rule_score": winner_loser_rule["score_adjustment"],
+                "winner_loser_rule_reason": winner_loser_rule["reason"],
                 "topix_records_loaded": candidate.get("topix_records_loaded"),
                 "topix_api_calls": candidate.get("topix_api_calls"),
                 "topix_cache_path": candidate.get("topix_cache_path"),
@@ -331,6 +353,7 @@ def score_real_candidates(
                 "total_score": total,
                 "rsi_selection_penalty": rsi_selection["penalty"],
                 "affordability_penalty": affordability["penalty"],
+                "winner_loser_rule_adjustment": winner_loser_rule["score_adjustment"],
                 "rsi_selection_excluded": rsi_selection["excluded"],
                 "rsi_filter_threshold": rsi_selection["threshold"],
                 "volume_filter_excluded": volume_selection["excluded"],
@@ -357,6 +380,14 @@ def score_real_candidates(
                 "market_filter_applied": False,
                 "market_regime": market_regime,
                 "advance_ratio": advance_ratio,
+                "market_average_change_rate": market_average_change_rate,
+                "classified_market_regime": classified_market_regime,
+                "dynamic_exposure_regime": dynamic_regime,
+                "dynamic_exposure_source_date": dynamic_context.get("source_date", ""),
+                "dynamic_exposure_source_date_mode": "previous_trading_day",
+                "dynamic_exposure_source_lag_days": dynamic_context.get("lag_days"),
+                "dynamic_exposure_source_fallback_used": bool(dynamic_context.get("fallback_used", False)),
+                "dynamic_exposure_same_day_context_used": bool(dynamic_context.get("same_day_used", False)),
                 "market_filter_reason": "",
                 "earnings_filter_checked": earnings_result["checked"],
                 "earnings_filter_blocked": earnings_result["blocked"],
@@ -414,6 +445,7 @@ def score_real_candidates(
         },
         "selection_config": selection_config,
         "market_context": market_context or {},
+        "dynamic_exposure_context": dynamic_context,
         "market_filter": market_filter_summary,
         "scores": scored,
         "selected": [item for item in scored if item["selected"]],
@@ -649,6 +681,53 @@ def _affordability_adjustment(candidate: dict[str, Any], policy: dict[str, Any],
     }
 
 
+def _winner_loser_rule_adjustment_config(config: dict[str, Any]) -> dict[str, Any]:
+    policy = config.get("winner_loser_rule_adjustment", {})
+    if not isinstance(policy, dict):
+        policy = {}
+    return {
+        "enabled": bool(policy.get("enabled", False)),
+        "rule_name": str(policy.get("rule_name") or ""),
+        "score_adjustment": float(policy.get("score_adjustment", 0) or 0),
+        "volume_ratio_min": _optional_float(policy.get("volume_ratio_min")),
+        "volume_ratio_max": _optional_float(policy.get("volume_ratio_max")),
+        "sector_name": str(policy.get("sector_name") or ""),
+        "reason": str(policy.get("reason") or policy.get("rule_name") or "winner_loser_rule_adjustment"),
+    }
+
+
+def _winner_loser_rule_adjustment(candidate: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    enabled = bool(policy.get("enabled", False))
+    result = {
+        "enabled": enabled,
+        "triggered": False,
+        "rule_name": str(policy.get("rule_name") or ""),
+        "score_adjustment": 0.0,
+        "reason": "",
+    }
+    if not enabled:
+        return result
+
+    volume_ratio = _optional_float(candidate.get("volume_ratio"))
+    min_volume_ratio = policy.get("volume_ratio_min")
+    max_volume_ratio = policy.get("volume_ratio_max")
+    if min_volume_ratio is not None:
+        if volume_ratio is None or volume_ratio < float(min_volume_ratio):
+            return result
+    if max_volume_ratio is not None:
+        if volume_ratio is None or volume_ratio > float(max_volume_ratio):
+            return result
+
+    sector_name = str(policy.get("sector_name") or "")
+    if sector_name and str(candidate.get("sector_name") or "") != sector_name:
+        return result
+
+    result["triggered"] = True
+    result["score_adjustment"] = float(policy.get("score_adjustment") or 0.0)
+    result["reason"] = str(policy.get("reason") or policy.get("rule_name") or "winner_loser_rule_adjustment")
+    return result
+
+
 def _candidate_round_lot_price(candidate: dict[str, Any]) -> float | None:
     for key in [
         "entry_candidate_price",
@@ -678,6 +757,7 @@ def _score_components(
     total_score: float,
     relative_strength_score: float = 0,
     investor_context_score: float = 0,
+    winner_loser_rule_score: float = 0,
 ) -> dict[str, Any]:
     ma_score = float(technical_parts.get("trend_score") or 0)
     rsi_score = float(technical_parts.get("rsi_score") or 0)
@@ -694,6 +774,7 @@ def _score_components(
         "market_context_score": float(market_context_score or 0),
         "relative_strength_score": float(relative_strength_score or 0),
         "investor_context_score": float(investor_context_score or 0),
+        "winner_loser_rule_score": float(winner_loser_rule_score or 0),
         "sector_score": sector_score,
         "penalty_score": float(penalty_score or 0),
     }
@@ -999,6 +1080,8 @@ def _score_formula_label(config: dict[str, Any]) -> str:
         parts.append("relative_strength_score")
     if config.get("scoring", {}).get("use_investor_context_score"):
         parts.append("investor_context_score")
+    if bool((config.get("winner_loser_rule_adjustment", {}) or {}).get("enabled", False)):
+        parts.append("winner_loser_rule_score")
     parts.extend(["market_context_score", "penalty_score"])
     return " + ".join(parts)
 

@@ -3,11 +3,11 @@
 ## 実行条件
 
 - 期間: 2026-01-01 〜 2026-03-06
-- profile: rookie_dealer_02_v2_19 新人ディーラー2号 v2.19
+- profile: rookie_dealer_02_v2_42 新人ディーラー2号 v2.42
 - provider: jquants
 - ChatGPT/OpenAI: disabled
 - broker: paper
-- config_version: cfg_3ad5dac
+- config_version: cfg_fd95e97
 
 ## Backtest Date Range Audit
 
@@ -54,16 +54,16 @@
 ### Hardcoded Date Audit
 
 - target: 2026-03-06
-- match_count: 415
+- match_count: 493
 - warning: 2026-03-06 remains in config/src/docs/reports/README
 
 ### Processed Data Audit
 
-- indicators_last_date: 2026-05-29
-- candidates_last_date: 2026-05-29
+- indicators_last_date: None
+- candidates_last_date: 2026-03-06
 - scored_candidates_last_date: 2026-03-06
-- indicators_count: 1221
-- candidates_file_count: 1221
+- indicators_count: 0
+- candidates_file_count: 42
 - scored_candidates_file_count: 42
 - dates_with_indicators_but_no_candidates: 0
 - dates_with_candidates_but_no_scored: 0
@@ -76,21 +76,21 @@
 - match: reports/backtest_2026-03-06_to_2026-03-06.json
 - match: reports/backtest_2026-03-06_to_2026-03-06.md
 - match: reports/day_2026-03-06.md
-- match: reports/rookie_dealer_02_v2_2/backtest_2025-03-01_to_2026-03-06.json
+- match: reports/rookie_dealer_02_v2_34/backtest_2021-06-01_to_2026-05-29.md
 
 ## 結果サマリ
 
 - 初期資金: 1,000,000円
-- 最終資産: 1,077,026円
-- 税引前損益: 60,526円
-- 税引後損益: 48,230円
-- 税引後損益率: 4.82%
-- 勝率: 47.62%
-- profit factor: 1.64
-- 最大ドローダウン: -5.71%
-- 総取引数: 21
-- 利確回数: 3
-- 損切り回数: 9
+- 最終資産: 1,091,754円
+- 税引前損益: 75,254円
+- 税引後損益: 59,966円
+- 税引後損益率: 6.00%
+- 勝率: 54.55%
+- profit factor: 1.71
+- 最大ドローダウン: -6.24%
+- 総取引数: 22
+- 利確回数: 5
+- 損切り回数: 8
 - 最大保有期間売却回数: 9
 - no trade日数: 15
 - selected_count合計: 84

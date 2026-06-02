@@ -68,6 +68,9 @@ def test_run_experiments_selects_registry_profiles() -> None:
     assert profiles == [
         "rookie_dealer_02_v2_10",
         "rookie_dealer_02_v2_11",
+        "rookie_dealer_02_v2_12",
+        "rookie_dealer_02_v2_13",
+        "rookie_dealer_02_v2_14",
         "rookie_dealer_02_v2_6",
         "rookie_dealer_02_v2_7",
         "rookie_dealer_02_v2_8",
@@ -101,7 +104,41 @@ def test_run_experiments_selects_v2_19_capital_exposure_profiles() -> None:
         "rookie_dealer_02_v2_23",
         "rookie_dealer_02_v2_24",
         "rookie_dealer_02_v2_25",
+        "rookie_dealer_02_v2_26",
+        "rookie_dealer_02_v2_27",
+        "rookie_dealer_02_v2_28",
     ]
+
+
+def test_run_experiments_selects_v2_26_dynamic_exposure_profiles() -> None:
+    registry = main_module.load_profile_registry()
+
+    profiles = main_module.select_experiment_profiles("rookie_dealer_02_v2_26", registry, None)
+
+    assert profiles == [
+        "rookie_dealer_02_v2_29",
+        "rookie_dealer_02_v2_30",
+        "rookie_dealer_02_v2_31",
+        "rookie_dealer_02_v2_32",
+        "rookie_dealer_02_v2_33",
+        "rookie_dealer_02_v2_34",
+        "rookie_dealer_02_v2_35",
+        "rookie_dealer_02_v2_36",
+        "rookie_dealer_02_v2_37",
+        "rookie_dealer_02_v2_38",
+        "rookie_dealer_02_v2_39",
+        "rookie_dealer_02_v2_40",
+        "rookie_dealer_02_v2_41",
+        "rookie_dealer_02_v2_42",
+    ]
+
+
+def test_run_experiments_has_no_direct_v2_37_children() -> None:
+    registry = main_module.load_profile_registry()
+
+    profiles = main_module.select_experiment_profiles("rookie_dealer_02_v2_37", registry, None)
+
+    assert profiles == []
 
 
 def test_affordability_filter_changes_scoring_reuse_signature() -> None:
@@ -111,11 +148,18 @@ def test_affordability_filter_changes_scoring_reuse_signature() -> None:
     assert main_module._experiment_scoring_signature(base) != main_module._experiment_scoring_signature(affordability)
 
 
+def test_dynamic_exposure_changes_scoring_reuse_signature() -> None:
+    base = main_module.load_profile("rookie_dealer_02_v2_26")
+    adjusted = main_module.load_profile("rookie_dealer_02_v2_33")
+
+    assert main_module._experiment_scoring_signature(base) != main_module._experiment_scoring_signature(adjusted)
+
+
 def test_run_experiments_skip_backtest_writes_summary(tmp_path, monkeypatch) -> None:
     calls: list[tuple] = []
     monkeypatch.setattr(main_module, "ROOT", tmp_path)
     monkeypatch.setattr(main_module, "run_backtest", lambda *args: calls.append(("backtest", args)))
-    monkeypatch.setattr(main_module, "run_analyze", lambda *args: calls.append(("analyze", args)))
+    monkeypatch.setattr(main_module, "run_analyze", lambda *args: calls.append(("analyze", args)) or {})
     monkeypatch.setattr(main_module, "run_compare_profiles", lambda *args: calls.append(("compare", args)))
     monkeypatch.setattr(main_module, "_ensure_experiment_db_rows", lambda *args: None)
 
@@ -150,7 +194,7 @@ def test_run_experiments_skip_analyze_skips_analyze_step(tmp_path, monkeypatch) 
     calls: list[tuple] = []
     monkeypatch.setattr(main_module, "ROOT", tmp_path)
     monkeypatch.setattr(main_module, "run_backtest", lambda *args: calls.append(("backtest", args)))
-    monkeypatch.setattr(main_module, "run_analyze", lambda *args: calls.append(("analyze", args)))
+    monkeypatch.setattr(main_module, "run_analyze", lambda *args: calls.append(("analyze", args)) or {})
     monkeypatch.setattr(main_module, "run_compare_profiles", lambda *args: calls.append(("compare", args)))
     monkeypatch.setattr(
         main_module,
@@ -185,7 +229,7 @@ def test_summary_only_still_runs_analyze_for_feature_audits(tmp_path, monkeypatc
     monkeypatch.setattr(main_module, "ROOT", tmp_path)
     monkeypatch.setattr(main_module, "SUMMARY_ONLY_ACTIVE", True)
     monkeypatch.setattr(main_module, "run_backtest", lambda *args: calls.append(("backtest", args)))
-    monkeypatch.setattr(main_module, "run_analyze", lambda *args: calls.append(("analyze", args)))
+    monkeypatch.setattr(main_module, "run_analyze", lambda *args: calls.append(("analyze", args)) or {})
     monkeypatch.setattr(main_module, "run_compare_profiles", lambda *args: calls.append(("compare", args)))
     monkeypatch.setattr(
         main_module,
@@ -473,6 +517,11 @@ def test_experiment_summary_row_includes_feature_activation() -> None:
         "feature_data_enabled": {"financial_context": True},
         "feature_scoring_enabled": {"financial_context": False},
         "feature_trigger_count": {"financial_context": 0},
+        "market_scored_count": {"Prime": 1, "Standard": 2},
+        "market_buy_trade_count": {"Prime": 1, "Standard": 1},
+        "market_sell_trade_count": {"Prime": 1, "Standard": 1},
+        "market_profit_by_section": {"Prime": 1000, "Standard": -500},
+        "market_profit_factor_by_section": {"Prime": None, "Standard": 0.5},
         "earnings_calendar_records": 3,
         "earnings_filter_rejected_count": 1,
         "earnings_filter_status": "active",
@@ -487,6 +536,8 @@ def test_experiment_summary_row_includes_feature_activation() -> None:
     assert '{"financial_context":true}' in rendered
     assert '{"financial_context":false}' in rendered
     assert '{"financial_context":0}' in rendered
+    assert '{"Prime":1,"Standard":2}' in rendered
+    assert '{"Prime":1000,"Standard":-500}' in rendered
     assert "| 3 | 1 | active |" in rendered
 
 

@@ -37,6 +37,23 @@ PROFILE_ALIASES = {
     "rookie_dealer_02_v2.23": "rookie_dealer_02_v2_23",
     "rookie_dealer_02_v2.24": "rookie_dealer_02_v2_24",
     "rookie_dealer_02_v2.25": "rookie_dealer_02_v2_25",
+    "rookie_dealer_02_v2.26": "rookie_dealer_02_v2_26",
+    "rookie_dealer_02_v2.27": "rookie_dealer_02_v2_27",
+    "rookie_dealer_02_v2.28": "rookie_dealer_02_v2_28",
+    "rookie_dealer_02_v2.29": "rookie_dealer_02_v2_29",
+    "rookie_dealer_02_v2.30": "rookie_dealer_02_v2_30",
+    "rookie_dealer_02_v2.31": "rookie_dealer_02_v2_31",
+    "rookie_dealer_02_v2.32": "rookie_dealer_02_v2_32",
+    "rookie_dealer_02_v2.33": "rookie_dealer_02_v2_33",
+    "rookie_dealer_02_v2.34": "rookie_dealer_02_v2_34",
+    "rookie_dealer_02_v2.35": "rookie_dealer_02_v2_35",
+    "rookie_dealer_02_v2.36": "rookie_dealer_02_v2_36",
+    "rookie_dealer_02_v2.37": "rookie_dealer_02_v2_37",
+    "rookie_dealer_02_v2.38": "rookie_dealer_02_v2_38",
+    "rookie_dealer_02_v2.39": "rookie_dealer_02_v2_39",
+    "rookie_dealer_02_v2.40": "rookie_dealer_02_v2_40",
+    "rookie_dealer_02_v2.41": "rookie_dealer_02_v2_41",
+    "rookie_dealer_02_v2.42": "rookie_dealer_02_v2_42",
 }
 
 

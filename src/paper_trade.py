@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import random
+from functools import cmp_to_key
 from typing import Any
 
 from broker import build_broker
 from commentary import generate_buy_comment, generate_no_trade_comment, generate_sell_comment
 from market_sections import market_section_allowed
+from market_regime import classify_market_regime, dynamic_exposure_policy, dynamic_exposure_target
 from safety import can_trade, safety_event
 from tax import calculate_period_profit_summary
 
@@ -497,6 +499,8 @@ def _available_buy_budget(
     state: dict[str, Any],
     config: dict[str, Any],
     pending_buy_amount: float = 0.0,
+    allocation_budget: float | None = None,
+    market_context: dict[str, Any] | None = None,
 ) -> tuple[float, str]:
     base_allocation = initial_cash * float(config["portfolio"]["max_allocation_per_symbol"])
     policy = _capital_utilization_policy(config)
@@ -526,12 +530,225 @@ def _available_buy_budget(
 
     target_exposure = policy.get("target_exposure")
     if target_exposure is not None:
-        remaining_exposure = total_assets * float(target_exposure) - _current_market_exposure(state) - pending_buy_amount
+        dynamic_regime = _dynamic_exposure_regime(market_context or {})
+        target_exposure, _dynamic_triggered = dynamic_exposure_target(config, dynamic_regime, target_exposure)
+    if target_exposure is not None:
+        pending_for_exposure = 0.0 if str(policy.get("allocation_strategy") or "") == "relaxed_pending_target_exposure" else pending_buy_amount
+        remaining_exposure = total_assets * float(target_exposure) - _current_market_exposure(state) - pending_for_exposure
         if remaining_exposure <= 0:
             return 0.0, "target_exposure_limit"
         position_cap = min(position_cap, remaining_exposure)
 
+    if allocation_budget is not None:
+        position_cap = min(position_cap, float(allocation_budget))
+        return max(0.0, min(cash_available, position_cap)), "same_day_allocation_budget"
+
     return max(0.0, min(cash_available, position_cap)), "capital_utilization_policy"
+
+
+def _allocation_strategy(config: dict[str, Any]) -> str:
+    policy = _capital_utilization_policy(config)
+    return str(policy.get("allocation_strategy") or "sequential").strip() or "sequential"
+
+
+def _affordable_fallback_policy(config: dict[str, Any]) -> dict[str, Any]:
+    policy = config.get("affordable_fallback_buy")
+    return policy if isinstance(policy, dict) else {}
+
+
+def _affordable_fallback_enabled(config: dict[str, Any]) -> bool:
+    return bool(_affordable_fallback_policy(config).get("enabled", False))
+
+
+def _dynamic_exposure_regime(item: dict[str, Any]) -> str:
+    existing = str(item.get("dynamic_exposure_regime") or item.get("classified_market_regime") or "")
+    if existing:
+        return existing
+    return classify_market_regime(
+        item.get("advance_ratio"),
+        item.get("market_average_change_rate", item.get("average_change_rate")),
+        item.get("market_regime"),
+    )
+
+
+def _dynamic_exposure_log_fields(config: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    policy = dynamic_exposure_policy(config)
+    enabled = bool(policy.get("enabled", False))
+    default_target = _capital_utilization_policy(config).get("target_exposure")
+    regime = _dynamic_exposure_regime(item)
+    target, triggered = dynamic_exposure_target(config, regime, default_target)
+    return {
+        "dynamic_exposure_enabled": enabled,
+        "dynamic_exposure_regime": regime,
+        "dynamic_target_exposure": target,
+        "dynamic_exposure_triggered": bool(triggered),
+        "dynamic_exposure_source_date": item.get("dynamic_exposure_source_date", ""),
+        "dynamic_exposure_source_date_mode": item.get("dynamic_exposure_source_date_mode", "previous_trading_day"),
+        "dynamic_exposure_source_lag_days": item.get("dynamic_exposure_source_lag_days"),
+        "dynamic_exposure_source_fallback_used": bool(item.get("dynamic_exposure_source_fallback_used", False)),
+        "dynamic_exposure_same_day_context_used": bool(item.get("dynamic_exposure_same_day_context_used", False)),
+        "market_average_change_rate": item.get("market_average_change_rate", item.get("average_change_rate")),
+        "classified_market_regime": item.get("classified_market_regime") or regime,
+    }
+
+
+def _candidate_round_lot_amount(item: dict[str, Any], config: dict[str, Any]) -> float:
+    price = _candidate_entry_price(item)
+    return price * _round_lot_size(config)
+
+
+def _available_cash_after_buffer(cash: float, pending_buy_amount: float, config: dict[str, Any]) -> float:
+    min_cash_buffer = float(_capital_utilization_policy(config).get("min_cash_buffer", 0) or 0)
+    return max(0.0, cash - pending_buy_amount - min_cash_buffer)
+
+
+def _is_affordable_fallback_skip_reason(reason: str) -> bool:
+    return reason in {
+        "selected_but_not_affordable",
+        "round_lot_unaffordable",
+        "insufficient_available_cash",
+        "target_exposure_limit",
+    }
+
+
+def _find_affordable_fallback_candidate(
+    scored_candidates: list[dict[str, Any]],
+    original: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    allocation_limit: float,
+    cash: float,
+    pending_buy_amount: float,
+    held_codes: set[str],
+    pending_buy_codes: set[str],
+    same_day_regular_selected_codes: set[str] | None = None,
+    diagnostics: dict[str, int] | None = None,
+) -> dict[str, Any] | None:
+    if not _affordable_fallback_enabled(config) or allocation_limit <= 0:
+        return None
+    policy = _affordable_fallback_policy(config)
+    selection = config.get("selection", {})
+    regular_min_score = float(selection.get("min_score", 0) or 0)
+    fallback_min_score = float(selection.get("fallback_min_score", selection.get("top_pick_min_score", regular_min_score)) or 0)
+    configured_min_score = policy.get("min_total_score")
+    configured_min_score = float(configured_min_score) if configured_min_score is not None else None
+    max_rank_in_day = policy.get("max_rank_in_day")
+    max_rank_in_day = int(max_rank_in_day) if max_rank_in_day is not None else None
+    min_confidence = float(selection.get("min_confidence", config.get("scoring", {}).get("confidence_min_for_buy", 0.0)) or 0)
+    signal_date = str(original.get("signal_date") or original.get("date") or "")
+    available_cash = _available_cash_after_buffer(cash, pending_buy_amount, config)
+    blocked_codes = set(held_codes) | set(pending_buy_codes) | set(same_day_regular_selected_codes or set()) | {str(original.get("code") or "")}
+    candidates = []
+    for candidate in scored_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        code = str(candidate.get("code") or "")
+        if not code or code in blocked_codes:
+            continue
+        candidate_signal_date = str(candidate.get("signal_date") or candidate.get("date") or "")
+        if signal_date and candidate_signal_date != signal_date:
+            continue
+        if not market_section_allowed(candidate, config):
+            continue
+        if candidate.get("entry_price_available") is False:
+            continue
+        score = float(candidate.get("total_score") or candidate.get("score") or 0)
+        if configured_min_score is not None and score < configured_min_score:
+            if diagnostics is not None:
+                diagnostics["fallback_score_below_min_count"] = diagnostics.get("fallback_score_below_min_count", 0) + 1
+            continue
+        rank_value = candidate.get("daily_score_rank") if candidate.get("daily_score_rank") is not None else candidate.get("rank")
+        rank = int(rank_value) if rank_value not in {None, ""} else None
+        if max_rank_in_day is not None and (rank is None or rank > max_rank_in_day):
+            if diagnostics is not None:
+                diagnostics["fallback_rank_out_of_range_count"] = diagnostics.get("fallback_rank_out_of_range_count", 0) + 1
+            continue
+        confidence = float(candidate.get("confidence") or 0)
+        if confidence < min_confidence or score < fallback_min_score:
+            continue
+        round_lot_amount = _candidate_round_lot_amount(candidate, config)
+        if round_lot_amount <= 0 or round_lot_amount > allocation_limit or round_lot_amount > available_cash:
+            continue
+        regular_priority = 0 if score >= regular_min_score else 1
+        candidates.append((regular_priority, -score, round_lot_amount, code, candidate))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+    return dict(candidates[0][4])
+
+
+def _sort_selected_candidates(selected: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
+    strategy = _allocation_strategy(config)
+    if strategy != "round_lot_priority_near_score":
+        return sorted(selected, key=lambda item: (float(item["total_score"]), float(item["confidence"])), reverse=True)
+
+    tolerance = float(_capital_utilization_policy(config).get("round_lot_priority_score_tolerance", 3) or 3)
+
+    def compare(left: dict[str, Any], right: dict[str, Any]) -> int:
+        left_score = float(left["total_score"])
+        right_score = float(right["total_score"])
+        if abs(left_score - right_score) <= tolerance:
+            left_lot = _candidate_round_lot_amount(left, config)
+            right_lot = _candidate_round_lot_amount(right, config)
+            if left_lot != right_lot:
+                return -1 if left_lot < right_lot else 1
+        if left_score != right_score:
+            return -1 if left_score > right_score else 1
+        left_confidence = float(left["confidence"])
+        right_confidence = float(right["confidence"])
+        if left_confidence != right_confidence:
+            return -1 if left_confidence > right_confidence else 1
+        left_code = str(left.get("code") or "")
+        right_code = str(right.get("code") or "")
+        if left_code == right_code:
+            return 0
+        return -1 if left_code < right_code else 1
+
+    return sorted(selected, key=cmp_to_key(compare))
+
+
+def _eligible_same_day_buy_candidates(
+    selected: list[dict[str, Any]],
+    next_positions: list[dict[str, Any]],
+    pending_buy_codes: set[str],
+    max_positions: int,
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    held_codes = {position["code"] for position in next_positions}
+    slots = max(0, max_positions - len(next_positions) - len(pending_buy_codes))
+    eligible: list[dict[str, Any]] = []
+    for item in selected:
+        if len(eligible) >= slots:
+            break
+        code = str(item.get("code") or "")
+        if code in held_codes or code in pending_buy_codes:
+            continue
+        if item.get("entry_price_available") is False:
+            continue
+        if not market_section_allowed(item, config):
+            continue
+        eligible.append(item)
+    return eligible
+
+
+def _same_day_allocation_budgets(
+    selected: list[dict[str, Any]],
+    cash: float,
+    initial_cash: float,
+    state: dict[str, Any],
+    config: dict[str, Any],
+    next_positions: list[dict[str, Any]],
+    pending_buy_codes: set[str],
+    max_positions: int,
+) -> dict[str, float]:
+    if _allocation_strategy(config) != "same_day_equal_budget":
+        return {}
+    eligible = _eligible_same_day_buy_candidates(selected, next_positions, pending_buy_codes, max_positions, config)
+    if not eligible:
+        return {}
+    total_budget, _reason = _available_buy_budget(cash, initial_cash, state, config, pending_buy_amount=0.0)
+    per_candidate = total_budget / len(eligible) if eligible else 0.0
+    return {str(item.get("code") or ""): per_candidate for item in eligible}
 
 
 def _skipped_buy_attempt(
@@ -546,8 +763,10 @@ def _skipped_buy_attempt(
     reason: str,
     skipped_reason: str,
     config: dict[str, Any],
+    allocation_reason: str = "",
+    extra_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    event = {
         "trade_id": trade_id,
         "action": action,
         "code": code,
@@ -557,6 +776,8 @@ def _skipped_buy_attempt(
         "shares": 0,
         "amount": 0,
         "allocation_limit": round(allocation_limit, 2),
+        "allocation_reason": allocation_reason,
+        "allocation_strategy": _allocation_strategy(config),
         "score": score,
         "reason": reason,
         "round_lot_size": _round_lot_size(config),
@@ -564,6 +785,9 @@ def _skipped_buy_attempt(
         "skipped_reason": skipped_reason,
         "dealer_comment": generate_no_trade_comment(skipped_reason, config),
     }
+    if extra_fields:
+        event.update(extra_fields)
+    return event
 
 
 def _use_round_lot(config: dict[str, Any]) -> bool:
@@ -596,6 +820,9 @@ def _technical_snapshot(item: dict[str, Any]) -> dict[str, Any]:
         "rsi_score": item.get("rsi_score"),
         "candlestick_score": item.get("candlestick_score"),
         "market_context_score": item.get("market_context_score"),
+        "winner_loser_rule_score": item.get("winner_loser_rule_score"),
+        "winner_loser_rule_name": item.get("winner_loser_rule_name"),
+        "winner_loser_rule_reason": item.get("winner_loser_rule_reason"),
         "sector_score": item.get("sector_score") or item.get("sector_score_adjustment"),
         "penalty_score": item.get("penalty_score"),
         "score_components": item.get("score_components", {}),
@@ -633,6 +860,22 @@ def _technical_snapshot(item: dict[str, Any]) -> dict[str, Any]:
         "market_filter_applied": item.get("market_filter_applied", False),
         "market_regime": item.get("market_regime"),
         "advance_ratio": item.get("advance_ratio"),
+        "market_average_change_rate": item.get("market_average_change_rate"),
+        "classified_market_regime": item.get("classified_market_regime"),
+        "dynamic_exposure_enabled": item.get("dynamic_exposure_enabled"),
+        "dynamic_exposure_regime": item.get("dynamic_exposure_regime"),
+        "dynamic_target_exposure": item.get("dynamic_target_exposure"),
+        "dynamic_exposure_triggered": item.get("dynamic_exposure_triggered"),
+        "dynamic_exposure_source_date": item.get("dynamic_exposure_source_date"),
+        "dynamic_exposure_source_date_mode": item.get("dynamic_exposure_source_date_mode"),
+        "dynamic_exposure_source_lag_days": item.get("dynamic_exposure_source_lag_days"),
+        "dynamic_exposure_source_fallback_used": item.get("dynamic_exposure_source_fallback_used"),
+        "dynamic_exposure_same_day_context_used": item.get("dynamic_exposure_same_day_context_used"),
+        "affordable_fallback_buy_selected": item.get("affordable_fallback_buy_selected", False),
+        "affordable_fallback_original_code": item.get("affordable_fallback_original_code"),
+        "affordable_fallback_original_name": item.get("affordable_fallback_original_name"),
+        "affordable_fallback_reason": item.get("affordable_fallback_reason"),
+        "affordable_fallback_round_lot_amount": item.get("affordable_fallback_round_lot_amount"),
         "market_filter_reason": item.get("market_filter_reason", ""),
         "earnings_filter_checked": item.get("earnings_filter_checked", False),
         "earnings_filter_blocked": item.get("earnings_filter_blocked", False),
@@ -666,6 +909,9 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "rsi_score",
         "candlestick_score",
         "market_context_score",
+        "winner_loser_rule_score",
+        "winner_loser_rule_name",
+        "winner_loser_rule_reason",
         "sector_score",
         "penalty_score",
         "score_components",
@@ -703,6 +949,22 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "market_filter_applied",
         "market_regime",
         "advance_ratio",
+        "market_average_change_rate",
+        "classified_market_regime",
+        "dynamic_exposure_enabled",
+        "dynamic_exposure_regime",
+        "dynamic_target_exposure",
+        "dynamic_exposure_triggered",
+        "dynamic_exposure_source_date",
+        "dynamic_exposure_source_date_mode",
+        "dynamic_exposure_source_lag_days",
+        "dynamic_exposure_source_fallback_used",
+        "dynamic_exposure_same_day_context_used",
+        "affordable_fallback_buy_selected",
+        "affordable_fallback_original_code",
+        "affordable_fallback_original_name",
+        "affordable_fallback_reason",
+        "affordable_fallback_round_lot_amount",
         "market_filter_reason",
         "earnings_filter_checked",
         "earnings_filter_blocked",
@@ -998,9 +1260,22 @@ def execute_real_data_paper_trade(
         for item in scored_candidates
         if item.get("selected") and float(item["total_score"]) >= min_score and float(item["confidence"]) >= min_confidence
     ]
-    selected.sort(key=lambda item: (float(item["total_score"]), float(item["confidence"])), reverse=True)
+    selected = _sort_selected_candidates(selected, config)
+    same_day_regular_selected_codes = {str(item.get("code") or "") for item in selected if item.get("code")}
+    same_day_allocation_budgets = _same_day_allocation_budgets(
+        selected,
+        cash,
+        initial_cash,
+        state,
+        config,
+        next_positions,
+        pending_buy_codes,
+        max_positions,
+    )
     buy_candidates = []
     for item in selected:
+        dynamic_exposure_fields = _dynamic_exposure_log_fields(config, item)
+        item.update(dynamic_exposure_fields)
         if not market_section_allowed(item, config):
             trades.append(
                 _skipped_buy_attempt(
@@ -1015,6 +1290,8 @@ def execute_real_data_paper_trade(
                     reason=item.get("selection_reason") or item.get("selected_reason") or item["reason"],
                     skipped_reason="market_filter_excluded",
                     config=config,
+                    allocation_reason="market_filter_excluded",
+                    extra_fields=dynamic_exposure_fields,
                 )
             )
             continue
@@ -1032,6 +1309,8 @@ def execute_real_data_paper_trade(
                     reason=item.get("selection_reason") or item.get("selected_reason") or item["reason"],
                     skipped_reason="max_positions_limit",
                     config=config,
+                    allocation_reason="max_positions_limit",
+                    extra_fields=dynamic_exposure_fields,
                 )
             )
             continue
@@ -1051,15 +1330,21 @@ def execute_real_data_paper_trade(
                     reason=item.get("selection_reason") or item.get("selected_reason") or item["reason"],
                     skipped_reason="entry_dateの価格データがないため買付見送り",
                     config=config,
+                    allocation_reason="next_day_entry_missing",
+                    extra_fields=dynamic_exposure_fields,
                 )
             )
             continue
+        allocation_budget = same_day_allocation_budgets.get(str(item.get("code") or ""))
+        pending_buy_amount = 0.0 if allocation_budget is not None else sum(float(order.get("estimated_amount") or order.get("amount") or 0) for order in buy_candidates)
         allocation, allocation_reason = _available_buy_budget(
             cash,
             initial_cash,
             state,
             config,
-            pending_buy_amount=sum(float(order.get("estimated_amount") or order.get("amount") or 0) for order in buy_candidates),
+            pending_buy_amount=pending_buy_amount,
+            allocation_budget=allocation_budget,
+            market_context=item,
         )
         entry_price = _candidate_entry_price(item)
         current_price = _candidate_market_price(item, entry_price)
@@ -1068,6 +1353,96 @@ def execute_real_data_paper_trade(
             skipped_reason = allocation_reason
         elif shares <= 0 and _capital_utilization_enabled(config):
             skipped_reason = "selected_but_not_affordable"
+        if shares <= 0:
+            fallback_item = None
+            fallback_diagnostics: dict[str, int] = {}
+            if _is_affordable_fallback_skip_reason(skipped_reason):
+                fallback_item = _find_affordable_fallback_candidate(
+                    scored_candidates,
+                    item,
+                    config,
+                    allocation_limit=allocation,
+                    cash=cash,
+                    pending_buy_amount=pending_buy_amount,
+                    held_codes=held_codes,
+                    pending_buy_codes=pending_buy_codes,
+                    same_day_regular_selected_codes=same_day_regular_selected_codes,
+                    diagnostics=fallback_diagnostics,
+                )
+            if fallback_item:
+                trades.append(
+                    _skipped_buy_attempt(
+                        trade_id=f"{trade_date}_{item['code']}_SKIP_BUY",
+                        action="SKIP_BUY",
+                        code=item["code"],
+                        name=item["name"],
+                        trade_date=trade_date,
+                        price=entry_price,
+                        allocation_limit=allocation,
+                        score=item.get("total_score"),
+                        reason=item.get("selection_reason") or item.get("selected_reason") or item["reason"],
+                        skipped_reason=skipped_reason,
+                        config=config,
+                        allocation_reason=allocation_reason,
+                        extra_fields={
+                            **dynamic_exposure_fields,
+                            "affordable_fallback_attempted": True,
+                            "affordable_fallback_replaced_by_code": fallback_item.get("code"),
+                            "affordable_fallback_replaced_by_name": fallback_item.get("name"),
+                            "affordable_fallback_reason": "selected_unaffordable_replaced",
+                            **fallback_diagnostics,
+                        },
+                    )
+                )
+                fallback_item["selected"] = True
+                fallback_item["affordable_fallback_buy_selected"] = True
+                fallback_item["affordable_fallback_original_code"] = item.get("code")
+                fallback_item["affordable_fallback_original_name"] = item.get("name")
+                fallback_item["affordable_fallback_reason"] = skipped_reason
+                fallback_item["affordable_fallback_round_lot_amount"] = _candidate_round_lot_amount(fallback_item, config)
+                fallback_item["selection_reason"] = (
+                    f"affordable_fallback_buy: {item.get('code')} が {skipped_reason} のため、"
+                    f"買付可能な候補を繰り上げ"
+                )
+                fallback_item["selected_reason"] = fallback_item["selection_reason"]
+                fallback_item["reason"] = fallback_item["selection_reason"]
+                item = fallback_item
+                dynamic_exposure_fields = _dynamic_exposure_log_fields(config, item)
+                item.update(dynamic_exposure_fields)
+                entry_price = _candidate_entry_price(item)
+                current_price = _candidate_market_price(item, entry_price)
+                shares, skipped_reason = _calculate_buy_shares(entry_price, allocation, config)
+                if shares <= 0:
+                    fallback_item = None
+            if fallback_item:
+                pass
+            else:
+                no_fallback_extra = {
+                    **dynamic_exposure_fields,
+                    "affordable_fallback_attempted": _is_affordable_fallback_skip_reason(skipped_reason)
+                    and _affordable_fallback_enabled(config),
+                    "affordable_fallback_no_candidate": _is_affordable_fallback_skip_reason(skipped_reason)
+                    and _affordable_fallback_enabled(config),
+                    **fallback_diagnostics,
+                }
+                trades.append(
+                    _skipped_buy_attempt(
+                        trade_id=f"{trade_date}_{item['code']}_SKIP_BUY",
+                        action="SKIP_BUY",
+                        code=item["code"],
+                        name=item["name"],
+                        trade_date=trade_date,
+                        price=entry_price,
+                        allocation_limit=allocation,
+                        score=item.get("total_score"),
+                        reason=item.get("selection_reason") or item.get("selected_reason") or item["reason"],
+                        skipped_reason=skipped_reason,
+                        config=config,
+                        allocation_reason=allocation_reason,
+                        extra_fields=no_fallback_extra,
+                    )
+                )
+                continue
         if shares <= 0:
             trades.append(
                 _skipped_buy_attempt(
@@ -1082,6 +1457,8 @@ def execute_real_data_paper_trade(
                     reason=item.get("selection_reason") or item.get("selected_reason") or item["reason"],
                     skipped_reason=skipped_reason,
                     config=config,
+                    allocation_reason=allocation_reason,
+                    extra_fields=dynamic_exposure_fields,
                 )
             )
             continue
@@ -1122,10 +1499,14 @@ def execute_real_data_paper_trade(
             "amount": round(amount, 2),
             "allocation_limit": round(allocation, 2),
             "allocation_reason": allocation_reason,
+            "allocation_strategy": _allocation_strategy(config),
             "buy_commission": buy_commission,
             "score": item["total_score"],
+            "rank": item.get("rank"),
+            "daily_score_rank": item.get("daily_score_rank") or item.get("rank"),
             "reason": item.get("selection_reason") or item.get("selected_reason") or item["reason"],
             **_technical_snapshot(item),
+            **dynamic_exposure_fields,
             "round_lot_size": _round_lot_size(config),
             "use_round_lot": _use_round_lot(config),
             "skipped_reason": "",

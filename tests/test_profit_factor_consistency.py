@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from copy import deepcopy
 
 import main
@@ -10,6 +11,7 @@ from main import (
     build_profile_diff_analyses,
     build_profile_ranking,
     render_compare_profiles_markdown,
+    write_trades_csv,
     write_backtest_summary,
 )
 from profile_loader import load_profile
@@ -552,6 +554,166 @@ def test_profile_diff_analysis_marks_no_practical_effect(tmp_path) -> None:
         }
     )
     assert "No practical effect" in markdown
+
+
+def test_profile_diff_analysis_counts_affordable_fallback_buy_as_selection_diff(tmp_path) -> None:
+    profile_26 = load_profile("rookie_dealer_02_v2_26")
+    profile_37 = load_profile("rookie_dealer_02_v2_37")
+    db_path = str(tmp_path / "ai_fund_lab.sqlite3")
+    profile_26["database"]["path"] = db_path
+    profile_37["database"]["path"] = db_path
+    initialize_database(profile_26, tmp_path)
+    scores = [
+        {
+            "code": "1001",
+            "name": "Expensive Selected",
+            "rank": 1,
+            "total_score": 80,
+            "selected": True,
+        },
+        {
+            "code": "1002",
+            "name": "Affordable Fallback",
+            "rank": 2,
+            "total_score": 77,
+            "selected": False,
+        },
+    ]
+    for profile in [profile_26, profile_37]:
+        save_scoring_results(profile, tmp_path, {"date": "2026-03-06", "scores": deepcopy(scores)})
+    save_trades(
+        profile_37,
+        tmp_path,
+        "2026-03-07",
+        [
+            {
+                "action": "BUY",
+                "status": "FILLED",
+                "code": "1002",
+                "name": "Affordable Fallback",
+                "signal_date": "2026-03-06",
+                "entry_date": "2026-03-07",
+                "entry_price": 2500,
+                "shares": 100,
+                "amount": 250000,
+                "total_score": 77,
+                "reason": "affordable_fallback_buy",
+                "affordable_fallback_buy_selected": True,
+                "affordable_fallback_original_code": "1001",
+                "affordable_fallback_original_name": "Expensive Selected",
+                "affordable_fallback_reason": "selected_but_not_affordable",
+                "affordable_fallback_round_lot_amount": 250000,
+            }
+        ],
+    )
+
+    analysis = build_profile_diff_analysis(
+        [profile_26, profile_37],
+        get_database_path(profile_26, tmp_path),
+        "2026-03-01",
+        "2026-03-31",
+    )
+
+    assert analysis is not None
+    assert analysis["base_profile_id"] == "rookie_dealer_02_v2_26"
+    assert analysis["target_profile_id"] == "rookie_dealer_02_v2_37"
+    assert analysis["newly_selected_count"] == 1
+    assert analysis["selection_diff_count"] == 1
+    assert analysis["no_practical_effect"] is False
+    assert analysis["practical_effect"] == "selection_effect"
+    assert analysis["newly_selected"][0]["code"] == "1002"
+    assert analysis["newly_selected"][0]["selection_source"] == "affordable_fallback_buy"
+    assert analysis["newly_selected"][0]["affordable_fallback_original_code"] == "1001"
+    assert analysis["outcome_diff_count"] == 1
+    assert analysis["trade_outcome_diff"]["new_buy_trade_count"] == 1
+    assert analysis["trade_outcome_diff"]["new_buy_trades"][0]["affordable_fallback_buy_selected"] is True
+
+
+def test_profile_diff_analysis_uses_backtest_summary_fallback_trades_when_db_is_stale(tmp_path, monkeypatch) -> None:
+    profile_26 = load_profile("rookie_dealer_02_v2_26")
+    profile_37 = load_profile("rookie_dealer_02_v2_37")
+    db_path = str(tmp_path / "ai_fund_lab.sqlite3")
+    profile_26["database"]["path"] = db_path
+    profile_37["database"]["path"] = db_path
+    initialize_database(profile_26, tmp_path)
+    for profile in [profile_26, profile_37]:
+        save_scoring_results(
+            profile,
+            tmp_path,
+            {
+                "date": "2026-03-06",
+                "scores": [
+                    {"code": "1001", "name": "Expensive Selected", "rank": 1, "total_score": 80, "selected": True},
+                    {"code": "1002", "name": "Affordable Fallback", "rank": 2, "total_score": 77, "selected": False},
+                ],
+            },
+        )
+    monkeypatch.setattr(main, "ROOT", tmp_path)
+    summary_path = tmp_path / "logs" / "backtests" / "rookie_dealer_02_v2_37" / "2026-03-01_to_2026-03-31" / "backtest_summary.json"
+    main.write_json(
+        summary_path,
+        {
+            "all_trades": [
+                {
+                    "action": "BUY",
+                    "code": "1002",
+                    "name": "Affordable Fallback",
+                    "signal_date": "2026-03-06",
+                    "entry_date": "2026-03-07",
+                    "amount": 250000,
+                    "shares": 100,
+                    "total_score": 77,
+                    "reason": "affordable_fallback_buy",
+                    "affordable_fallback_buy_selected": True,
+                    "affordable_fallback_original_code": "1001",
+                    "affordable_fallback_reason": "selected_but_not_affordable",
+                }
+            ]
+        },
+    )
+
+    analysis = build_profile_diff_analysis(
+        [profile_26, profile_37],
+        get_database_path(profile_26, tmp_path),
+        "2026-03-01",
+        "2026-03-31",
+    )
+
+    assert analysis is not None
+    assert analysis["selection_diff_count"] == 1
+    assert analysis["outcome_diff_count"] == 1
+    assert analysis["no_practical_effect"] is False
+    assert analysis["newly_selected"][0]["code"] == "1002"
+    assert analysis["trade_outcome_diff"]["new_buy_trade_count"] == 1
+
+
+def test_write_trades_csv_includes_affordable_fallback_flags(tmp_path) -> None:
+    path = tmp_path / "trades.csv"
+    write_trades_csv(
+        path,
+        [
+            {
+                "action": "BUY",
+                "code": "1002",
+                "name": "Affordable Fallback",
+                "signal_date": "2026-03-06",
+                "entry_date": "2026-03-07",
+                "amount": 250000,
+                "affordable_fallback_buy_selected": True,
+                "affordable_fallback_original_code": "1001",
+                "affordable_fallback_original_name": "Expensive Selected",
+                "affordable_fallback_reason": "selected_but_not_affordable",
+                "affordable_fallback_round_lot_amount": 250000,
+            }
+        ],
+    )
+
+    with path.open(newline="", encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+
+    assert rows[0]["affordable_fallback_buy_selected"] == "True"
+    assert rows[0]["affordable_fallback_original_code"] == "1001"
+    assert rows[0]["affordable_fallback_reason"] == "selected_but_not_affordable"
 
 
 def test_profile_diff_analysis_detects_trade_outcome_diff_without_entry_diff(tmp_path) -> None:

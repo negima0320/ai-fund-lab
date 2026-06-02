@@ -8,6 +8,8 @@ from feature_analysis import (
     _backtest_integrity_audits,
     _capital_utilization_audit,
     _compounding_capital_flow_audit,
+    _market_section_performance_audit,
+    _market_section_performance_audit_lines,
     _price_band_affordability_audit,
     build_feature_analysis,
     render_feature_analysis_markdown,
@@ -77,6 +79,133 @@ def test_capital_utilization_audit_reports_target_exposure_blockers(config_copy:
     assert audit["min_cash_buffer_hit_count"] == 1
     assert audit["no_candidate_days"] == 1
     assert audit["no_affordable_candidate_days"] == 1
+
+
+def test_market_section_performance_audit_summarizes_market_sections(config_copy: dict) -> None:
+    scoring_rows = [
+        {"code": "1001", "market_section": "TSEPrime", "selected": True, "close": 1000},
+        {"code": "1002", "market_section": "TSEStandard", "selected": True, "close": 2000},
+        {"code": "1003", "market_section": "TSEGrowth", "selected": False, "close": 3000},
+    ]
+    backtest_summary = {
+        "all_trades": [
+            {"action": "BUY", "code": "1001", "market_section": "TSEPrime", "entry_price": 1000, "shares": 100},
+            {"action": "BUY", "code": "1002", "market_section": "TSEStandard", "entry_price": 2000, "shares": 100},
+            {"action": "SELL", "code": "1001", "market_section": "TSEPrime", "gross_profit": 10000, "profit": 10000, "result": "WIN", "exit_date": "2026-01-10"},
+            {"action": "SELL", "code": "1002", "market_section": "TSEStandard", "gross_profit": -5000, "profit": -5000, "result": "LOSS", "exit_date": "2026-01-10"},
+        ]
+    }
+
+    audit = _market_section_performance_audit(backtest_summary, config_copy, scoring_rows)
+    lines = _market_section_performance_audit_lines(audit)
+
+    assert audit["candidate_count_by_market"]["Prime"] == 1
+    assert audit["candidate_count_by_market"]["Standard"] == 1
+    assert audit["candidate_count_by_market"]["Growth"] == 1
+    assert audit["selected_count_by_market"]["Growth"] == 0
+    assert audit["buy_trade_count_by_market"]["Prime"] == 1
+    assert audit["gross_profit_by_market"]["Prime"] == 10000
+    assert audit["gross_profit_by_market"]["Standard"] == -5000
+    assert audit["average_round_lot_amount_by_market"]["Standard"] == 200000
+    assert any("Standard" in line for line in lines)
+
+
+def test_market_section_performance_audit_fills_unknown_from_master(config_copy: dict, tmp_path) -> None:
+    raw_dir = tmp_path / "data" / "raw"
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "listed_stocks_jquants.json").write_text(
+        json.dumps(
+            {
+                "stocks": [
+                    {"code": "2001", "MktNm": "スタンダード"},
+                    {"code": "3001", "Mkt": "0113"},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    scoring_rows = [
+        {"code": "2001", "selected": True, "close": 2000},
+        {"code": "3001", "selected": False, "close": 3000},
+    ]
+    backtest_summary = {
+        "all_trades": [
+            {"action": "BUY", "code": "2001", "entry_price": 2000, "shares": 100},
+            {"action": "SELL", "code": "2001", "gross_profit": 5000, "profit": 5000, "result": "WIN"},
+        ]
+    }
+
+    audit = _market_section_performance_audit(
+        backtest_summary,
+        config_copy,
+        scoring_rows,
+        root=tmp_path,
+        market_filter_audit={
+            "allowed_sections": ["TSEPrime", "TSEStandard", "TSEGrowth"],
+            "candidate_market_breakdown_before_filter": {"Prime": 0, "Standard": 1, "Growth": 1, "Unknown": 0},
+            "candidate_market_breakdown_after_filter": {"Prime": 0, "Standard": 1, "Growth": 1, "Unknown": 0},
+            "excluded_market_breakdown": {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0},
+            "unknown_market_count": 0,
+            "market_section_lookup_source": {"master": 2, "row": 0, "unknown": 0},
+            "daily_breakdown": [
+                {
+                    "date": "2026-01-05",
+                    "raw_candidate_count_by_market": {"Prime": 0, "Standard": 1, "Growth": 1, "Unknown": 0},
+                    "after_market_filter_candidate_count_by_market": {"Prime": 0, "Standard": 1, "Growth": 1, "Unknown": 0},
+                    "excluded_count_by_market": {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0},
+                    "market_section_lookup_source": {"master": 2},
+                }
+            ],
+        },
+    )
+
+    assert audit["market_section_master_lookup_count"] == 2
+    assert audit["candidate_count_by_market"]["Standard"] == 1
+    assert audit["candidate_count_by_market"]["Growth"] == 1
+    assert audit["candidate_count_by_market"]["Unknown"] == 0
+    assert audit["buy_trade_count_by_market"]["Standard"] == 1
+    assert audit["candidate_universe_audit"]["raw_candidate_count_by_market"]["Standard"] == 1
+    assert audit["scored_candidate_audit"]["scored_count_by_market"]["Growth"] == 1
+    assert audit["selected_candidate_audit"]["selected_count_by_market"]["Standard"] == 1
+    assert audit["trade_market_audit"]["buy_trade_count_by_market"]["Standard"] == 1
+
+
+def test_capital_utilization_audit_reports_round_lot_amount_by_market(config_copy: dict, tmp_path) -> None:
+    profile_id = config_copy["profile_id"]
+    log_dir = tmp_path / "logs" / "backtests" / profile_id / "2026-01-01_to_2026-01-02"
+    log_dir.mkdir(parents=True)
+    (log_dir / "summary.csv").write_text(
+        "date,total_assets,cash,positions_value,open_positions_count\n"
+        "2026-01-01,1000000,1000000,0,0\n"
+        "2026-01-02,1000000,700000,300000,2\n",
+        encoding="utf-8",
+    )
+    scoring_rows = [
+        {"code": "1001", "market_section": "TSEPrime", "selected": True, "close": 1000},
+        {"code": "1002", "market_section": "TSEStandard", "selected": True, "close": 2000},
+    ]
+    backtest_summary = {
+        "all_trades": [
+            {"action": "BUY", "entry_date": "2026-01-02", "code": "1001", "market_section": "TSEPrime", "entry_price": 1000, "shares": 100, "amount": 100000},
+            {"action": "BUY", "entry_date": "2026-01-02", "code": "1002", "market_section": "TSEStandard", "entry_price": 2000, "shares": 100, "amount": 200000},
+        ]
+    }
+
+    audit = _capital_utilization_audit(
+        tmp_path,
+        profile_id,
+        "2026-01-01",
+        "2026-01-02",
+        backtest_summary,
+        config_copy,
+        scoring_rows,
+    )
+
+    assert audit["average_round_lot_amount_by_market"]["Prime"] == 100000
+    assert audit["average_round_lot_amount_by_market"]["Standard"] == 200000
+    assert audit["bought_round_lot_amount_by_market"]["Prime"] == 100000
+    assert audit["bought_round_lot_amount_by_market"]["Standard"] == 200000
 
 
 def test_price_band_affordability_audit_reports_penalized_rows(config_copy: dict) -> None:

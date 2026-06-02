@@ -233,6 +233,81 @@ def test_affordability_filter_uses_signal_close_before_open(config_copy: dict) -
     assert item["price_band_penalty"] == 3
 
 
+def test_winner_loser_volume_ratio_penalty_is_score_component(config_copy: dict) -> None:
+    config_copy["winner_loser_rule_adjustment"] = {
+        "enabled": True,
+        "rule_name": "volume_ratio_3_5_penalty",
+        "volume_ratio_min": 3.0,
+        "volume_ratio_max": 5.0,
+        "score_adjustment": -3,
+        "reason": "volume_ratio 3-5 loss-heavy penalty",
+    }
+    base = score_real_candidates(
+        [candidate("1001", volume_ratio=2.9, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02)],
+        "2026-03-06",
+        config_copy,
+        "test",
+    )["scores"][0]
+    penalized = score_real_candidates(
+        [candidate("1001", volume_ratio=3.5, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02)],
+        "2026-03-06",
+        config_copy,
+        "test",
+    )["scores"][0]
+
+    assert base["winner_loser_rule_triggered"] is False
+    assert base["winner_loser_rule_score"] == 0
+    assert penalized["winner_loser_rule_triggered"] is True
+    assert penalized["winner_loser_rule_score"] == -3
+    assert penalized["score_components"]["winner_loser_rule_score"] == -3
+    assert penalized["score_components"]["component_total"] == penalized["total_score"]
+    assert penalized["total_score"] == base["total_score"] - 3
+
+
+def test_winner_loser_sector_penalty_matches_sector_only(config_copy: dict) -> None:
+    config_copy["winner_loser_rule_adjustment"] = {
+        "enabled": True,
+        "rule_name": "retail_sector_penalty",
+        "sector_name": "小売業",
+        "score_adjustment": -3,
+        "reason": "小売業 loss-heavy penalty",
+    }
+    retail = candidate("1001", volume_ratio=2.5, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02)
+    retail["sector_name"] = "小売業"
+    machinery = candidate("1002", volume_ratio=2.5, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02)
+    machinery["sector_name"] = "機械"
+
+    scores = score_real_candidates([retail, machinery], "2026-03-06", config_copy, "test")["scores"]
+    by_code = {item["code"]: item for item in scores}
+
+    assert by_code["1001"]["winner_loser_rule_triggered"] is True
+    assert by_code["1001"]["winner_loser_rule_score"] == -3
+    assert by_code["1002"]["winner_loser_rule_triggered"] is False
+    assert by_code["1002"]["winner_loser_rule_score"] == 0
+
+
+def test_winner_loser_volume_ratio_boost_is_score_component(config_copy: dict) -> None:
+    config_copy["winner_loser_rule_adjustment"] = {
+        "enabled": True,
+        "rule_name": "volume_ratio_2_3_boost",
+        "volume_ratio_min": 2.0,
+        "volume_ratio_max": 3.0,
+        "score_adjustment": 2,
+        "reason": "volume_ratio 2-3 win-heavy boost",
+    }
+    boosted = score_real_candidates(
+        [candidate("1001", volume_ratio=2.5, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02)],
+        "2026-03-06",
+        config_copy,
+        "test",
+    )["scores"][0]
+
+    assert boosted["winner_loser_rule_triggered"] is True
+    assert boosted["winner_loser_rule_score"] == 2
+    assert boosted["score_components"]["winner_loser_rule_score"] == 2
+    assert boosted["score_components"]["component_total"] == boosted["total_score"]
+
+
 def test_regular_selection_follows_config(config_copy: dict) -> None:
     result = score_real_candidates(
         [candidate("1001", volume_ratio=3.0, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02)],
