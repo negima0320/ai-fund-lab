@@ -486,6 +486,54 @@ def test_scored_candidates_cache_invalidates_when_candidate_universe_changes(tmp
     assert any(item.get("market_section") == "TSEStandard" for item in payload["scores"])
 
 
+def test_market_expansion_score_cache_requires_standard_rows() -> None:
+    config = main_module.load_profile("rookie_dealer_02_v2_47")
+    target_date = "2026-01-05"
+    cache = main_module._score_cache_payload(config, target_date)
+    payload = {
+        "date": target_date,
+        "profile_id": config["profile_id"],
+        "config_version": main_module.config_version_from(config),
+        **cache,
+        "candidate_universe_count": 2,
+        "candidate_universe_hash": "already-matched-for-this-unit",
+        "candidate_universe_market_counts": {"Prime": 1, "Standard": 1, "Growth": 0, "Unknown": 0},
+        "scores": [{"code": "1001", "market_section": "TSEPrime", "selected": False, "total_score": 40}],
+    }
+
+    assert main_module._market_expansion_score_storage_issue(payload, config) == "market_expansion_scores_missing"
+
+    payload["scores"].append({"code": "2001", "market_section": "TSEStandard", "selected": False, "total_score": 48})
+    assert main_module._market_expansion_score_storage_issue(payload, config) == ""
+
+
+def test_standard_screening_scores_are_kept_in_compact_storage_for_ranking_audit() -> None:
+    config = main_module.load_profile("rookie_dealer_02_v2_47")
+    config.setdefault("storage", {})["save_mode"] = "compact"
+    scores = [
+        {"code": "1001", "market_section": "TSEPrime", "selected": False, "total_score": 44},
+        {"code": "2001", "market_section": "TSEStandard", "selected": False, "total_score": 48, "rank": 3},
+    ]
+
+    stored = main_module._scores_for_storage(scores, config)
+
+    assert [row["code"] for row in stored] == ["2001"]
+    assert stored[0]["market_section"] == "TSEStandard"
+    assert stored[0]["total_score"] == 48
+
+
+def test_prime_only_profile_does_not_keep_standard_scores_in_compact_storage() -> None:
+    config = main_module.load_profile("rookie_dealer_02_v2_26")
+    config.setdefault("storage", {})["save_mode"] = "compact"
+    scores = [
+        {"code": "2001", "market_section": "TSEStandard", "selected": False, "total_score": 48},
+    ]
+
+    stored = main_module._scores_for_storage(scores, config)
+
+    assert stored == []
+
+
 def test_profile_phase_time_snapshot_accounts_for_profile_total(monkeypatch) -> None:
     monkeypatch.setattr(
         main_module,

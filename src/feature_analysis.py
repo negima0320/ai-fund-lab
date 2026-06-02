@@ -5522,6 +5522,8 @@ def _standard_ranking_input_audit(
     market_section_master = _market_section_master_by_code(root)
     rows: list[dict[str, Any]] = []
     reasons: dict[str, dict[str, int]] = {}
+    scoring_input_counts = {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0}
+    persisted_ranking_counts = {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0}
     after_screening_count = 0
     after_scoring_count = 0
     if profile_dir.exists():
@@ -5535,14 +5537,20 @@ def _standard_ranking_input_audit(
         if end_date and day and day > end_date:
             continue
         candidate_payload = _read_json_object(candidate_path)
-        standard_candidates = [
+        candidate_rows = [
             row
             for row in _rows_from_processed_payload(candidate_payload, "candidates")
-            if isinstance(row, dict) and _market_section_label(row, market_section_master) == "Standard"
+            if isinstance(row, dict)
+        ]
+        standard_candidates = [
+            row
+            for row in candidate_rows
+            if _market_section_label(row, market_section_master) == "Standard"
         ]
         if not standard_candidates:
             continue
         after_screening_count += len(standard_candidates)
+        _merge_simple_market_counts(scoring_input_counts, _count_by_market(candidate_rows, market_section_master))
         scored_path = profile_dir / f"scored_candidates_{day}.json"
         scored_payload = _read_json_object(scored_path)
         scored_rows = [
@@ -5550,6 +5558,7 @@ def _standard_ranking_input_audit(
             for row in _rows_from_processed_payload(scored_payload, "scored_candidates")
             if isinstance(row, dict)
         ]
+        _merge_simple_market_counts(persisted_ranking_counts, _count_by_market(scored_rows, market_section_master))
         scored_by_code = {
             _normalize_code(row.get("code") or row.get("Code")): row
             for row in scored_rows
@@ -5568,9 +5577,16 @@ def _standard_ranking_input_audit(
         "after_screening_count": after_screening_count,
         "after_scoring_count": after_scoring_count,
         "excluded_count": len(rows),
+        "scoring_input_universe_count_by_market": scoring_input_counts,
+        "persisted_ranking_universe_count_by_market": persisted_ranking_counts,
         "exclusion_reasons": reasons,
         "standard_ranking_input_excluded_rows": rows[:20],
     }
+
+
+def _merge_simple_market_counts(target: dict[str, int], source: dict[str, int]) -> None:
+    for key, value in source.items():
+        target[key] = int(target.get(key, 0) or 0) + int(value or 0)
 
 
 def _standard_ranking_input_sample(
@@ -7307,6 +7323,8 @@ def _standard_ranking_input_audit_lines(audit: dict[str, Any]) -> list[str]:
         f"- after_screening_count: {audit.get('after_screening_count', 0)}",
         f"- after_scoring_count: {audit.get('after_scoring_count', 0)}",
         f"- excluded_count: {audit.get('excluded_count', 0)}",
+        f"- scoring_input_universe_count_by_market: {json.dumps(audit.get('scoring_input_universe_count_by_market', {}), ensure_ascii=False, sort_keys=True)}",
+        f"- persisted_ranking_universe_count_by_market: {json.dumps(audit.get('persisted_ranking_universe_count_by_market', {}), ensure_ascii=False, sort_keys=True)}",
         "",
         "### Ranking Input Exclusion Reasons",
         "",

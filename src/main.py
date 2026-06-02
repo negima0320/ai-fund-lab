@@ -11852,6 +11852,8 @@ def _copy_reusable_scoring_for_active_profile(target_date_text: str) -> dict[str
     target_candidate_universe = _candidate_universe_cache_payload(target_config, target_date_text)
     if target_candidate_universe:
         processed_payload.update(target_candidate_universe)
+    if _score_payload_cache_issue(processed_payload, target_config, target_date_text):
+        return None
     if source_log.exists():
         scoring_payload = _with_profile_metadata(read_json(source_log), target_config)
     else:
@@ -11999,11 +12001,11 @@ def _scores_for_storage(scores: list[dict[str, Any]], config: dict[str, Any]) ->
     if mode == "full_debug":
         rows = scores
     elif mode == "compact":
-        rows = [item for item in scores if item.get("selected") or _is_always_saved_rejected_score(item)]
+        rows = [item for item in scores if item.get("selected") or _is_always_saved_rejected_score(item) or _is_market_expansion_saved_score(item, config)]
     elif _save_rejected_candidates(config):
         rows = scores
     else:
-        rows = [item for item in scores if item.get("selected") or _is_always_saved_rejected_score(item)]
+        rows = [item for item in scores if item.get("selected") or _is_always_saved_rejected_score(item) or _is_market_expansion_saved_score(item, config)]
     return [_score_row_for_storage(item, mode) for item in rows]
 
 
@@ -12024,6 +12026,26 @@ def _trades_for_storage(trades: list[dict[str, Any]], config: dict[str, Any]) ->
 
 def _is_always_saved_rejected_score(item: dict[str, Any]) -> bool:
     return str(item.get("rejected_reason") or item.get("reason") or "") == "investor_context_negative"
+
+
+def _is_market_expansion_saved_score(item: dict[str, Any], config: dict[str, Any]) -> bool:
+    section = market_section_from_row(item)
+    return section in _market_expansion_saved_sections(config)
+
+
+def _market_expansion_saved_sections(config: dict[str, Any]) -> set[str]:
+    screening = config.get("screening", {})
+    overrides = screening.get("market_overrides", {}) if isinstance(screening, dict) else {}
+    if not isinstance(overrides, dict):
+        return set()
+    sections: set[str] = set()
+    allowed = allowed_market_sections(config)
+    for section, label in [("TSEStandard", "Standard"), ("TSEGrowth", "Growth")]:
+        if section not in allowed:
+            continue
+        if isinstance(overrides.get(section), dict) or isinstance(overrides.get(label), dict):
+            sections.add(section)
+    return sections
 
 
 def _scoring_log_for_storage(scoring_log: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
@@ -15141,6 +15163,32 @@ def _score_payload_cache_issue(payload: dict[str, Any], config: dict[str, Any], 
             return "candidate_universe_hash_mismatch"
         if int(payload.get("candidate_universe_count") or 0) != int(expected_candidate_universe.get("candidate_universe_count") or 0):
             return "candidate_universe_count_mismatch"
+    market_expansion_issue = _market_expansion_score_storage_issue(payload, config)
+    if market_expansion_issue:
+        return market_expansion_issue
+    return ""
+
+
+def _market_expansion_score_storage_issue(payload: dict[str, Any], config: dict[str, Any]) -> str:
+    sections = _market_expansion_saved_sections(config)
+    if not sections:
+        return ""
+    expected_counts = payload.get("candidate_universe_market_counts")
+    if not isinstance(expected_counts, dict):
+        return ""
+    scores = payload.get("scores")
+    if not isinstance(scores, list):
+        return "market_expansion_scores_missing"
+    actual_counts = market_section_counts(scores)
+    for section in sections:
+        label = {
+            "TSEStandard": "Standard",
+            "TSEGrowth": "Growth",
+        }.get(section, section)
+        expected = int(expected_counts.get(label, 0) or expected_counts.get(section, 0) or 0)
+        actual = int(actual_counts.get(label, 0) or actual_counts.get(section, 0) or 0)
+        if expected > 0 and actual < expected:
+            return "market_expansion_scores_missing"
     return ""
 
 
