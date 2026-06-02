@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from profile_loader import load_profile
-from scoring import _apply_selection_rules, _selection_config, score_real_candidates
+from scoring import _apply_selection_rules, _candidate_round_lot_price, _selection_config, score_real_candidates
 
 
 def candidate(
@@ -211,6 +211,26 @@ def test_affordability_filter_does_not_penalize_under_threshold(config_copy: dic
     assert item["price_band_penalty"] == 0
     assert item["affordability_penalty"] == 0
     assert item["penalty_score"] == 0
+
+
+def test_affordability_filter_uses_signal_close_before_open(config_copy: dict) -> None:
+    config_copy["affordability_filter"] = {
+        "enabled": True,
+        "preferred_round_lot_amount": 500000,
+        "penalty_points": 3,
+        "reason": "price_band_penalty",
+    }
+    high_signal_close = {
+        **candidate("1001", volume_ratio=3.0, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02),
+        "open": 3000,
+        "close": 6000,
+    }
+
+    item = score_real_candidates([high_signal_close], "2026-03-06", config_copy, "test")["scores"][0]
+
+    assert _candidate_round_lot_price(high_signal_close) == 6000
+    assert item["round_lot_amount"] == 600000
+    assert item["price_band_penalty"] == 3
 
 
 def test_regular_selection_follows_config(config_copy: dict) -> None:

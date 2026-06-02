@@ -345,6 +345,31 @@ def test_score_writes_empty_scored_candidates_when_candidates_are_empty(monkeypa
     assert payload["scores"] == []
 
 
+def test_score_storage_keeps_affordability_fields(config_copy: dict) -> None:
+    row = {
+        "code": "1001",
+        "name": "High Price",
+        "date": "2026-01-05",
+        "close": 6000,
+        "selected": True,
+        "total_score": 50,
+        "affordability_filter_enabled": True,
+        "round_lot_amount": 600000,
+        "preferred_round_lot_amount": 500000,
+        "price_band_penalty": 3,
+        "price_band_penalty_reason": "price_band_penalty",
+        "affordability_penalty": 3,
+    }
+
+    stored = main_module._scores_for_storage([row], config_copy)[0]
+
+    assert stored["round_lot_amount"] == 600000
+    assert stored["preferred_round_lot_amount"] == 500000
+    assert stored["price_band_penalty"] == 3
+    assert stored["price_band_penalty_reason"] == "price_band_penalty"
+    assert stored["affordability_penalty"] == 3
+
+
 def test_processed_data_audit_reports_stage_gaps(monkeypatch, config_copy, tmp_path) -> None:
     monkeypatch.setattr(main_module, "ROOT", tmp_path)
     profile_dir = tmp_path / "data" / "processed" / main_module.profile_id_from(config_copy)

@@ -104,6 +104,13 @@ def test_run_experiments_selects_v2_19_capital_exposure_profiles() -> None:
     ]
 
 
+def test_affordability_filter_changes_scoring_reuse_signature() -> None:
+    base = main_module.load_profile("rookie_dealer_02_v2_19")
+    affordability = main_module.load_profile("rookie_dealer_02_v2_23")
+
+    assert main_module._experiment_scoring_signature(base) != main_module._experiment_scoring_signature(affordability)
+
+
 def test_run_experiments_skip_backtest_writes_summary(tmp_path, monkeypatch) -> None:
     calls: list[tuple] = []
     monkeypatch.setattr(main_module, "ROOT", tmp_path)

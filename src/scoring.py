@@ -628,7 +628,7 @@ def _affordability_adjustment(candidate: dict[str, Any], policy: dict[str, Any],
         or (config.get("trading", {}) or {}).get("round_lot_size")
         or 100
     )
-    price = _optional_float(candidate.get("entry_price") or candidate.get("open") or candidate.get("close"))
+    price = _candidate_round_lot_price(candidate)
     round_lot_amount = round(price * lot_size, 2) if price is not None else None
     threshold = policy.get("preferred_round_lot_amount")
     enabled = bool(policy.get("enabled"))
@@ -647,6 +647,22 @@ def _affordability_adjustment(candidate: dict[str, Any], policy: dict[str, Any],
         "penalty": float(policy.get("penalty_points") or 0.0),
         "reason": str(policy.get("reason") or "price_band_penalty"),
     }
+
+
+def _candidate_round_lot_price(candidate: dict[str, Any]) -> float | None:
+    for key in [
+        "entry_candidate_price",
+        "signal_close_price",
+        "close",
+        "adjusted_close",
+        "adjusted_price",
+        "entry_price",
+        "open",
+    ]:
+        value = _optional_float(candidate.get(key))
+        if value is not None:
+            return value
+    return None
 
 
 def _optional_float(value: Any) -> float | None:

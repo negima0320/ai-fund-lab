@@ -189,6 +189,10 @@ def build_feature_analysis(
         "feature_analysis_result_integrity_sec",
         lambda: _capital_utilization_audit(root, profile_id, start_date, end_date, backtest_summary, config, scoring_rows),
     )
+    compounding_capital_flow_audit = timed(
+        "feature_analysis_result_integrity_sec",
+        lambda: _compounding_capital_flow_audit(root, profile_id, start_date, end_date, backtest_summary, config),
+    )
     price_band_affordability_audit = timed(
         "feature_analysis_score_component_sec",
         lambda: _price_band_affordability_audit(config, scoring_rows, backtest_summary),
@@ -364,6 +368,7 @@ def build_feature_analysis(
         "investor_context_analysis": investor_context_analysis,
         "investor_context_filter": investor_context_filter,
         "capital_utilization_audit": capital_utilization_audit,
+        "compounding_capital_flow_audit": compounding_capital_flow_audit,
         "price_band_affordability_audit": price_band_affordability_audit,
         "market_filter_audit": integrity_audits.get("market_filter_audit", {}),
         "backtest_result_integrity_audit": integrity_audits.get("backtest_result_integrity_audit", {}),
@@ -435,6 +440,10 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "## Capital Utilization Audit",
         "",
         *_capital_utilization_audit_lines(analysis.get("capital_utilization_audit", {})),
+        "",
+        "## Compounding / Capital Flow Audit",
+        "",
+        *_compounding_capital_flow_audit_lines(analysis.get("compounding_capital_flow_audit", {})),
         "",
         "## Price Band / Affordability Audit",
         "",
@@ -5082,11 +5091,239 @@ def _capital_skip_reason(value: Any) -> str:
     return text
 
 
+def _compounding_capital_flow_audit(
+    root: Path,
+    profile_id: str,
+    start_date: str | None,
+    end_date: str | None,
+    backtest_summary: dict[str, Any],
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not start_date or not end_date:
+        return {"status": "unavailable", "reason": "start_date/end_date are required"}
+    log_dir = root / "logs" / "backtests" / profile_id / f"{start_date}_to_{end_date}"
+    summary_rows = _read_csv_rows(log_dir / "summary.csv")
+    events = backtest_summary.get("all_trades", []) if isinstance(backtest_summary, dict) else []
+    if not isinstance(events, list):
+        events = []
+    buys = [item for item in events if isinstance(item, dict) and str(item.get("action") or "").upper() == "BUY"]
+    sells = [item for item in events if isinstance(item, dict) and str(item.get("action") or "").upper() == "SELL"]
+    initial_capital = _number(backtest_summary.get("initial_capital"))
+    if initial_capital is None and isinstance(config, dict):
+        initial_capital = _number(config.get("initial_capital") or config.get("portfolio", {}).get("initial_cash"))
+    cash_values = [_number(row.get("cash")) for row in summary_rows]
+    cash_values = [value for value in cash_values if value is not None]
+    asset_values = [_number(row.get("total_assets")) for row in summary_rows]
+    asset_values = [value for value in asset_values if value is not None]
+    final_row = summary_rows[-1] if summary_rows else {}
+    cash_start = cash_values[0] if cash_values else initial_capital
+    cash_end = cash_values[-1] if cash_values else _number(backtest_summary.get("cash"))
+    final_assets = (
+        _number(backtest_summary.get("final_assets"))
+        or _number(final_row.get("total_assets"))
+        or (asset_values[-1] if asset_values else None)
+    )
+    net_cumulative_profit = _number(backtest_summary.get("net_cumulative_profit"))
+    if net_cumulative_profit is None and initial_capital is not None and final_assets is not None:
+        net_cumulative_profit = round(final_assets - initial_capital, 2)
+    realized_profit_total = round(
+        sum((_trade_profit(item) or 0.0) for item in sells),
+        2,
+    )
+    unrealized_profit_total = _number(backtest_summary.get("unrealized_profit_total"))
+    if unrealized_profit_total is None and net_cumulative_profit is not None:
+        unrealized_profit_total = round(net_cumulative_profit - realized_profit_total, 2)
+    buy_amounts = [_trade_amount(item) for item in buys]
+    buy_amounts = [value for value in buy_amounts if value is not None]
+    sell_amounts = [_trade_amount(item) for item in sells]
+    sell_amounts = [value for value in sell_amounts if value is not None]
+    first_10_avg = _average(buy_amounts[:10])
+    last_10_avg = _average(buy_amounts[-10:])
+    order_amount_growth_rate = None
+    if first_10_avg and first_10_avg != 0 and last_10_avg is not None:
+        order_amount_growth_rate = round((last_10_avg - first_10_avg) / first_10_avg, 4)
+
+    warnings: list[str] = []
+    if not summary_rows:
+        warnings.append("summary.csv is missing; cash/asset flow checks are limited")
+    if initial_capital is None:
+        warnings.append("initial_capital is unavailable")
+    if final_assets is None:
+        warnings.append("final_assets is unavailable")
+    if net_cumulative_profit is None:
+        warnings.append("net_cumulative_profit is unavailable")
+
+    asset_consistency_issues = _asset_consistency_issues(summary_rows)
+    if asset_consistency_issues:
+        warnings.append(f"total_assets does not match cash + positions_value on {len(asset_consistency_issues)} day(s)")
+
+    sell_cash_issues = _sell_cash_flow_issues(summary_rows, buys, sells)
+    if sell_cash_issues:
+        warnings.append(f"SELL proceeds/profit did not clearly return to cash on {len(sell_cash_issues)} event(s)")
+
+    final_profit_match = None
+    if initial_capital is not None and final_assets is not None and net_cumulative_profit is not None:
+        expected_final = initial_capital + net_cumulative_profit
+        tolerance = max(1000.0, abs(initial_capital) * 0.01)
+        final_profit_match = abs(final_assets - expected_final) <= tolerance
+        if not final_profit_match:
+            warnings.append("final_assets differs from initial_capital + net_cumulative_profit")
+
+    profit_reinvested_check = _profit_reinvested_check(summary_rows, buys, sells)
+    if profit_reinvested_check.get("status") == "WARNING":
+        warnings.append(str(profit_reinvested_check.get("reason") or "profit reinvestment could not be verified"))
+
+    return {
+        "status": "OK" if not warnings else "WARNING",
+        "initial_capital": initial_capital,
+        "final_assets": final_assets,
+        "net_cumulative_profit": net_cumulative_profit,
+        "realized_profit_total": realized_profit_total,
+        "unrealized_profit_total": unrealized_profit_total,
+        "cash_start": cash_start,
+        "cash_end": cash_end,
+        "average_cash": _average(cash_values),
+        "average_total_assets": _average(asset_values),
+        "total_buy_amount": round(sum(buy_amounts), 2) if buy_amounts else None,
+        "total_sell_amount": round(sum(sell_amounts), 2) if sell_amounts else None,
+        "max_order_amount": max(buy_amounts) if buy_amounts else None,
+        "average_order_amount": _average(buy_amounts),
+        "order_amount_growth_rate": order_amount_growth_rate,
+        "first_10_buy_orders_average_amount": first_10_avg,
+        "last_10_buy_orders_average_amount": last_10_avg,
+        "profit_reinvested_check": profit_reinvested_check,
+        "capital_flow_status": "OK" if not warnings else "WARNING",
+        "capital_flow_warning_reason": "; ".join(warnings),
+        "final_assets_profit_match": final_profit_match,
+        "asset_consistency_issue_count": len(asset_consistency_issues),
+        "sell_cash_flow_issue_count": len(sell_cash_issues),
+        "sell_cash_flow_issue_samples": sell_cash_issues[:10],
+        "source": {
+            "summary_csv": str((log_dir / "summary.csv").relative_to(root)) if (log_dir / "summary.csv").exists() else "",
+            "backtest_summary": str((log_dir / "backtest_summary.json").relative_to(root)),
+        },
+    }
+
+
+def _trade_date(item: dict[str, Any]) -> str:
+    action = str(item.get("action") or "").upper()
+    if action == "SELL":
+        return str(item.get("exit_date") or item.get("date") or item.get("trade_date") or item.get("entry_date") or item.get("signal_date") or "")
+    return str(item.get("entry_date") or item.get("date") or item.get("trade_date") or item.get("signal_date") or item.get("exit_date") or "")
+
+
+def _trade_amount(item: dict[str, Any]) -> float | None:
+    amount = _number(item.get("amount") or item.get("notional") or item.get("trade_amount"))
+    if amount is not None:
+        return amount
+    price = _number(item.get("exit_price") or item.get("entry_price") or item.get("price"))
+    shares = _number(item.get("shares") or item.get("quantity"))
+    if price is None or shares is None:
+        return None
+    return round(price * shares, 2)
+
+
+def _trade_profit(item: dict[str, Any]) -> float | None:
+    return _number(item.get("net_profit") or item.get("profit") or item.get("gross_profit"))
+
+
+def _asset_consistency_issues(summary_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    issues = []
+    for row in summary_rows:
+        total_assets = _number(row.get("total_assets"))
+        cash = _number(row.get("cash"))
+        positions_value = _number(row.get("positions_value") or row.get("holding_market_value"))
+        if total_assets is None or cash is None or positions_value is None:
+            continue
+        diff = round(total_assets - cash - positions_value, 2)
+        tolerance = max(1000.0, abs(total_assets) * 0.01)
+        if abs(diff) > tolerance:
+            issues.append({"date": row.get("date"), "diff": diff})
+    return issues
+
+
+def _sell_cash_flow_issues(summary_rows: list[dict[str, Any]], buys: list[dict[str, Any]], sells: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_date = {str(row.get("date") or ""): row for row in summary_rows if row.get("date")}
+    dates = [str(row.get("date") or "") for row in summary_rows if row.get("date")]
+    buy_amount_by_date: dict[str, float] = defaultdict(float)
+    for item in buys:
+        amount = _trade_amount(item)
+        day = _trade_date(item)
+        if day and amount is not None:
+            buy_amount_by_date[day] += amount
+    issues = []
+    for item in sells:
+        day = _trade_date(item)
+        amount = _trade_amount(item)
+        if not day or amount is None or day not in by_date:
+            continue
+        try:
+            index = dates.index(day)
+        except ValueError:
+            continue
+        if index == 0:
+            continue
+        cash_before = _number(by_date[dates[index - 1]].get("cash"))
+        cash_after = _number(by_date[day].get("cash"))
+        if cash_before is None or cash_after is None:
+            continue
+        adjusted_cash_after = cash_after + buy_amount_by_date.get(day, 0.0)
+        tolerance = max(1000.0, amount * 0.02)
+        if adjusted_cash_after + tolerance < cash_before + amount:
+            issues.append(
+                {
+                    "date": day,
+                    "code": item.get("code"),
+                    "cash_before": cash_before,
+                    "cash_after": cash_after,
+                    "same_day_buy_amount": round(buy_amount_by_date.get(day, 0.0), 2),
+                    "sell_amount": amount,
+                }
+            )
+    return issues
+
+
+def _profit_reinvested_check(summary_rows: list[dict[str, Any]], buys: list[dict[str, Any]], sells: list[dict[str, Any]]) -> dict[str, Any]:
+    profitable_sells = [item for item in sells if (_trade_profit(item) or 0.0) > 0]
+    if not summary_rows or not buys or not profitable_sells:
+        return {"status": "N/A", "reason": "profitable SELL and subsequent BUY data are required"}
+    first_profit_day = min((_trade_date(item) for item in profitable_sells if _trade_date(item)), default="")
+    if not first_profit_day:
+        return {"status": "N/A", "reason": "profitable SELL date is unavailable"}
+    later_buys = [item for item in buys if _trade_date(item) > first_profit_day]
+    if not later_buys:
+        return {"status": "WARNING", "reason": "no BUY after first profitable SELL"}
+    first_cash = _number(summary_rows[0].get("cash"))
+    later_cash_values = [
+        value
+        for value in (_number(row.get("cash")) for row in summary_rows if str(row.get("date") or "") >= first_profit_day)
+        if value is not None
+    ]
+    max_later_cash = max(later_cash_values) if later_cash_values else None
+    max_later_buy_amount = max((_trade_amount(item) or 0.0) for item in later_buys)
+    return {
+        "status": "OK",
+        "first_profitable_sell_date": first_profit_day,
+        "subsequent_buy_count": len(later_buys),
+        "max_subsequent_buy_amount": max_later_buy_amount,
+        "cash_exceeded_initial_after_profit": bool(first_cash is not None and max_later_cash is not None and max_later_cash > first_cash),
+    }
+
+
 def _round_lot_amount(row: dict[str, Any], config: dict[str, Any] | None = None) -> float | None:
     amount = _number(row.get("round_lot_amount"))
     if amount is not None:
         return amount
-    price = _number(row.get("entry_price") or row.get("open") or row.get("close") or row.get("entry_open"))
+    price = _number(
+        row.get("entry_candidate_price")
+        or row.get("signal_close_price")
+        or row.get("close")
+        or row.get("adjusted_close")
+        or row.get("adjusted_price")
+        or row.get("entry_price")
+        or row.get("entry_open")
+        or row.get("open")
+    )
     if price is None:
         return None
     lot_size = 100
@@ -5201,6 +5438,50 @@ def _capital_utilization_audit_lines(audit: dict[str, Any]) -> list[str]:
         f"- no_affordable_candidate_days: {audit.get('no_affordable_candidate_days', 0)}",
         f"- target_exposure_note: {audit.get('target_exposure_note', '')}",
     ]
+    source = audit.get("source", {})
+    if isinstance(source, dict):
+        lines.append(f"- source: {json.dumps(source, ensure_ascii=False, sort_keys=True)}")
+    return lines
+
+
+def _compounding_capital_flow_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- audit: unavailable"]
+    if audit.get("status") == "unavailable":
+        return [f"- status: unavailable", f"- reason: {audit.get('reason', '')}"]
+    lines = [
+        f"- initial_capital: {_format_yen(audit.get('initial_capital'))}",
+        f"- final_assets: {_format_yen(audit.get('final_assets'))}",
+        f"- net_cumulative_profit: {_format_yen(audit.get('net_cumulative_profit'))}",
+        f"- realized_profit_total: {_format_yen(audit.get('realized_profit_total'))}",
+        f"- unrealized_profit_total: {_format_yen(audit.get('unrealized_profit_total'))}",
+        f"- cash_start: {_format_yen(audit.get('cash_start'))}",
+        f"- cash_end: {_format_yen(audit.get('cash_end'))}",
+        f"- average_cash: {_format_yen(audit.get('average_cash'))}",
+        f"- average_total_assets: {_format_yen(audit.get('average_total_assets'))}",
+        f"- total_buy_amount: {_format_yen(audit.get('total_buy_amount'))}",
+        f"- total_sell_amount: {_format_yen(audit.get('total_sell_amount'))}",
+        f"- max_order_amount: {_format_yen(audit.get('max_order_amount'))}",
+        f"- average_order_amount: {_format_yen(audit.get('average_order_amount'))}",
+        f"- order_amount_growth_rate: {_format_percent(audit.get('order_amount_growth_rate'))}",
+        f"- first_10_buy_orders_average_amount: {_format_yen(audit.get('first_10_buy_orders_average_amount'))}",
+        f"- last_10_buy_orders_average_amount: {_format_yen(audit.get('last_10_buy_orders_average_amount'))}",
+        f"- profit_reinvested_check: {json.dumps(audit.get('profit_reinvested_check', {}), ensure_ascii=False, sort_keys=True)}",
+        f"- capital_flow_status: {audit.get('capital_flow_status')}",
+        f"- capital_flow_warning_reason: {audit.get('capital_flow_warning_reason') or ''}",
+        f"- final_assets_profit_match: {str(bool(audit.get('final_assets_profit_match'))).lower() if audit.get('final_assets_profit_match') is not None else 'N/A'}",
+        f"- asset_consistency_issue_count: {audit.get('asset_consistency_issue_count', 0)}",
+        f"- sell_cash_flow_issue_count: {audit.get('sell_cash_flow_issue_count', 0)}",
+    ]
+    samples = audit.get("sell_cash_flow_issue_samples", []) or []
+    if samples:
+        lines.extend(["", "### Sell Cash Flow Issue Samples", "", "| date | code | cash_before | cash_after | same_day_buy_amount | sell_amount |", "| --- | --- | ---: | ---: | ---: | ---: |"])
+        for row in samples[:10]:
+            lines.append(
+                f"| {row.get('date') or ''} | {row.get('code') or ''} | "
+                f"{_format_yen(row.get('cash_before'))} | {_format_yen(row.get('cash_after'))} | "
+                f"{_format_yen(row.get('same_day_buy_amount'))} | {_format_yen(row.get('sell_amount'))} |"
+            )
     source = audit.get("source", {})
     if isinstance(source, dict):
         lines.append(f"- source: {json.dumps(source, ensure_ascii=False, sort_keys=True)}")

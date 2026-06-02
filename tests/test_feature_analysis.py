@@ -7,6 +7,7 @@ from db import initialize_database, save_market_context, save_scoring_results, s
 from feature_analysis import (
     _backtest_integrity_audits,
     _capital_utilization_audit,
+    _compounding_capital_flow_audit,
     _price_band_affordability_audit,
     build_feature_analysis,
     render_feature_analysis_markdown,
@@ -123,6 +124,118 @@ def test_price_band_affordability_audit_reports_penalized_rows(config_copy: dict
     assert audit["scored_round_lot_amount_breakdown"]["400k-500k"] == 1
     assert audit["sample_penalized_rows"][0]["code"] == "1002"
     assert audit["sample_penalized_rows"][0]["round_lot_amount"] == 500000
+
+
+def test_compounding_capital_flow_audit_tracks_profit_reinvestment(config_copy: dict, tmp_path) -> None:
+    profile_id = config_copy["profile_id"]
+    config_copy["initial_capital"] = 1000000
+    log_dir = tmp_path / "logs" / "backtests" / profile_id / "2026-01-01_to_2026-01-03"
+    log_dir.mkdir(parents=True)
+    (log_dir / "summary.csv").write_text(
+        "date,total_assets,cash,positions_value,open_positions_count\n"
+        "2026-01-01,1000000,700000,300000,1\n"
+        "2026-01-02,1030000,630000,400000,1\n"
+        "2026-01-03,1010000,710000,300000,1\n",
+        encoding="utf-8",
+    )
+    backtest_summary = {
+        "initial_capital": 1000000,
+        "final_assets": 1010000,
+        "net_cumulative_profit": 10000,
+        "all_trades": [
+            {"action": "BUY", "entry_date": "2026-01-01", "code": "1001", "amount": 300000},
+            {"action": "SELL", "exit_date": "2026-01-02", "code": "1001", "amount": 330000, "profit": 30000},
+            {"action": "BUY", "entry_date": "2026-01-02", "code": "1002", "amount": 400000},
+            {"action": "SELL", "exit_date": "2026-01-03", "code": "1002", "amount": 380000, "profit": -20000},
+            {"action": "BUY", "entry_date": "2026-01-03", "code": "1003", "amount": 300000},
+        ],
+    }
+
+    audit = _compounding_capital_flow_audit(
+        tmp_path,
+        profile_id,
+        "2026-01-01",
+        "2026-01-03",
+        backtest_summary,
+        config_copy,
+    )
+
+    assert audit["capital_flow_status"] == "OK"
+    assert audit["realized_profit_total"] == 10000
+    assert audit["cash_end"] == 710000
+    assert audit["total_buy_amount"] == 1000000
+    assert audit["total_sell_amount"] == 710000
+    assert audit["profit_reinvested_check"]["status"] == "OK"
+    assert audit["profit_reinvested_check"]["subsequent_buy_count"] == 1
+    assert audit["sell_cash_flow_issue_count"] == 0
+
+
+def test_compounding_capital_flow_audit_tracks_loss_reduced_cash(config_copy: dict, tmp_path) -> None:
+    profile_id = config_copy["profile_id"]
+    config_copy["initial_capital"] = 1000000
+    log_dir = tmp_path / "logs" / "backtests" / profile_id / "2026-01-01_to_2026-01-02"
+    log_dir.mkdir(parents=True)
+    (log_dir / "summary.csv").write_text(
+        "date,total_assets,cash,positions_value,open_positions_count\n"
+        "2026-01-01,1000000,600000,400000,1\n"
+        "2026-01-02,980000,680000,300000,1\n",
+        encoding="utf-8",
+    )
+    backtest_summary = {
+        "initial_capital": 1000000,
+        "final_assets": 980000,
+        "net_cumulative_profit": -20000,
+        "all_trades": [
+            {"action": "BUY", "entry_date": "2026-01-01", "code": "1001", "amount": 400000},
+            {"action": "SELL", "exit_date": "2026-01-02", "code": "1001", "amount": 380000, "profit": -20000},
+            {"action": "BUY", "entry_date": "2026-01-02", "code": "1002", "amount": 300000},
+        ],
+    }
+
+    audit = _compounding_capital_flow_audit(
+        tmp_path,
+        profile_id,
+        "2026-01-01",
+        "2026-01-02",
+        backtest_summary,
+        config_copy,
+    )
+
+    assert audit["capital_flow_status"] == "OK"
+    assert audit["realized_profit_total"] == -20000
+    assert audit["cash_end"] == 680000
+    assert audit["profit_reinvested_check"]["status"] == "N/A"
+    assert audit["sell_cash_flow_issue_count"] == 0
+
+
+def test_compounding_capital_flow_audit_warns_on_final_assets_mismatch(config_copy: dict, tmp_path) -> None:
+    profile_id = config_copy["profile_id"]
+    log_dir = tmp_path / "logs" / "backtests" / profile_id / "2026-01-01_to_2026-01-01"
+    log_dir.mkdir(parents=True)
+    (log_dir / "summary.csv").write_text(
+        "date,total_assets,cash,positions_value,open_positions_count\n"
+        "2026-01-01,1000000,1000000,0,0\n",
+        encoding="utf-8",
+    )
+    backtest_summary = {
+        "initial_capital": 1000000,
+        "final_assets": 1000000,
+        "net_cumulative_profit": 50000,
+        "all_trades": [],
+    }
+
+    audit = _compounding_capital_flow_audit(
+        tmp_path,
+        profile_id,
+        "2026-01-01",
+        "2026-01-01",
+        backtest_summary,
+        config_copy,
+    )
+
+    assert audit["capital_flow_status"] == "WARNING"
+    assert audit["final_assets_profit_match"] is False
+    assert "final_assets differs" in audit["capital_flow_warning_reason"]
 
 
 def test_feature_analysis_repairs_stale_trade_without_selected_audit(config_copy: dict, tmp_path) -> None:

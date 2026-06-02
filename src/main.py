@@ -4986,6 +4986,7 @@ def _experiment_scoring_signature(config: dict[str, Any]) -> str:
         "scoring": config.get("scoring", {}),
         "selection": config.get("selection", {}),
         "volume_filter": config.get("volume_filter", {}),
+        "affordability_filter": config.get("affordability_filter", {}),
         "market_filter": {
             "allowed_sections": sorted(allowed_market_sections(config)),
             "allow_unknown_market": bool(config.get("market_filter", {}).get("allow_unknown_market", False)),
@@ -11605,6 +11606,8 @@ RUNTIME_SCORE_FIELDS = {
     "volume_ratio", "turnover_value", "total_score", "technical_score",
     "confidence", "rank", "selected", "reason", "score_reason",
     "selection_reason", "selected_reason", "rejected_reason", "fallback",
+    "affordability_filter_enabled", "round_lot_amount", "preferred_round_lot_amount",
+    "price_band_penalty", "price_band_penalty_reason", "affordability_penalty",
     "candlestick_signals", "candlestick_score", "trend_score", "ma_score",
     "volume_score", "rsi_score", "market_context_score", "sector_score",
     "penalty_score", "score_components_total", "score_components_match",
