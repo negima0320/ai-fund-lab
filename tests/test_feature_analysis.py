@@ -12,6 +12,7 @@ from feature_analysis import (
     _market_section_performance_audit_lines,
     _monthly_performance_audit,
     _price_band_affordability_audit,
+    _standard_ranking_input_audit,
     _standard_scoring_funnel_audit,
     build_feature_analysis,
     render_feature_analysis_markdown,
@@ -312,6 +313,98 @@ def test_standard_scoring_funnel_audit_reports_missing_scored_payload(tmp_path, 
     assert audit["after_scoring_count"] == 0
     assert audit["scored_payload_missing_count"] == 1
     assert audit["scoring_input_exclusion_reasons"]["Standard"]["scored_candidates_missing"] == 1
+
+
+def test_standard_ranking_input_audit_breaks_down_not_in_ranking_universe(
+    tmp_path,
+    config_copy: dict,
+) -> None:
+    profile_id = "rookie_dealer_02_v2_47"
+    profile_dir = tmp_path / "data" / "processed" / profile_id
+    profile_dir.mkdir(parents=True)
+    config_copy["relative_strength"] = {"enabled": False}
+    (profile_dir / "candidates_2026-01-05.json").write_text(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "date": "2026-01-05",
+                        "code": "3001",
+                        "name": "Standard Ready",
+                        "market_section": "TSEStandard",
+                        "close": 1000,
+                        "volume": 200000,
+                        "turnover_value": 200000000,
+                        "volume_ratio": 2.5,
+                        "ma5": 990,
+                        "ma25": 970,
+                        "rsi": 55,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (profile_dir / "scored_candidates_2026-01-05.json").write_text(
+        json.dumps({"candidate_count": 10, "scores": []}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    audit = _standard_ranking_input_audit(tmp_path, profile_id, "2026-01-01", "2026-01-31", config_copy)
+    markdown = render_feature_analysis_markdown(
+        {
+            "profile_id": profile_id,
+            "profile_name": profile_id,
+            "closed_trade_count": 0,
+            "standard_ranking_input_audit": audit,
+        }
+    )
+
+    assert audit["after_screening_count"] == 1
+    assert audit["after_scoring_count"] == 0
+    assert audit["exclusion_reasons"]["Standard"]["not_in_ranking_universe"] == 1
+    row = audit["standard_ranking_input_excluded_rows"][0]
+    assert row["trading_value"] == 200000000
+    assert row["ranking_exclusion_reason"] == "not_in_ranking_universe"
+    assert "## Standard Ranking Input Audit" in markdown
+    assert "| Standard | not_in_ranking_universe | 1 |" in markdown
+    assert "| 2026-01-05 | 3001 | Standard Ready | Standard | 1000.00 | 200000.00 | 200000000.00 |" in markdown
+
+
+def test_standard_ranking_input_audit_reports_missing_indicator(tmp_path, config_copy: dict) -> None:
+    profile_id = "rookie_dealer_02_v2_47"
+    profile_dir = tmp_path / "data" / "processed" / profile_id
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "candidates_2026-01-06.json").write_text(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "date": "2026-01-06",
+                        "code": "3002",
+                        "name": "Standard Missing MA",
+                        "market_section": "TSEStandard",
+                        "close": 1200,
+                        "volume": 100000,
+                        "volume_ratio": 2.1,
+                        "rsi": 52,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (profile_dir / "scored_candidates_2026-01-06.json").write_text(
+        json.dumps({"candidate_count": 1, "scores": []}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    audit = _standard_ranking_input_audit(tmp_path, profile_id, "2026-01-01", "2026-01-31", config_copy)
+
+    assert audit["exclusion_reasons"]["Standard"]["missing_indicator"] == 1
+    assert audit["standard_ranking_input_excluded_rows"][0]["ranking_exclusion_reason"] == "missing_indicator"
 
 
 def test_market_section_performance_audit_fills_unknown_from_master(config_copy: dict, tmp_path) -> None:

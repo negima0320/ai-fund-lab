@@ -208,6 +208,10 @@ def build_feature_analysis(
         "feature_analysis_score_integrity_sec",
         lambda: _standard_scoring_funnel_audit(root, profile_id, start_date, end_date, config),
     )
+    standard_ranking_input_audit = timed(
+        "feature_analysis_score_integrity_sec",
+        lambda: _standard_ranking_input_audit(root, profile_id, start_date, end_date, config),
+    )
     allocation_strategy_audit = timed(
         "feature_analysis_result_integrity_sec",
         lambda: _allocation_strategy_audit(root, profile_id, start_date, end_date, backtest_summary, config),
@@ -409,6 +413,7 @@ def build_feature_analysis(
         "capital_utilization_audit": capital_utilization_audit,
         "market_section_performance_audit": market_section_performance_audit,
         "standard_scoring_funnel_audit": standard_scoring_funnel_audit,
+        "standard_ranking_input_audit": standard_ranking_input_audit,
         "allocation_strategy_audit": allocation_strategy_audit,
         "dynamic_exposure_audit": dynamic_exposure_audit,
         "affordable_fallback_buy_audit": affordable_fallback_buy_audit,
@@ -506,6 +511,10 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "## Standard Scoring Funnel Audit",
         "",
         *_standard_scoring_funnel_audit_lines(analysis.get("standard_scoring_funnel_audit", {})),
+        "",
+        "## Standard Ranking Input Audit",
+        "",
+        *_standard_ranking_input_audit_lines(analysis.get("standard_ranking_input_audit", {})),
         "",
         "## Scored Candidate Audit",
         "",
@@ -5502,6 +5511,139 @@ def _standard_scoring_funnel_audit(
     }
 
 
+def _standard_ranking_input_audit(
+    root: Path,
+    profile_id: str,
+    start_date: str | None,
+    end_date: str | None,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    profile_dir = root / "data" / "processed" / profile_id
+    market_section_master = _market_section_master_by_code(root)
+    rows: list[dict[str, Any]] = []
+    reasons: dict[str, dict[str, int]] = {}
+    after_screening_count = 0
+    after_scoring_count = 0
+    if profile_dir.exists():
+        candidate_paths = sorted(profile_dir.glob("candidates_*.json"))
+    else:
+        candidate_paths = []
+    for candidate_path in candidate_paths:
+        day = _date_from_filename(candidate_path)
+        if start_date and day and day < start_date:
+            continue
+        if end_date and day and day > end_date:
+            continue
+        candidate_payload = _read_json_object(candidate_path)
+        standard_candidates = [
+            row
+            for row in _rows_from_processed_payload(candidate_payload, "candidates")
+            if isinstance(row, dict) and _market_section_label(row, market_section_master) == "Standard"
+        ]
+        if not standard_candidates:
+            continue
+        after_screening_count += len(standard_candidates)
+        scored_path = profile_dir / f"scored_candidates_{day}.json"
+        scored_payload = _read_json_object(scored_path)
+        scored_rows = [
+            row
+            for row in _rows_from_processed_payload(scored_payload, "scored_candidates")
+            if isinstance(row, dict)
+        ]
+        scored_by_code = {
+            _normalize_code(row.get("code") or row.get("Code")): row
+            for row in scored_rows
+        }
+        for candidate in standard_candidates:
+            code = _normalize_code(candidate.get("code") or candidate.get("Code"))
+            scored_row = scored_by_code.get(code)
+            if scored_row is not None:
+                after_scoring_count += 1
+                continue
+            reason = _standard_ranking_input_exclusion_reason(candidate, scored_payload, scored_path.exists(), config)
+            _increment_nested_count(reasons, "Standard", reason)
+            rows.append(_standard_ranking_input_sample(candidate, day, reason, market_section_master))
+    return {
+        "status": "OK",
+        "after_screening_count": after_screening_count,
+        "after_scoring_count": after_scoring_count,
+        "excluded_count": len(rows),
+        "exclusion_reasons": reasons,
+        "standard_ranking_input_excluded_rows": rows[:20],
+    }
+
+
+def _standard_ranking_input_sample(
+    candidate: dict[str, Any],
+    day: str,
+    reason: str,
+    market_section_master: dict[str, str] | None,
+) -> dict[str, Any]:
+    return {
+        "date": day or candidate.get("date"),
+        "code": _normalize_code(candidate.get("code") or candidate.get("Code")),
+        "name": candidate.get("name") or candidate.get("company_name") or candidate.get("company") or candidate.get("CoName"),
+        "market_section": _market_section_label(candidate, market_section_master),
+        "close": _number(candidate.get("close") or candidate.get("adjusted_close") or candidate.get("price")),
+        "volume": _number(candidate.get("volume") or candidate.get("adjusted_volume")),
+        "trading_value": _candidate_trading_value(candidate),
+        "volume_ratio": _number(candidate.get("volume_ratio")),
+        "ma5": _number(candidate.get("ma5")),
+        "ma25": _number(candidate.get("ma25")),
+        "rsi": _number(candidate.get("rsi")),
+        "total_score": _number(candidate.get("total_score")),
+        "total_score_missing_reason": reason if _number(candidate.get("total_score")) is None else "",
+        "ranking_exclusion_reason": reason,
+    }
+
+
+def _candidate_trading_value(candidate: dict[str, Any]) -> float | None:
+    for key in ("trading_value", "turnover_value", "direct_turnover_value"):
+        value = _number(candidate.get(key))
+        if value is not None:
+            return value
+    close = _number(candidate.get("close") or candidate.get("adjusted_close") or candidate.get("price"))
+    volume = _number(candidate.get("volume") or candidate.get("adjusted_volume"))
+    if close is None or volume is None:
+        return None
+    return close * volume
+
+
+def _standard_ranking_input_exclusion_reason(
+    candidate: dict[str, Any],
+    scored_payload: Any,
+    scored_path_exists: bool,
+    config: dict[str, Any] | None,
+) -> str:
+    if not scored_path_exists:
+        return "not_in_ranking_universe"
+    if _number(candidate.get("close") or candidate.get("adjusted_close") or candidate.get("price")) is None:
+        return "missing_price"
+    if _number(candidate.get("volume") or candidate.get("adjusted_volume")) is None:
+        return "missing_volume"
+    if _candidate_trading_value(candidate) is None:
+        return "missing_trading_value"
+    missing_indicators = [
+        key
+        for key in ("ma5", "ma25", "rsi")
+        if _number(candidate.get(key)) is None
+    ]
+    if missing_indicators:
+        return "missing_indicator"
+    relative_strength = (config or {}).get("relative_strength")
+    if isinstance(relative_strength, dict) and relative_strength.get("enabled"):
+        rs_values = ("relative_strength_5d", "relative_strength_10d", "relative_strength_20d", "relative_strength_score")
+        if all(_number(candidate.get(key)) is None for key in rs_values):
+            return "missing_relative_strength"
+    score = _number(candidate.get("total_score"))
+    min_score = _number(((config or {}).get("selection", {}) or {}).get("min_score"))
+    if score is not None and min_score is not None and score < min_score:
+        return "below_ranking_min_score"
+    if isinstance(scored_payload, dict) and int(scored_payload.get("candidate_count") or 0) > 0:
+        return "not_in_ranking_universe"
+    return "unknown"
+
+
 def _read_json_object(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -5545,7 +5687,7 @@ def _standard_scoring_input_exclusion_reason(
     if isinstance(financial_context, dict) and financial_context.get("enabled"):
         if candidate.get("financial_context") is None and candidate.get("financial_summary") is None:
             return "financial_context_missing"
-    return "ranking_input_filter_or_unknown"
+    return _standard_ranking_input_exclusion_reason(candidate, scored_payload, scored_path_exists, config)
 
 
 def _standard_scoring_missing_prerequisites(candidate: dict[str, Any]) -> list[str]:
@@ -7155,6 +7297,60 @@ def _standard_scoring_funnel_audit_lines(audit: dict[str, Any]) -> list[str]:
             added_sample = True
     if not added_sample:
         lines.append("| - | - | - | - | - |")
+    return lines
+
+
+def _standard_ranking_input_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- audit: unavailable"]
+    lines = [
+        f"- after_screening_count: {audit.get('after_screening_count', 0)}",
+        f"- after_scoring_count: {audit.get('after_scoring_count', 0)}",
+        f"- excluded_count: {audit.get('excluded_count', 0)}",
+        "",
+        "### Ranking Input Exclusion Reasons",
+        "",
+        "| market | reason | count |",
+        "| --- | --- | ---: |",
+    ]
+    reasons = audit.get("exclusion_reasons", {})
+    added_reason = False
+    if isinstance(reasons, dict):
+        for market in sorted(reasons):
+            counts = reasons.get(market, {})
+            if not isinstance(counts, dict):
+                continue
+            for reason, count in sorted(counts.items(), key=lambda item: (-int(item[1] or 0), str(item[0]))):
+                lines.append(f"| {market} | {reason} | {int(count or 0)} |")
+                added_reason = True
+    if not added_reason:
+        lines.append("| - | - | 0 |")
+    lines.extend(
+        [
+            "",
+            "### Standard Ranking Input Excluded Rows",
+            "",
+            "| date | code | name | market_section | close | volume | trading_value | volume_ratio | ma5 | ma25 | rsi | total_score_missing_reason | ranking_exclusion_reason |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+        ]
+    )
+    rows = audit.get("standard_ranking_input_excluded_rows", [])
+    added_row = False
+    if isinstance(rows, list):
+        for row in rows[:20]:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                f"| {row.get('date') or ''} | {row.get('code') or ''} | {row.get('name') or ''} | "
+                f"{row.get('market_section') or 'Unknown'} | {_format_number(row.get('close'))} | "
+                f"{_format_number(row.get('volume'))} | {_format_number(row.get('trading_value'))} | "
+                f"{_format_number(row.get('volume_ratio'))} | {_format_number(row.get('ma5'))} | "
+                f"{_format_number(row.get('ma25'))} | {_format_number(row.get('rsi'))} | "
+                f"{row.get('total_score_missing_reason') or ''} | {row.get('ranking_exclusion_reason') or 'unknown'} |"
+            )
+            added_row = True
+    if not added_row:
+        lines.append("| - | - | - | - | - | - | - | - | - | - | - | - | - |")
     return lines
 
 
