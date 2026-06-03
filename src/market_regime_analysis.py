@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 from collections import defaultdict
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -140,12 +141,20 @@ def _normalize_summary(row: dict[str, Any]) -> dict[str, Any]:
 
 def _load_market_contexts(root: Path, start_date: str, end_date: str) -> dict[str, dict[str, Any]]:
     contexts = {}
-    for path in sorted((root / "data" / "processed").glob("market_context_*.json")):
-        date = path.stem.replace("market_context_", "")
-        if date < start_date or date > end_date:
+    try:
+        start = date.fromisoformat(start_date)
+        end = date.fromisoformat(end_date)
+    except ValueError:
+        return contexts
+    current = start
+    while current <= end:
+        date_text = current.isoformat()
+        path = root / "data" / "processed" / f"market_context_{date_text}.json"
+        current += timedelta(days=1)
+        if not path.exists():
             continue
         try:
-            contexts[date] = json.loads(path.read_text(encoding="utf-8"))
+            contexts[date_text] = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
     return contexts

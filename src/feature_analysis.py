@@ -9,6 +9,7 @@ import sqlite3
 import time
 from argparse import ArgumentParser
 from collections import defaultdict
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +86,33 @@ COMPONENT_CONFIGURED_MAX = {
     "candlestick_score": 15,
     "sector_score": 5,
 }
+
+
+def _date_strings_between(start_date: str | None, end_date: str | None, *, lookback_days: int = 0) -> list[str] | None:
+    if not start_date or not end_date:
+        return None
+    try:
+        start = date.fromisoformat(start_date) - timedelta(days=max(0, lookback_days))
+        end = date.fromisoformat(end_date)
+    except ValueError:
+        return None
+    if start > end:
+        return []
+    days: list[str] = []
+    current = start
+    while current <= end:
+        days.append(current.isoformat())
+        current += timedelta(days=1)
+    return days
+
+
+def _dated_json_paths(directory: Path, prefix: str, start_date: str | None, end_date: str | None, *, lookback_days: int = 0) -> list[Path]:
+    if not directory.exists():
+        return []
+    days = _date_strings_between(start_date, end_date, lookback_days=lookback_days)
+    if days is None:
+        return sorted(directory.glob(f"{prefix}_*.json"))
+    return [path for day in days if (path := directory / f"{prefix}_{day}.json").exists()]
 
 
 def build_feature_analysis(
@@ -2484,12 +2512,8 @@ def _processed_json_stage_rows(root: Path, profile_id: str, stage: str, start_da
     if not directory.exists():
         return []
     rows: list[dict[str, Any]] = []
-    for path in sorted(directory.glob(f"{stage}_*.json")):
+    for path in _dated_json_paths(directory, stage, start_date, end_date):
         date_text = _date_from_filename(path)
-        if start_date and date_text and date_text < start_date:
-            continue
-        if end_date and date_text and date_text > end_date:
-            continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
@@ -2860,7 +2884,9 @@ def _escape_table_cell(value: Any) -> str:
 def _first_payload_from_files(directory: Path, pattern: str, start_date: str | None, end_date: str | None) -> dict[str, Any]:
     if not directory.exists():
         return {}
-    for path in sorted(directory.glob(pattern)):
+    prefix = pattern.removesuffix("_*.json")
+    paths = _dated_json_paths(directory, prefix, start_date, end_date) if pattern.endswith("_*.json") else sorted(directory.glob(pattern))
+    for path in paths:
         date_text = _date_from_filename(path)
         if start_date and date_text and date_text < start_date:
             continue
@@ -4488,12 +4514,8 @@ def _indicator_date_paths(root: Path, profile_id: str, start_date: str | None, e
     for directory in dirs:
         if not directory.exists():
             continue
-        for path in sorted(directory.glob("indicators_*.json")):
+        for path in _dated_json_paths(directory, "indicators", start_date, end_date):
             date_value = path.stem.replace("indicators_", "")
-            if start_date and date_value < start_date:
-                continue
-            if end_date and date_value > end_date:
-                continue
             candidates.setdefault(date_value, path)
     return candidates
 
@@ -5034,10 +5056,8 @@ def _processed_scored_candidate_keys(
     selected_by_key: dict[str, dict[str, Any]] = {}
     key_source: dict[str, str] = {}
     processed_dir = root / "data" / "processed" / profile_id
-    for path in sorted(processed_dir.glob("scored_candidates_*.json")):
+    for path in _dated_json_paths(processed_dir, "scored_candidates", start_date, end_date):
         day = path.stem.replace("scored_candidates_", "")
-        if day < start_date or day > end_date:
-            continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
@@ -5701,12 +5721,8 @@ def _standard_scoring_funnel_audit(
     samples: list[dict[str, Any]] = []
     days_checked = 0
     scored_payload_missing_count = 0
-    for candidate_path in sorted(profile_dir.glob("candidates_*.json")) if profile_dir.exists() else []:
+    for candidate_path in _dated_json_paths(profile_dir, "candidates", start_date, end_date):
         day = _date_from_filename(candidate_path)
-        if start_date and day and day < start_date:
-            continue
-        if end_date and day and day > end_date:
-            continue
         candidate_payload = _read_json_object(candidate_path)
         candidate_rows = [
             row
@@ -5783,16 +5799,8 @@ def _standard_ranking_input_audit(
     persisted_ranking_counts = {"Prime": 0, "Standard": 0, "Growth": 0, "Unknown": 0}
     after_screening_count = 0
     after_scoring_count = 0
-    if profile_dir.exists():
-        candidate_paths = sorted(profile_dir.glob("candidates_*.json"))
-    else:
-        candidate_paths = []
-    for candidate_path in candidate_paths:
+    for candidate_path in _dated_json_paths(profile_dir, "candidates", start_date, end_date):
         day = _date_from_filename(candidate_path)
-        if start_date and day and day < start_date:
-            continue
-        if end_date and day and day > end_date:
-            continue
         candidate_payload = _read_json_object(candidate_path)
         candidate_rows = [
             row
@@ -6656,10 +6664,8 @@ def _affordable_fallback_buy_audit_lines(audit: dict[str, Any]) -> list[str]:
 
 def _load_market_contexts_for_audit(root: Path, start_date: str, end_date: str) -> dict[str, dict[str, Any]]:
     contexts: dict[str, dict[str, Any]] = {}
-    for path in sorted((root / "data" / "processed").glob("market_context_*.json")):
+    for path in _dated_json_paths(root / "data" / "processed", "market_context", start_date, end_date, lookback_days=14):
         date = path.stem.replace("market_context_", "")
-        if date > end_date:
-            continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):

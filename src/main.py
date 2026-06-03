@@ -117,6 +117,7 @@ PROGRESS_INTERVAL = 10
 JQUANTS_PLAN_OVERRIDE: str | None = None
 FORCE_REFRESH_ACTIVE = False
 STORAGE_MODE_OVERRIDE: str | None = None
+RESUME_ACTIVE = False
 BACKTEST_PROFILE_TIMINGS: dict[str, float] = {}
 BACKTEST_PROFILE_TOTAL_SECONDS = 0.0
 BACKTEST_JSON_READ_AUDIT: dict[str, Any] = {}
@@ -223,7 +224,7 @@ Common option groups:
     --date for one-day modes; --start-date/--end-date or --period for period modes
   Backtest/run-experiments load control:
     --skip-price-fetch, --quiet, --progress-interval, --summary-only,
-    --no-daily-logs, --fast-analysis, --storage-mode, --entry-timing
+    --no-daily-logs, --fast-analysis, --storage-mode, --entry-timing, --resume
   Integrity and reuse:
     --strict-integrity, --skip-backtest, --skip-analyze
   Cleanup:
@@ -288,7 +289,7 @@ Notes:
 def main() -> None:
     global ACTIVE_PROFILE_ID, FAST_ANALYSIS_ACTIVE, SUMMARY_ONLY_ACTIVE, NO_DAILY_LOGS_ACTIVE, SKIP_PRICE_FETCH_ACTIVE
     global QUIET_ACTIVE, PROGRESS_INTERVAL
-    global JQUANTS_PLAN_OVERRIDE, FORCE_REFRESH_ACTIVE, STORAGE_MODE_OVERRIDE, RUNTIME_SETTINGS
+    global JQUANTS_PLAN_OVERRIDE, FORCE_REFRESH_ACTIVE, STORAGE_MODE_OVERRIDE, RESUME_ACTIVE, RUNTIME_SETTINGS
     _enable_line_buffered_output()
     args = parse_args()
     RUNTIME_SETTINGS = resolve_runtime_settings(args)
@@ -302,6 +303,7 @@ def main() -> None:
     JQUANTS_PLAN_OVERRIDE = args.jquants_plan
     FORCE_REFRESH_ACTIVE = bool(args.force_refresh)
     STORAGE_MODE_OVERRIDE = args.storage_mode
+    RESUME_ACTIVE = bool(args.resume)
     provider_name = RUNTIME_SETTINGS["provider"]
     if args.mode == "help":
         run_help()
@@ -325,7 +327,16 @@ def main() -> None:
         run_compare_experiments(args.base_profile, args.start_date, args.end_date)
         return
     if args.mode == "run-experiments":
-        run_experiments(args.base_profile, args.start_date, args.end_date, args.profiles, args.skip_backtest, args.skip_analyze, args.strict_integrity)
+        run_experiments(
+            args.base_profile,
+            args.start_date,
+            args.end_date,
+            args.profiles,
+            args.skip_backtest,
+            args.skip_analyze,
+            args.strict_integrity,
+            resume=args.resume,
+        )
         return
     if args.mode == "jquants-api-summary":
         run_jquants_api_summary()
@@ -747,6 +758,11 @@ def parse_args() -> Any:
         "--skip-analyze",
         action="store_true",
         help="Skip analyze in run-experiments and use existing analysis outputs where required.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Run-experiments only: skip profiles whose backtest summary/trades/summary CSV already cover the requested period.",
     )
     parser.add_argument(
         "--yes",
@@ -4262,7 +4278,20 @@ def run_analyze(config: dict[str, Any], start_date: str | None = None, end_date:
     selection_quality_markdown_path = output_dir / "selection_quality.md"
     feature_analysis = timed_analyze("feature_analysis_generation", lambda: build_feature_analysis(config, ROOT, start_date, end_date))
     _record_feature_analysis_performance(feature_analysis)
-    selection_quality_analysis = build_selection_quality_analysis(config, ROOT)
+    if _fast_analysis_enabled(config):
+        selection_quality_analysis = {
+            "profile_id": profile_id_from(config),
+            "profile_name": profile_name_from(config),
+            "skipped": True,
+            "skip_reason": "fast_analysis",
+            "screen_candidate_count": 0,
+            "score_candidate_count": 0,
+            "selected_count": 0,
+            "rejected_count": 0,
+        }
+        analyze_performance["selection_quality_generation"] = 0.0
+    else:
+        selection_quality_analysis = timed_analyze("selection_quality_generation", lambda: build_selection_quality_analysis(config, ROOT))
     analysis["selection_quality_analysis"] = selection_quality_analysis
     _run_timed_backtest_phase("report_write", lambda: write_json(json_path, analysis))
     analysis_markdown = _run_timed_backtest_phase("markdown_render_total", lambda: render_analysis_markdown(analysis))
@@ -4274,7 +4303,10 @@ def run_analyze(config: dict[str, Any], start_date: str | None = None, end_date:
     BACKTEST_PROFILE_TIMINGS["_feature_analysis_markdown_render_sec_seen"] = float(BACKTEST_PROFILE_TIMINGS.get("feature_analysis_markdown_render_sec", 0.0))
     timed_analyze("feature_analysis_write_sec", lambda: write_text(feature_markdown_path, feature_markdown))
     _run_timed_backtest_phase("report_write", lambda: write_json(selection_quality_json_path, selection_quality_analysis))
-    selection_markdown = _run_timed_backtest_phase("markdown_render_total", lambda: render_selection_quality_markdown(selection_quality_analysis))
+    if _fast_analysis_enabled(config):
+        selection_markdown = "# Selection Quality Analysis\n\n- skipped: true\n- skip_reason: fast_analysis\n"
+    else:
+        selection_markdown = _run_timed_backtest_phase("markdown_render_total", lambda: render_selection_quality_markdown(selection_quality_analysis))
     _run_timed_backtest_phase("report_write", lambda: write_text(selection_quality_markdown_path, selection_markdown))
 
     portfolio = analysis["portfolio_analysis"]
@@ -4579,6 +4611,146 @@ def _print_date_resolution(title: str, resolution: dict[str, Any]) -> None:
     print(f"source: start={resolution.get('start_date_source')} end={resolution.get('end_date_source')}")
 
 
+def _print_run_experiments_progress(
+    stage: str,
+    *,
+    profile_id: str | None = None,
+    date_text: str | None = None,
+    current: int | None = None,
+    total: int | None = None,
+    started_at: float | None = None,
+    extra: str = "",
+) -> None:
+    elapsed = time.perf_counter() - started_at if started_at is not None else 0.0
+    parts = [f"[run-experiments] stage={stage}"]
+    if profile_id:
+        parts.append(f"profile={profile_id}")
+    if date_text:
+        parts.append(f"date={date_text}")
+    if current is not None and total is not None:
+        remaining = max(0, total - current)
+        parts.append(f"progress={current}/{total}")
+        parts.append(f"remaining={remaining}")
+    elif total is not None:
+        parts.append(f"remaining_total={total}")
+    if started_at is not None:
+        parts.append(f"elapsed={elapsed:.1f}s")
+    if extra:
+        parts.append(extra)
+    print(" ".join(parts))
+
+
+def _empty_run_experiments_performance_report() -> dict[str, Any]:
+    return {
+        "price_fetch_time": 0.0,
+        "shared_price_fetch_time": 0.0,
+        "indicator_time": 0.0,
+        "shared_indicator_time": 0.0,
+        "candidate_time": 0.0,
+        "shared_candidate_time": 0.0,
+        "market_context_time": 0.0,
+        "report_time": 0.0,
+        "feature_analysis_generation_time": 0.0,
+        "experiment_summary_generation_time": 0.0,
+        "scoring_time": 0.0,
+        "trade_time": 0.0,
+        "profile_scoring_time_by_profile": {},
+        "profile_trade_time_by_profile": {},
+        "profile_report_time_by_profile": {},
+        "feature_analysis_time_by_profile": {},
+        "profile_stage_time_by_profile": {},
+        "profile_total_time_by_profile": {},
+        "profile_phase_time_by_profile": {},
+        "profile_phase_accounting_delta_by_profile": {},
+        "top_bottlenecks": [],
+        "compare_profiles_time": 0.0,
+        "daily_reports_skipped_count": 0,
+        "articles_skipped_count": 0,
+        "reflections_skipped_count": 0,
+        "reused_indicator_count": 0,
+        "reused_candidate_count": 0,
+        "reused_scoring_count": 0,
+        "cache_reused_from_common_count": 0,
+        "profile_specific_cache_count": 0,
+        "indicator_cache_source": {},
+        "candidate_cache_source": {},
+        "generated_cache_size": 0,
+        "cleanup_hint": "",
+        "skipped_profiles": [],
+        "stage_groups": [],
+        "price_fetch_skipped": False,
+        "daily_logs_enabled": not NO_DAILY_LOGS_ACTIVE and not SUMMARY_ONLY_ACTIVE,
+        "quiet": QUIET_ACTIVE,
+        "progress_interval": PROGRESS_INTERVAL,
+        "resume_enabled": False,
+        "resume_profile_status": {},
+        "resume_skipped_profiles": [],
+        "resume_pending_profiles": [],
+    }
+
+
+def _experiment_resume_report(profile_ids: list[str], start_date_text: str, end_date_text: str) -> dict[str, dict[str, Any]]:
+    return {
+        profile_id: _experiment_profile_completion_status(profile_id, start_date_text, end_date_text)
+        for profile_id in profile_ids
+    }
+
+
+def _experiment_profile_completion_status(profile_id: str, start_date_text: str, end_date_text: str) -> dict[str, Any]:
+    range_key = f"{start_date_text}_to_{end_date_text}"
+    backtest_dir = ROOT / "logs" / "backtests" / profile_id / range_key
+    summary_path = backtest_dir / "backtest_summary.json"
+    summary_csv = backtest_dir / "summary.csv"
+    trades_csv = backtest_dir / "trades.csv"
+    missing = [
+        str(path.relative_to(ROOT))
+        for path in (summary_path, summary_csv, trades_csv)
+        if not path.exists()
+    ]
+    if missing:
+        return {"complete": False, "reason": "missing_outputs", "missing": missing}
+    try:
+        summary = read_json(summary_path)
+    except Exception as exc:
+        return {"complete": False, "reason": f"summary_read_failed:{exc}", "missing": []}
+    if str(summary.get("profile_id") or "") != profile_id:
+        return {"complete": False, "reason": "profile_id_mismatch", "summary_profile_id": summary.get("profile_id")}
+    if str(summary.get("start_date") or "") != start_date_text or str(summary.get("end_date") or "") != end_date_text:
+        return {
+            "complete": False,
+            "reason": "date_range_mismatch",
+            "summary_start_date": summary.get("start_date"),
+            "summary_end_date": summary.get("end_date"),
+        }
+    date_audit = summary.get("date_range_audit", {}) if isinstance(summary.get("date_range_audit"), dict) else {}
+    processed_days = int(date_audit.get("processed_days") or summary.get("processed_days") or 0)
+    missing_processed = int(date_audit.get("missing_processed_dates_count") or 0)
+    last_processed = date_audit.get("last_processed_day") or summary.get("processed_last_date")
+    if processed_days <= 0:
+        return {"complete": False, "reason": "no_processed_days", "processed_days": processed_days}
+    if missing_processed > 0:
+        return {
+            "complete": False,
+            "reason": "missing_processed_dates",
+            "missing_processed_dates_count": missing_processed,
+            "last_processed_day": last_processed,
+        }
+    return {
+        "complete": True,
+        "reason": "complete_outputs_found",
+        "processed_days": processed_days,
+        "last_processed_day": last_processed,
+        "summary_rows": count_csv_data_rows(summary_csv),
+        "trade_rows": count_csv_data_rows(trades_csv),
+        "final_assets": summary.get("final_assets"),
+    }
+
+
+def _experiment_analysis_complete(profile_id: str) -> bool:
+    path = ROOT / "reports" / profile_id / "backtests" / "feature_analysis.json"
+    return path.exists()
+
+
 def run_experiments(
     base_profile_id: str | None,
     start_date_text: str,
@@ -4587,6 +4759,7 @@ def run_experiments(
     skip_backtest: bool = False,
     skip_analyze: bool = False,
     strict_integrity: bool = False,
+    resume: bool = False,
 ) -> None:
     global ACTIVE_PROFILE_ID, RUN_EXPERIMENTS_SHARED_STAGE_ACTIVE, RUN_EXPERIMENTS_SCORING_REUSE_SOURCE_BY_PROFILE, RUN_EXPERIMENTS_PERFORMANCE_REPORT
     registry = load_profile_registry()
@@ -4608,6 +4781,22 @@ def run_experiments(
     runnable_experiment_ids = [item["profile_id"] for item in capability["runnable"]]
     skipped_profiles = capability["skipped"]
     profile_ids = [base, *runnable_experiment_ids]
+    batch_started = time.perf_counter()
+    resume_report = _experiment_resume_report(profile_ids, start_date_text, end_date_text) if resume and not skip_backtest else {}
+    resume_complete_profiles = {
+        profile_id
+        for profile_id, item in resume_report.items()
+        if isinstance(item, dict) and bool(item.get("complete"))
+    }
+    profile_ids_to_backtest = [profile_id for profile_id in profile_ids if profile_id not in resume_complete_profiles]
+    if resume and not skip_backtest:
+        _print_run_experiments_progress(
+            "resume-scan",
+            started_at=batch_started,
+            current=len(resume_complete_profiles),
+            total=len(profile_ids),
+            extra=f"complete={len(resume_complete_profiles)} pending={len(profile_ids_to_backtest)}",
+        )
     if skip_backtest:
         _ensure_experiment_db_rows(profile_ids, start_date_text, end_date_text)
     if skip_backtest and skip_analyze:
@@ -4632,24 +4821,80 @@ def run_experiments(
     }
     try:
         if not skip_backtest:
-            performance_report = prepare_run_experiments_common_stages(profile_ids, start_date_text, end_date_text)
+            performance_report = _empty_run_experiments_performance_report()
+            performance_report["resume_enabled"] = bool(resume)
+            performance_report["resume_profile_status"] = resume_report
+            performance_report["resume_skipped_profiles"] = sorted(resume_complete_profiles)
+            performance_report["resume_pending_profiles"] = profile_ids_to_backtest
+            if profile_ids_to_backtest:
+                _print_run_experiments_progress(
+                    "common-stages",
+                    started_at=batch_started,
+                    current=0,
+                    total=len(profile_ids_to_backtest),
+                    extra=f"profiles={', '.join(profile_ids_to_backtest)}",
+                )
+                performance_report.update(prepare_run_experiments_common_stages(profile_ids_to_backtest, start_date_text, end_date_text))
+                performance_report["resume_enabled"] = bool(resume)
+                performance_report["resume_profile_status"] = resume_report
+                performance_report["resume_skipped_profiles"] = sorted(resume_complete_profiles)
+                performance_report["resume_pending_profiles"] = profile_ids_to_backtest
+            else:
+                performance_report["all_profiles_resume_complete"] = True
+                print("run-experiments resume: all requested profiles already have complete backtest outputs.")
             performance_report["skipped_profiles"] = [item.get("profile_id") for item in skipped_profiles]
             RUN_EXPERIMENTS_PERFORMANCE_REPORT = performance_report
-            RUN_EXPERIMENTS_SCORING_REUSE_SOURCE_BY_PROFILE = _experiment_scoring_reuse_sources(profile_ids)
+            RUN_EXPERIMENTS_SCORING_REUSE_SOURCE_BY_PROFILE = _experiment_scoring_reuse_sources(profile_ids_to_backtest)
             RUN_EXPERIMENTS_SHARED_STAGE_ACTIVE = True
             for profile_id in profile_ids:
+                if profile_id in resume_complete_profiles:
+                    _print_run_experiments_progress(
+                        "backtest-skip",
+                        profile_id=profile_id,
+                        started_at=batch_started,
+                        current=profile_ids.index(profile_id) + 1,
+                        total=len(profile_ids),
+                        extra="resume complete outputs found",
+                    )
+                    if not skip_analyze:
+                        if _experiment_analysis_complete(profile_id):
+                            _print_run_experiments_progress(
+                                "analyze-skip",
+                                profile_id=profile_id,
+                                started_at=batch_started,
+                                current=profile_ids.index(profile_id) + 1,
+                                total=len(profile_ids),
+                                extra="feature_analysis exists",
+                            )
+                        else:
+                            ACTIVE_PROFILE_ID = profile_id
+                            print(f"run-experiments analyze start: {profile_id}")
+                            analyze_started = time.perf_counter()
+                            analyze_performance = run_analyze(load_config(CONFIG_PATH), start_date_text, end_date_text)
+                            analyze_seconds = round(time.perf_counter() - analyze_started, 4)
+                            _merge_feature_analysis_performance_report(performance_report, profile_id, analyze_performance)
+                            performance_report.setdefault("feature_analysis_time_by_profile", {})[profile_id] = analyze_seconds
+                    continue
                 ACTIVE_PROFILE_ID = profile_id
-                print(f"run-experiments backtest start: {profile_id}")
+                _print_run_experiments_progress(
+                    "backtest",
+                    profile_id=profile_id,
+                    started_at=batch_started,
+                    current=profile_ids.index(profile_id) + 1,
+                    total=len(profile_ids),
+                )
                 profile_started = time.perf_counter()
                 run_backtest("jquants", start_date_text, end_date_text)
                 profile_total = round(time.perf_counter() - profile_started, 4)
                 phase_snapshot = _profile_phase_time_snapshot(profile_total)
                 scoring_seconds = round(float(BACKTEST_PROFILE_TIMINGS.get("scoring", 0.0)), 4)
                 trade_seconds = round(float(BACKTEST_PROFILE_TIMINGS.get("trading", 0.0)), 4)
+                stage_summary = _profile_stage_time_summary(analyze_sec=0.0)
                 performance_report["scoring_time"] = round(float(performance_report.get("scoring_time", 0.0)) + scoring_seconds, 4)
                 performance_report["trade_time"] = round(float(performance_report.get("trade_time", 0.0)) + trade_seconds, 4)
                 performance_report.setdefault("profile_scoring_time_by_profile", {})[profile_id] = scoring_seconds
                 performance_report.setdefault("profile_trade_time_by_profile", {})[profile_id] = trade_seconds
+                performance_report.setdefault("profile_stage_time_by_profile", {})[profile_id] = stage_summary
                 performance_report.setdefault("profile_total_time_by_profile", {})[profile_id] = profile_total
                 performance_report.setdefault("profile_phase_time_by_profile", {})[profile_id] = phase_snapshot["phases"]
                 performance_report.setdefault("profile_phase_accounting_delta_by_profile", {})[profile_id] = phase_snapshot["accounting_delta"]
@@ -4684,12 +4929,13 @@ def run_experiments(
                     performance_report[key] = int(performance_report.get(key, 0) or 0) + int(BACKTEST_PROFILE_TIMINGS.get(key, 0) or 0)
                 _merge_jquants_api_session_summary(experiment_api_summary)
                 if not skip_analyze:
-                    print(f"run-experiments analyze start: {profile_id}")
+                    _print_run_experiments_progress("analyze", profile_id=profile_id, started_at=batch_started)
                     analyze_started = time.perf_counter()
                     analyze_performance = run_analyze(load_config(CONFIG_PATH), start_date_text, end_date_text)
                     analyze_seconds = round(time.perf_counter() - analyze_started, 4)
                     _merge_feature_analysis_performance_report(performance_report, profile_id, analyze_performance)
                     performance_report.setdefault("feature_analysis_time_by_profile", {})[profile_id] = analyze_seconds
+                    performance_report.setdefault("profile_stage_time_by_profile", {}).setdefault(profile_id, stage_summary)["analyze_sec"] = analyze_seconds
                     performance_report["feature_analysis_generation_time"] = round(
                         float(performance_report.get("feature_analysis_generation_time", 0.0)) + float(analyze_performance.get("feature_analysis_generation", analyze_seconds) or 0.0),
                         4,
@@ -4701,6 +4947,7 @@ def run_experiments(
                 run_analyze(load_config(CONFIG_PATH), start_date_text, end_date_text)
         try:
             _print_date_resolution("Compare Profiles Date Resolution", date_resolution)
+            _print_run_experiments_progress("compare", started_at=batch_started, total=len(profile_ids))
             compare_started = time.perf_counter()
             compare_paths = run_compare_profiles(profile_ids, start_date_text, end_date_text)
             if not skip_backtest:
@@ -4711,6 +4958,7 @@ def run_experiments(
         if not skip_backtest:
             performance_report["top_bottlenecks"] = _top_experiment_bottlenecks(performance_report)
         experiment_summary_started = time.perf_counter()
+        _print_run_experiments_progress("experiment-summary", started_at=batch_started)
         summary = build_experiment_batch_summary(
                 base,
                 runnable_experiment_ids,
@@ -4728,17 +4976,27 @@ def run_experiments(
         summary.update(experiment_api_summary)
         if not skip_backtest:
             summary["performance_report"] = performance_report
-            summary["performance_audit"] = build_experiment_performance_audit(
-                performance_report,
-                profile_ids,
-                start_date_text,
-                end_date_text,
-            )
+            if performance_report.get("all_profiles_resume_complete"):
+                summary["performance_audit"] = {
+                    "resume_skipped": True,
+                    "resume_enabled": bool(performance_report.get("resume_enabled", False)),
+                    "resume_skipped_profiles": performance_report.get("resume_skipped_profiles", []),
+                    "resume_pending_profiles": performance_report.get("resume_pending_profiles", []),
+                    "note": "All requested profiles were skipped by --resume; no new backtest performance sample was collected.",
+                }
+            else:
+                summary["performance_audit"] = build_experiment_performance_audit(
+                    performance_report,
+                    profile_ids,
+                    start_date_text,
+                    end_date_text,
+                )
             summary["json_read_ranking"] = summary["performance_audit"].get("json_read_ranking", [])
             summary["profile_read_reason"] = summary["performance_audit"].get("profile_read_reason", {})
             summary["indicator_field_audit"] = summary["performance_audit"].get("indicator_field_audit", {})
             summary["performance_report"]["performance_audit"] = summary["performance_audit"]
-            attach_performance_audit_to_feature_analysis(summary, profile_ids)
+            if not performance_report.get("all_profiles_resume_complete"):
+                attach_performance_audit_to_feature_analysis(summary, profile_ids)
         write_experiment_batch_outputs(summary, start_date_text, end_date_text, base, compare_paths)
         if strict_integrity:
             failures = _experiment_integrity_failures(summary)
@@ -4787,47 +5045,7 @@ def prepare_run_experiments_common_stages(profile_ids: list[str], start_date_tex
     started = time.perf_counter()
     previous_profile = ACTIVE_PROFILE_ID
     previous_backtest_mode = BACKTEST_MODE_ACTIVE
-    report: dict[str, Any] = {
-        "price_fetch_time": 0.0,
-        "shared_price_fetch_time": 0.0,
-        "indicator_time": 0.0,
-        "shared_indicator_time": 0.0,
-        "candidate_time": 0.0,
-        "shared_candidate_time": 0.0,
-        "market_context_time": 0.0,
-        "report_time": 0.0,
-        "feature_analysis_generation_time": 0.0,
-        "experiment_summary_generation_time": 0.0,
-        "scoring_time": 0.0,
-        "trade_time": 0.0,
-        "profile_scoring_time_by_profile": {},
-        "profile_trade_time_by_profile": {},
-        "profile_report_time_by_profile": {},
-        "feature_analysis_time_by_profile": {},
-        "profile_total_time_by_profile": {},
-        "profile_phase_time_by_profile": {},
-        "profile_phase_accounting_delta_by_profile": {},
-        "top_bottlenecks": [],
-        "compare_profiles_time": 0.0,
-        "daily_reports_skipped_count": 0,
-        "articles_skipped_count": 0,
-        "reflections_skipped_count": 0,
-        "reused_indicator_count": 0,
-        "reused_candidate_count": 0,
-        "reused_scoring_count": 0,
-        "cache_reused_from_common_count": 0,
-        "profile_specific_cache_count": 0,
-        "indicator_cache_source": {},
-        "candidate_cache_source": {},
-        "generated_cache_size": 0,
-        "cleanup_hint": "",
-        "skipped_profiles": [],
-        "stage_groups": [],
-        "price_fetch_skipped": False,
-        "daily_logs_enabled": not NO_DAILY_LOGS_ACTIVE and not SUMMARY_ONLY_ACTIVE,
-        "quiet": QUIET_ACTIVE,
-        "progress_interval": PROGRESS_INTERVAL,
-    }
+    report: dict[str, Any] = _empty_run_experiments_performance_report()
     if not profile_ids:
         return report
     end_date = date.fromisoformat(end_date_text)
@@ -4865,6 +5083,11 @@ def prepare_run_experiments_common_stages(profile_ids: list[str], start_date_tex
                 f"using cached prices from {trade_start.isoformat()} to {end_date.isoformat()}"
             )
         else:
+            _print_run_experiments_progress(
+                "fetch_prices",
+                date_text=f"{fetch_start.isoformat()}..{end_date.isoformat()}",
+                started_at=started,
+            )
             ensure_price_history_for_backtest("jquants", fetch_start, end_date, trade_start)
         trading_dates = available_cached_price_dates(trade_start, end_date)
         report["price_fetch_time"] = round(time.perf_counter() - price_start, 4)
@@ -4894,9 +5117,19 @@ def prepare_run_experiments_common_stages(profile_ids: list[str], start_date_tex
                 target_date_text = trading_date.isoformat()
                 BACKTEST_DAY_LOG_PREFIX = f"[common {representative} {index}/{len(group_dates)}] {target_date_text}"
                 show_progress = _backtest_progress_due(index, len(group_dates))
-                if QUIET_ACTIVE and show_progress:
-                    print(f"{BACKTEST_DAY_LOG_PREFIX} common stages progress")
+                if show_progress:
+                    _print_run_experiments_progress(
+                        "common",
+                        profile_id=representative,
+                        date_text=target_date_text,
+                        current=index,
+                        total=len(group_dates),
+                        started_at=started,
+                        extra="stages=indicators/screen",
+                    )
                 indicator_start = time.perf_counter()
+                if show_progress:
+                    _print_run_experiments_progress("indicators", profile_id=representative, date_text=target_date_text, current=index, total=len(group_dates), started_at=started)
                 _run_quietable_action(lambda: ensure_indicators("jquants", target_date_text), suppress=QUIET_ACTIVE)
                 report["indicator_time"] += time.perf_counter() - indicator_start
                 group_report["indicator_generated_or_reused"] += 1
@@ -4904,6 +5137,8 @@ def prepare_run_experiments_common_stages(profile_ids: list[str], start_date_tex
                 _run_quietable_action(lambda: ensure_market_context("jquants", target_date_text), suppress=QUIET_ACTIVE)
                 report["market_context_time"] += time.perf_counter() - market_start
                 candidate_start = time.perf_counter()
+                if show_progress:
+                    _print_run_experiments_progress("screen", profile_id=representative, date_text=target_date_text, current=index, total=len(group_dates), started_at=started)
                 _run_quietable_action(lambda: ensure_screen("jquants", target_date_text), suppress=QUIET_ACTIVE)
                 report["candidate_time"] += time.perf_counter() - candidate_start
                 group_report["candidate_generated_or_reused"] += 1
@@ -5217,6 +5452,7 @@ def print_run_experiments_performance_report(report: dict[str, Any]) -> None:
         "experiment_summary_generation_time",
         "profile_scoring_time_by_profile",
         "profile_trade_time_by_profile",
+        "profile_stage_time_by_profile",
         "profile_report_time_by_profile",
         "feature_analysis_time_by_profile",
         "profile_total_time_by_profile",
@@ -5252,6 +5488,10 @@ def print_run_experiments_performance_report(report: dict[str, Any]) -> None:
         "generated_cache_size",
         "cleanup_hint",
         "skipped_profiles",
+        "resume_enabled",
+        "resume_skipped_profiles",
+        "resume_pending_profiles",
+        "resume_profile_status",
         "target_trading_days",
         "total_common_stage_time",
     ]:
@@ -5895,6 +6135,7 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             f"- experiment_summary_generation_time: {performance.get('experiment_summary_generation_time', 0)}",
             f"- profile_scoring_time_by_profile: {_compact_json(performance.get('profile_scoring_time_by_profile', {}))}",
             f"- profile_trade_time_by_profile: {_compact_json(performance.get('profile_trade_time_by_profile', {}))}",
+            f"- profile_stage_time_by_profile: {_compact_json(performance.get('profile_stage_time_by_profile', {}))}",
             f"- profile_report_time_by_profile: {_compact_json(performance.get('profile_report_time_by_profile', {}))}",
             f"- feature_analysis_time_by_profile: {_compact_json(performance.get('feature_analysis_time_by_profile', {}))}",
             f"- profile_total_time_by_profile: {_compact_json(performance.get('profile_total_time_by_profile', {}))}",
@@ -5930,6 +6171,10 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             f"- generated_cache_size: {_format_bytes(int(performance.get('generated_cache_size', 0) or 0))}",
             f"- cleanup_hint: {performance.get('cleanup_hint', '-')}",
             f"- skipped_profiles: {_compact_json(performance.get('skipped_profiles', []))}",
+            f"- resume_enabled: {str(bool(performance.get('resume_enabled', False))).lower()}",
+            f"- resume_skipped_profiles: {_compact_json(performance.get('resume_skipped_profiles', []))}",
+            f"- resume_pending_profiles: {_compact_json(performance.get('resume_pending_profiles', []))}",
+            f"- resume_profile_status: {_compact_json(performance.get('resume_profile_status', {}))}",
         ]
     )
     performance_audit = summary.get("performance_audit", {}) if isinstance(summary.get("performance_audit"), dict) else {}
@@ -9300,12 +9545,21 @@ def load_market_context_for_date(target_date_text: str, provider_name: str) -> d
 
 
 def load_effective_dynamic_exposure_context(signal_date_text: str, provider_name: str) -> dict[str, Any]:
-    paths = []
-    for path in sorted((ROOT / "data" / "processed").glob("market_context_*.json")):
-        day = path.stem.replace("market_context_", "")
-        if day < signal_date_text:
-            paths.append((day, path))
-    if not paths:
+    try:
+        signal_day = date.fromisoformat(signal_date_text)
+    except ValueError:
+        signal_day = None
+    source_date = ""
+    path: Path | None = None
+    if signal_day is not None:
+        for lag in range(1, 371):
+            day = (signal_day - timedelta(days=lag)).isoformat()
+            candidate = ROOT / "data" / "processed" / f"market_context_{day}.json"
+            if candidate.exists():
+                source_date = day
+                path = candidate
+                break
+    if path is None:
         resolved = effective_market_context_for_signal(signal_date_text, {})
         resolved["market_context"] = neutral_market_context(
             signal_date_text,
@@ -9313,7 +9567,6 @@ def load_effective_dynamic_exposure_context(signal_date_text: str, provider_name
             "dynamic_exposure用の過去market_contextが見つからないためunknownとして扱います。",
         )
         return resolved
-    source_date, path = paths[-1]
     try:
         payload = read_json(path)
     except Exception:
@@ -10810,6 +11063,19 @@ def _profile_phase_time_snapshot(profile_total_seconds: float) -> dict[str, Any]
     return {"phases": phases, "accounting_delta": final_delta}
 
 
+def _profile_stage_time_summary(analyze_sec: float = 0.0) -> dict[str, float]:
+    return {
+        "price_fetch_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("fetch_prices", 0.0)), 4),
+        "indicator_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("indicator", 0.0) or BACKTEST_PROFILE_TIMINGS.get("indicator_generation_total", 0.0)), 4),
+        "screen_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("screening", 0.0) or BACKTEST_PROFILE_TIMINGS.get("candidate_generation_total", 0.0)), 4),
+        "scoring_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring", 0.0)), 4),
+        "trade_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("trading", 0.0)), 4),
+        "db_save_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("sqlite_access", 0.0) or BACKTEST_PROFILE_TIMINGS.get("db_read_write_total", 0.0)), 4),
+        "report_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("report", 0.0) or BACKTEST_PROFILE_TIMINGS.get("report_write", 0.0)), 4),
+        "analyze_sec": round(float(analyze_sec or 0.0), 4),
+    }
+
+
 def _top_experiment_bottlenecks(performance_report: dict[str, Any], limit: int = 20) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     phase_by_profile = performance_report.get("profile_phase_time_by_profile", {})
@@ -11195,27 +11461,62 @@ def build_indicator_field_audit(profile_ids: list[str], start_date_text: str, en
     }
 
 
+def _date_texts_between(start_date_text: str, end_date_text: str) -> list[str]:
+    try:
+        start = date.fromisoformat(start_date_text)
+        end = date.fromisoformat(end_date_text)
+    except ValueError:
+        return []
+    if start > end:
+        return []
+    values: list[str] = []
+    current = start
+    while current <= end:
+        values.append(current.isoformat())
+        current += timedelta(days=1)
+    return values
+
+
 def _indicator_audit_paths(profile_ids: list[str], start_date_text: str, end_date_text: str, limit: int) -> list[Path]:
     paths: list[Path] = []
     seen: set[Path] = set()
-    for base in [
-        ROOT / "data" / "processed" / "common",
-        ROOT / "data" / "processed",
-        *[processed_profile_path(load_profile(profile_id), "_audit_placeholder.json").parent for profile_id in profile_ids],
-    ]:
-        if not base.exists():
+    date_texts = _date_texts_between(start_date_text, end_date_text)
+    if not date_texts:
+        date_texts = []
+
+    def add_path(path: Path) -> bool:
+        if not path.exists() or not path.is_file() or path.is_symlink():
+            return False
+        resolved = path.resolve()
+        if resolved in seen:
+            return False
+        seen.add(resolved)
+        paths.append(path)
+        return len(paths) >= limit
+
+    direct_dirs: list[Path] = [ROOT / "data" / "processed"]
+    common_indicators_root = ROOT / "data" / "processed" / "common" / "indicators"
+    common_dirs: list[Path] = []
+    if common_indicators_root.exists():
+        common_dirs.extend(sorted(path for path in common_indicators_root.iterdir() if path.is_dir()))
+    profile_dirs = [
+        processed_profile_path(load_profile(profile_id), "_audit_placeholder.json").parent
+        for profile_id in profile_ids
+    ]
+    for directory in [*direct_dirs, *common_dirs, *profile_dirs]:
+        if not directory.exists():
             continue
-        for path in sorted(base.rglob("indicators_*.json")):
-            logical_date = _date_from_path_text(path)
-            if logical_date and not (start_date_text <= logical_date.isoformat() <= end_date_text):
-                continue
-            resolved = path.resolve()
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            paths.append(path)
-            if len(paths) >= limit:
-                return paths
+        if date_texts:
+            for day in date_texts:
+                if add_path(directory / f"indicators_{day}.json"):
+                    return paths
+        else:
+            for path in sorted(directory.glob("indicators_*.json")):
+                logical_date = _date_from_path_text(path)
+                if logical_date and not (start_date_text <= logical_date.isoformat() <= end_date_text):
+                    continue
+                if add_path(path):
+                    return paths
     return paths
 
 

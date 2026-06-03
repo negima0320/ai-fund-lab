@@ -290,6 +290,76 @@ def test_run_experiments_skip_analyze_skips_analyze_step(tmp_path, monkeypatch) 
     assert [call[0] for call in calls].count("compare") == 1
 
 
+def _write_complete_backtest_outputs(root, profile_id: str, start_date: str, end_date: str) -> None:
+    backtest_dir = root / "logs" / "backtests" / profile_id / f"{start_date}_to_{end_date}"
+    backtest_dir.mkdir(parents=True, exist_ok=True)
+    main_module.write_json(
+        backtest_dir / "backtest_summary.json",
+        {
+            "profile_id": profile_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "final_assets": 1_000_000,
+            "date_range_audit": {
+                "processed_days": 1,
+                "missing_processed_dates_count": 0,
+                "last_processed_day": end_date,
+            },
+        },
+    )
+    (backtest_dir / "summary.csv").write_text("date,total_assets\n2026-01-05,1000000\n", encoding="utf-8")
+    (backtest_dir / "trades.csv").write_text("entry_date,code,profit\n", encoding="utf-8")
+    feature_dir = root / "reports" / profile_id / "backtests"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    main_module.write_json(feature_dir / "feature_analysis.json", {"profile_id": profile_id})
+
+
+def test_resume_skips_completed_backtest_and_analysis(tmp_path, monkeypatch) -> None:
+    calls: list[tuple] = []
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        main_module,
+        "run_backtest",
+        lambda *args: (_ for _ in ()).throw(AssertionError("completed profile should be skipped")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "run_analyze",
+        lambda *args: (_ for _ in ()).throw(AssertionError("completed analysis should be skipped")),
+    )
+    monkeypatch.setattr(main_module, "run_compare_profiles", lambda *args: calls.append(("compare", args)))
+    monkeypatch.setattr(
+        main_module,
+        "build_experiment_batch_summary",
+        lambda *args, **kwargs: {"base_profile": "rookie_dealer_02_v2_1", "experiments": []},
+    )
+
+    for profile_id in ["rookie_dealer_02_v2_1", "rookie_dealer_02_v2_6"]:
+        _write_complete_backtest_outputs(tmp_path, profile_id, "2026-01-01", "2026-03-06")
+
+    main_module.run_experiments(
+        "rookie_dealer_02_v2_1",
+        "2026-01-01",
+        "2026-03-06",
+        ["rookie_dealer_02_v2_6"],
+        resume=True,
+    )
+
+    assert [call[0] for call in calls] == ["compare"]
+
+
+def test_resume_completion_status_requires_summary_and_csvs(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    status = main_module._experiment_profile_completion_status("rookie_dealer_02_v2_1", "2026-01-01", "2026-03-06")
+    assert status["complete"] is False
+    assert status["reason"] == "missing_outputs"
+
+    _write_complete_backtest_outputs(tmp_path, "rookie_dealer_02_v2_1", "2026-01-01", "2026-03-06")
+    status = main_module._experiment_profile_completion_status("rookie_dealer_02_v2_1", "2026-01-01", "2026-03-06")
+    assert status["complete"] is True
+    assert status["processed_days"] == 1
+
+
 def test_summary_only_still_runs_analyze_for_feature_audits(tmp_path, monkeypatch) -> None:
     calls: list[tuple] = []
     monkeypatch.setattr(main_module, "ROOT", tmp_path)
