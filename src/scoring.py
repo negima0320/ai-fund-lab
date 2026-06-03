@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import time
 from typing import Any
 
 from candlestick import detect_candlestick_signals
@@ -156,7 +157,15 @@ def score_real_candidates(
     market_context: dict[str, Any] | None = None,
     dynamic_exposure_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    timer = config.get("_score_timer")
+
+    def record(name: str, elapsed: float) -> None:
+        if callable(timer) and elapsed > 0:
+            timer(name, elapsed)
+
+    total_started = time.perf_counter()
     scored = []
+    setup_started = time.perf_counter()
     selection_config = _selection_config(config)
     volume_filter = _volume_filter_config(config)
     rsi_volume_hot_zone_filter = _rsi_volume_hot_zone_filter_config(config)
@@ -179,19 +188,28 @@ def score_real_candidates(
     earnings_metadata = config.get("_earnings_calendar_metadata")
     if isinstance(earnings_metadata, dict) and isinstance(earnings_metadata.get("pipeline"), dict):
         earnings_pipeline = dict(earnings_metadata["pipeline"])
+    investor_context = _investor_context_for_candidate(config)
+    record("setup", time.perf_counter() - setup_started)
 
     for candidate in candidates:
+        candidate_started = time.perf_counter()
+        component_started = time.perf_counter()
         technical_parts = _real_technical_score_parts(candidate)
         sector_adjustment = _sector_score_adjustment(candidate)
         technical = max(0, min(50, technical_parts["technical_score"] + sector_adjustment))
         technical_parts["technical_score"] = technical
         technical_parts["sector_adjustment"] = sector_adjustment
+        record("score_component_calculation", time.perf_counter() - component_started)
+        relative_started = time.perf_counter()
         relative_strength_score = _relative_strength_score_for_candidate(candidate, config)
-        investor_context = _investor_context_for_candidate(config)
+        record("relative_strength_scoring", time.perf_counter() - relative_started)
+        investor_started = time.perf_counter()
         investor_context_raw_score = _investor_context_raw_score_for_candidate(candidate, config, investor_context)
         investor_context_score = _investor_context_score_for_candidate(candidate, config, investor_context)
         market_context_score = 0
         total_before_selection_adjustment = technical + relative_strength_score + investor_context_score + market_context_score
+        record("investor_context_scoring", time.perf_counter() - investor_started)
+        adjustment_started = time.perf_counter()
         rsi_selection = _rsi_selection_adjustment(candidate.get("rsi"), selection_config)
         volume_selection = _volume_selection_adjustment(candidate.get("volume_ratio"), volume_filter)
         hot_zone_selection = _rsi_volume_hot_zone_adjustment(
@@ -203,6 +221,8 @@ def score_real_candidates(
         winner_loser_rule = _winner_loser_rule_adjustment(candidate, winner_loser_rule_adjustment)
         total_penalty = rsi_selection["penalty"] + affordability["penalty"]
         total = max(0, total_before_selection_adjustment - total_penalty + winner_loser_rule["score_adjustment"])
+        record("selection_adjustment_scoring", time.perf_counter() - adjustment_started)
+        component_pack_started = time.perf_counter()
         score_components = _score_components(
             technical_parts=technical_parts,
             market_context_score=market_context_score,
@@ -212,6 +232,8 @@ def score_real_candidates(
             winner_loser_rule_score=winner_loser_rule["score_adjustment"],
             total_score=total,
         )
+        record("score_component_pack", time.perf_counter() - component_pack_started)
+        render_started = time.perf_counter()
         confidence = _real_confidence(candidate, technical)
         score_reason = _real_score_reason(candidate, technical_parts, total)
         if relative_strength_score:
@@ -242,6 +264,8 @@ def score_real_candidates(
         earnings_result = earnings_filter_result(candidate, target_date, config)
         if earnings_result["blocked"]:
             score_reason = f"{score_reason}、{EARNINGS_FILTER_REJECTED_REASON}"
+        record("score_reason_and_earnings", time.perf_counter() - render_started)
+        row_started = time.perf_counter()
         scored.append(
             {
                 "code": candidate["code"],
@@ -414,9 +438,16 @@ def score_real_candidates(
                 "fallback": candidate.get("fallback", False),
             }
         )
+        record("score_row_build", time.perf_counter() - row_started)
+        record("per_candidate_loop", time.perf_counter() - candidate_started)
 
+    sort_started = time.perf_counter()
     scored.sort(key=lambda item: (item["total_score"], item["confidence"]), reverse=True)
+    record("sort_rank", time.perf_counter() - sort_started)
+    selection_started = time.perf_counter()
     market_filter_summary = _apply_selection_rules(scored, selection_config, market_filter, market_regime)
+    record("selection_rules", time.perf_counter() - selection_started)
+    record("total", time.perf_counter() - total_started)
 
     return {
         "date": target_date,

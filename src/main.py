@@ -4660,6 +4660,7 @@ def _empty_run_experiments_performance_report() -> dict[str, Any]:
         "profile_report_time_by_profile": {},
         "feature_analysis_time_by_profile": {},
         "profile_stage_time_by_profile": {},
+        "profile_scoring_workload_by_profile": {},
         "profile_total_time_by_profile": {},
         "profile_phase_time_by_profile": {},
         "profile_phase_accounting_delta_by_profile": {},
@@ -4896,6 +4897,7 @@ def run_experiments(
                 performance_report.setdefault("profile_scoring_time_by_profile", {})[profile_id] = scoring_seconds
                 performance_report.setdefault("profile_trade_time_by_profile", {})[profile_id] = trade_seconds
                 performance_report.setdefault("profile_stage_time_by_profile", {})[profile_id] = stage_summary
+                performance_report.setdefault("profile_scoring_workload_by_profile", {})[profile_id] = _profile_scoring_workload_summary()
                 performance_report.setdefault("profile_total_time_by_profile", {})[profile_id] = profile_total
                 performance_report.setdefault("profile_phase_time_by_profile", {})[profile_id] = phase_snapshot["phases"]
                 performance_report.setdefault("profile_phase_accounting_delta_by_profile", {})[profile_id] = phase_snapshot["accounting_delta"]
@@ -5454,6 +5456,7 @@ def print_run_experiments_performance_report(report: dict[str, Any]) -> None:
         "profile_scoring_time_by_profile",
         "profile_trade_time_by_profile",
         "profile_stage_time_by_profile",
+        "profile_scoring_workload_by_profile",
         "profile_report_time_by_profile",
         "feature_analysis_time_by_profile",
         "profile_total_time_by_profile",
@@ -6137,6 +6140,7 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             f"- profile_scoring_time_by_profile: {_compact_json(performance.get('profile_scoring_time_by_profile', {}))}",
             f"- profile_trade_time_by_profile: {_compact_json(performance.get('profile_trade_time_by_profile', {}))}",
             f"- profile_stage_time_by_profile: {_compact_json(performance.get('profile_stage_time_by_profile', {}))}",
+            f"- profile_scoring_workload_by_profile: {_compact_json(performance.get('profile_scoring_workload_by_profile', {}))}",
             f"- profile_report_time_by_profile: {_compact_json(performance.get('profile_report_time_by_profile', {}))}",
             f"- feature_analysis_time_by_profile: {_compact_json(performance.get('feature_analysis_time_by_profile', {}))}",
             f"- profile_total_time_by_profile: {_compact_json(performance.get('profile_total_time_by_profile', {}))}",
@@ -9349,7 +9353,7 @@ def run_score(provider_name: str, target_date_text: str) -> None:
     except ValueError as exc:
         raise SystemExit("--date must be in YYYY-MM-DD format.") from exc
 
-    config = load_config(CONFIG_PATH)
+    config = _run_timed_backtest_phase("scoring_config_load", lambda: load_config(CONFIG_PATH))
     candidates_path = processed_profile_path(config, f"candidates_{target_date_text}.json")
     if not candidates_path.exists():
         raise SystemExit(
@@ -9358,19 +9362,20 @@ def run_score(provider_name: str, target_date_text: str) -> None:
         )
 
     payload = _run_timed_backtest_phase("candidate_load", lambda: read_json(candidates_path))
-    candidates = payload.get("candidates", [])
-    candidate_universe_cache = _candidate_universe_cache_payload_from_rows(candidates)
-    market_context = load_market_context_for_date(target_date_text, provider_name)
-    dynamic_exposure_context = load_effective_dynamic_exposure_context(target_date_text, provider_name)
+    candidates = _run_timed_backtest_phase("scoring_candidate_extract", lambda: payload.get("candidates", []))
+    candidate_universe_cache = _run_timed_backtest_phase("scoring_candidate_universe_cache", lambda: _candidate_universe_cache_payload_from_rows(candidates))
+    market_context = _run_timed_backtest_phase("scoring_market_context_load", lambda: load_market_context_for_date(target_date_text, provider_name))
+    dynamic_exposure_context = _run_timed_backtest_phase("scoring_dynamic_context_load", lambda: load_effective_dynamic_exposure_context(target_date_text, provider_name))
     target_date = date.fromisoformat(target_date_text)
     if candidates:
-        earnings_payload = _load_earnings_calendar_for_date(target_date, config)
+        earnings_payload = _run_timed_backtest_phase("scoring_earnings_context_load", lambda: _load_earnings_calendar_for_date(target_date, config))
         if config.get("earnings_filter", {}).get("enabled") and earnings_payload["metadata"].get("filter_available", False):
             config["_earnings_calendar_records"] = earnings_payload["records"]
         config["_earnings_calendar_metadata"] = earnings_payload["metadata"]
-        investor_context_payload = _load_investor_context_for_date(target_date, config)
+        investor_context_payload = _run_timed_backtest_phase("scoring_investor_context_load", lambda: _load_investor_context_for_date(target_date, config))
         config["_investor_context"] = investor_context_payload["context"]
         config["_investor_context_metadata"] = investor_context_payload["metadata"]
+        config["_score_timer"] = lambda name, elapsed: _record_backtest_phase_time(f"scoring_{name}", elapsed)
         score_started = time.perf_counter()
         scoring_log = score_real_candidates(
             candidates,
@@ -9381,6 +9386,7 @@ def run_score(provider_name: str, target_date_text: str) -> None:
             dynamic_exposure_context=dynamic_exposure_context,
         )
         _record_backtest_phase_time("score_merge", time.perf_counter() - score_started)
+        config.pop("_score_timer", None)
     else:
         earnings_payload = {"records": [], "metadata": {"filter_available": False, "skip_reason": "empty_candidates"}}
         investor_context_payload = {"context": {}, "metadata": {"available": False, "skip_reason": "empty_candidates"}}
@@ -9399,8 +9405,8 @@ def run_score(provider_name: str, target_date_text: str) -> None:
         }
     scoring_log["earnings_calendar"] = earnings_payload.get("metadata", {})
     scoring_log["investor_context"] = investor_context_payload.get("metadata", {})
-    attach_config_version(scoring_log, config)
-    ai_decision_log = run_ai_decision_if_enabled(scoring_log, config, target_date_text)
+    _run_timed_backtest_phase("scoring_attach_config_version", lambda: attach_config_version(scoring_log, config))
+    ai_decision_log = _run_timed_backtest_phase("scoring_ai_decision_prepare", lambda: run_ai_decision_if_enabled(scoring_log, config, target_date_text))
     scores = scoring_log["scores"]
     selected = scoring_log["selected"]
     highest_score = max((item["total_score"] for item in scores), default=0)
@@ -9409,13 +9415,13 @@ def run_score(provider_name: str, target_date_text: str) -> None:
     scoring_log.setdefault("profile_name", profile_name_from(config))
     scoring_path = ROOT / "logs" / "scoring" / profile_id_from(config) / f"scoring_{target_date_text}.json"
     scored_candidates_path = processed_profile_path(config, f"scored_candidates_{target_date_text}.json")
-    storage_scoring_log = _scoring_log_for_storage(scoring_log, config)
-    cache_payload = _score_cache_payload(config, target_date_text)
+    storage_scoring_log = _run_timed_backtest_phase("scoring_storage_projection", lambda: _scoring_log_for_storage(scoring_log, config))
+    cache_payload = _run_timed_backtest_phase("scoring_cache_payload_build", lambda: _score_cache_payload(config, target_date_text))
     if _daily_detail_logs_enabled(config):
-        write_json(scoring_path, storage_scoring_log)
-    write_json(
-        scored_candidates_path,
-        {
+        _run_timed_backtest_phase("scoring_detail_log_write", lambda: write_json(scoring_path, storage_scoring_log))
+    scored_payload = _run_timed_backtest_phase(
+        "scoring_payload_build",
+        lambda: {
             "date": target_date_text,
             "provider": provider_name,
             "profile_id": profile_id_from(config),
@@ -9441,11 +9447,14 @@ def run_score(provider_name: str, target_date_text: str) -> None:
             "selected": _scores_for_storage(selected, config),
         },
     )
-    save_scoring_results(config, ROOT, storage_scoring_log)
+    _run_timed_backtest_phase("scored_candidates_json_write", lambda: write_json(scored_candidates_path, scored_payload))
+    _run_timed_backtest_phase("scoring_db_save", lambda: save_scoring_results(config, ROOT, storage_scoring_log))
     if ai_decision_log and _daily_detail_logs_enabled(config):
-        save_ai_decision(config, ROOT, ai_decision_log)
+        _run_timed_backtest_phase("scoring_ai_decision_save", lambda: save_ai_decision(config, ROOT, ai_decision_log))
     if _daily_detail_logs_enabled(config):
-        write_daily_ai_dataset(config, target_date_text)
+        _run_timed_backtest_phase("scoring_ai_dataset_write", lambda: write_daily_ai_dataset(config, target_date_text))
+
+    _record_scoring_workload_metrics(candidates, scores, selected, scoring_log, config)
 
     print(f"candidates: {len(candidates)}")
     print(f"scored: {len(scores)}")
@@ -11033,6 +11042,37 @@ def _profile_phase_time_snapshot(profile_total_seconds: float) -> dict[str, Any]
         "candidate_load": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_load", 0.0) or BACKTEST_PROFILE_TIMINGS.get("screening", 0.0)), 4),
         "score_load": round(float(BACKTEST_PROFILE_TIMINGS.get("score_load", 0.0)), 4),
         "scoring": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring", 0.0)), 4),
+        "scoring_config_load": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_config_load", 0.0)), 4),
+        "scoring_candidate_extract": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_candidate_extract", 0.0)), 4),
+        "scoring_candidate_universe_cache": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_candidate_universe_cache", 0.0)), 4),
+        "scoring_market_context_load": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_market_context_load", 0.0)), 4),
+        "scoring_dynamic_context_load": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_dynamic_context_load", 0.0)), 4),
+        "scoring_earnings_context_load": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_earnings_context_load", 0.0)), 4),
+        "scoring_investor_context_load": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_investor_context_load", 0.0)), 4),
+        "scoring_setup": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_setup", 0.0)), 4),
+        "scoring_score_component_calculation": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_score_component_calculation", 0.0)), 4),
+        "scoring_relative_strength_scoring": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_relative_strength_scoring", 0.0)), 4),
+        "scoring_investor_context_scoring": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_investor_context_scoring", 0.0)), 4),
+        "scoring_selection_adjustment_scoring": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_selection_adjustment_scoring", 0.0)), 4),
+        "scoring_score_component_pack": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_score_component_pack", 0.0)), 4),
+        "scoring_score_reason_and_earnings": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_score_reason_and_earnings", 0.0)), 4),
+        "scoring_score_row_build": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_score_row_build", 0.0)), 4),
+        "scoring_per_candidate_loop": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_per_candidate_loop", 0.0)), 4),
+        "scoring_sort_rank": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_sort_rank", 0.0)), 4),
+        "scoring_selection_rules": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_selection_rules", 0.0)), 4),
+        "scoring_attach_config_version": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_attach_config_version", 0.0)), 4),
+        "scoring_ai_decision_prepare": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_ai_decision_prepare", 0.0)), 4),
+        "scoring_storage_projection": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_storage_projection", 0.0)), 4),
+        "scoring_cache_payload_build": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_cache_payload_build", 0.0)), 4),
+        "scoring_cache_validation": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_cache_validation", 0.0)), 4),
+        "scoring_selected_projection": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_selected_projection", 0.0)), 4),
+        "scoring_results_db_save": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_results_db_save", 0.0)), 4),
+        "scoring_detail_log_write": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_detail_log_write", 0.0)), 4),
+        "scoring_payload_build": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_payload_build", 0.0)), 4),
+        "scored_candidates_json_write": round(float(BACKTEST_PROFILE_TIMINGS.get("scored_candidates_json_write", 0.0)), 4),
+        "scoring_db_save": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_db_save", 0.0)), 4),
+        "scoring_ai_decision_save": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_ai_decision_save", 0.0)), 4),
+        "scoring_ai_dataset_write": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_ai_dataset_write", 0.0)), 4),
         "trade": round(float(BACKTEST_PROFILE_TIMINGS.get("trading", 0.0)), 4),
         "trade_simulation": round(float(BACKTEST_PROFILE_TIMINGS.get("trade_simulation", 0.0)), 4),
         "feature_analysis_generation": round(float(BACKTEST_PROFILE_TIMINGS.get("feature_analysis_generation", 0.0)), 4),
@@ -11136,6 +11176,57 @@ def _profile_stage_time_summary(analyze_sec: float = 0.0) -> dict[str, float]:
         "db_save_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("sqlite_access", 0.0) or BACKTEST_PROFILE_TIMINGS.get("db_read_write_total", 0.0)), 4),
         "report_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("report", 0.0) or BACKTEST_PROFILE_TIMINGS.get("report_write", 0.0)), 4),
         "analyze_sec": round(float(analyze_sec or 0.0), 4),
+    }
+
+
+def _record_scoring_workload_metrics(
+    candidates: list[dict[str, Any]],
+    scores: list[dict[str, Any]],
+    selected: list[dict[str, Any]],
+    scoring_log: dict[str, Any],
+    config: dict[str, Any],
+) -> None:
+    if not BACKTEST_MODE_ACTIVE:
+        return
+
+    def add_metric(key: str, value: int | float) -> None:
+        BACKTEST_PROFILE_TIMINGS[key] = float(BACKTEST_PROFILE_TIMINGS.get(key, 0.0) or 0.0) + float(value or 0.0)
+
+    candidate_counts = market_section_counts(candidates)
+    score_counts = market_section_counts(scores)
+    selected_counts = market_section_counts(selected)
+    market_filter = scoring_log.get("market_filter", {}) if isinstance(scoring_log.get("market_filter"), dict) else {}
+    add_metric("scoring_candidate_count_total", len(candidates))
+    add_metric("scoring_scored_count_total", len(scores))
+    add_metric("scoring_selected_count_total", len(selected))
+    add_metric("scoring_market_filter_excluded_count_total", int(market_filter.get("market_filter_excluded_count", 0) or 0))
+    add_metric("scoring_affordable_fallback_enabled_days", 1 if bool((config.get("affordable_fallback_buy", {}) or {}).get("enabled", False)) else 0)
+    for section in ["Prime", "Standard", "Growth", "Unknown"]:
+        add_metric(f"scoring_candidate_market_{section.lower()}_count_total", int(candidate_counts.get(section, 0) or 0))
+        add_metric(f"scoring_scored_market_{section.lower()}_count_total", int(score_counts.get(section, 0) or 0))
+        add_metric(f"scoring_selected_market_{section.lower()}_count_total", int(selected_counts.get(section, 0) or 0))
+
+
+def _profile_scoring_workload_summary() -> dict[str, Any]:
+    sections = ["prime", "standard", "growth", "unknown"]
+    return {
+        "candidate_count_total": int(BACKTEST_PROFILE_TIMINGS.get("scoring_candidate_count_total", 0) or 0),
+        "scored_count_total": int(BACKTEST_PROFILE_TIMINGS.get("scoring_scored_count_total", 0) or 0),
+        "selected_count_total": int(BACKTEST_PROFILE_TIMINGS.get("scoring_selected_count_total", 0) or 0),
+        "market_filter_excluded_count_total": int(BACKTEST_PROFILE_TIMINGS.get("scoring_market_filter_excluded_count_total", 0) or 0),
+        "affordable_fallback_enabled_days": int(BACKTEST_PROFILE_TIMINGS.get("scoring_affordable_fallback_enabled_days", 0) or 0),
+        "candidate_count_by_market": {
+            section.capitalize(): int(BACKTEST_PROFILE_TIMINGS.get(f"scoring_candidate_market_{section}_count_total", 0) or 0)
+            for section in sections
+        },
+        "scored_count_by_market": {
+            section.capitalize(): int(BACKTEST_PROFILE_TIMINGS.get(f"scoring_scored_market_{section}_count_total", 0) or 0)
+            for section in sections
+        },
+        "selected_count_by_market": {
+            section.capitalize(): int(BACKTEST_PROFILE_TIMINGS.get(f"scoring_selected_market_{section}_count_total", 0) or 0)
+            for section in sections
+        },
     }
 
 
@@ -11293,6 +11384,37 @@ def _aggregate_phase_elapsed(performance_report: dict[str, Any]) -> dict[str, fl
         "candidate_load",
         "indicator_load",
         "score_load",
+        "scoring_config_load",
+        "scoring_candidate_extract",
+        "scoring_candidate_universe_cache",
+        "scoring_market_context_load",
+        "scoring_dynamic_context_load",
+        "scoring_earnings_context_load",
+        "scoring_investor_context_load",
+        "scoring_setup",
+        "scoring_score_component_calculation",
+        "scoring_relative_strength_scoring",
+        "scoring_investor_context_scoring",
+        "scoring_selection_adjustment_scoring",
+        "scoring_score_component_pack",
+        "scoring_score_reason_and_earnings",
+        "scoring_score_row_build",
+        "scoring_per_candidate_loop",
+        "scoring_sort_rank",
+        "scoring_selection_rules",
+        "scoring_attach_config_version",
+        "scoring_ai_decision_prepare",
+        "scoring_storage_projection",
+        "scoring_cache_payload_build",
+        "scoring_cache_validation",
+        "scoring_selected_projection",
+        "scoring_results_db_save",
+        "scoring_detail_log_write",
+        "scoring_payload_build",
+        "scored_candidates_json_write",
+        "scoring_db_save",
+        "scoring_ai_decision_save",
+        "scoring_ai_dataset_write",
         "indicator_file_io_sec",
         "indicator_json_parse_sec",
         "indicator_record_normalize_sec",
@@ -12238,27 +12360,30 @@ def ensure_screen(provider_name: str, target_date_text: str) -> None:
 
 
 def ensure_score(provider_name: str, target_date_text: str) -> dict[str, Any]:
-    config = load_config(CONFIG_PATH)
+    config = _run_timed_backtest_phase("scoring_config_load", lambda: load_config(CONFIG_PATH))
     path = processed_profile_path(config, f"scored_candidates_{target_date_text}.json")
     if not path.exists():
         run_score(provider_name, target_date_text)
     payload = _run_timed_backtest_phase("score_load", lambda: read_json(path))
-    stale_reason = _score_payload_cache_issue(payload, config, target_date_text)
+    stale_reason = _run_timed_backtest_phase("scoring_cache_validation", lambda: _score_payload_cache_issue(payload, config, target_date_text))
     if stale_reason:
         print(f"{BACKTEST_DAY_LOG_PREFIX} scoring cache stale: {path.relative_to(ROOT)} reason={stale_reason}; regenerating")
         run_score(provider_name, target_date_text)
         payload = _run_timed_backtest_phase("score_load", lambda: read_json(path))
     payload.setdefault("config_version", config_version_from(config))
-    payload.setdefault("selected", [item for item in payload.get("scores", []) if item.get("selected")])
-    save_scoring_results(
-        config,
-        ROOT,
-        {
-            "date": payload.get("date", target_date_text),
-            "config_version": payload.get("config_version"),
-            "source_provider": provider_name,
-            "scores": payload.get("scores", []),
-        },
+    _run_timed_backtest_phase("scoring_selected_projection", lambda: payload.setdefault("selected", [item for item in payload.get("scores", []) if item.get("selected")]))
+    _run_timed_backtest_phase(
+        "scoring_results_db_save",
+        lambda: save_scoring_results(
+            config,
+            ROOT,
+            {
+                "date": payload.get("date", target_date_text),
+                "config_version": payload.get("config_version"),
+                "source_provider": provider_name,
+                "scores": payload.get("scores", []),
+            },
+        ),
     )
     return _scored_payload_as_scoring_log(payload, provider_name, target_date_text)
 
