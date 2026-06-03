@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from market_sections import market_section_counts, market_section_from_row
@@ -28,31 +29,44 @@ def screen_candidates(
     indicators: list[dict[str, Any]],
     target_count: int = 50,
     config: dict[str, Any] | None = None,
+    timer_callback: Any | None = None,
 ) -> dict[str, Any]:
+    def record(phase: str, elapsed: float) -> None:
+        if callable(timer_callback) and elapsed > 0:
+            timer_callback(phase, elapsed)
+
     strict_passed = []
     excluded_reasons: dict[str, int] = {}
+    started = time.perf_counter()
     for item in indicators:
         reasons = _exclude_reasons(item, _conditions_for_item(item, STRICT_CONDITIONS, config))
         if not reasons:
             strict_passed.append(_candidate(item, fallback=False, pass_reason="strict条件を通過"))
         else:
             _count_reasons(excluded_reasons, reasons)
+    record("candidate_screening_rules", time.perf_counter() - started)
 
+    started = time.perf_counter()
     candidates = _rank_candidates(strict_passed)[:target_count]
+    record("candidate_ranking_sort", time.perf_counter() - started)
     fallback_used = len(candidates) < target_count
     fallback_passed_count = 0
 
     if fallback_used:
         existing_codes = {item["code"] for item in candidates}
         fallback_candidates = []
+        started = time.perf_counter()
         for item in indicators:
             if item["code"] in existing_codes:
                 continue
             reasons = _exclude_reasons(item, _conditions_for_item(item, FALLBACK_CONDITIONS, config))
             if not reasons:
                 fallback_candidates.append(_candidate(item, fallback=True, pass_reason="fallback条件を通過"))
+        record("candidate_screening_rules", time.perf_counter() - started)
         fallback_passed_count = len(fallback_candidates)
+        started = time.perf_counter()
         candidates.extend(_rank_candidates(fallback_candidates)[: target_count - len(candidates)])
+        record("candidate_ranking_sort", time.perf_counter() - started)
 
     return {
         "conditions": {

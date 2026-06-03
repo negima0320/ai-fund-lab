@@ -4660,7 +4660,9 @@ def _empty_run_experiments_performance_report() -> dict[str, Any]:
         "profile_report_time_by_profile": {},
         "feature_analysis_time_by_profile": {},
         "profile_stage_time_by_profile": {},
+        "candidate_generation_workload_by_profile": {},
         "profile_scoring_workload_by_profile": {},
+        "profile_scoring_db_save_by_profile": {},
         "profile_total_time_by_profile": {},
         "profile_phase_time_by_profile": {},
         "profile_phase_accounting_delta_by_profile": {},
@@ -4897,7 +4899,9 @@ def run_experiments(
                 performance_report.setdefault("profile_scoring_time_by_profile", {})[profile_id] = scoring_seconds
                 performance_report.setdefault("profile_trade_time_by_profile", {})[profile_id] = trade_seconds
                 performance_report.setdefault("profile_stage_time_by_profile", {})[profile_id] = stage_summary
+                performance_report.setdefault("candidate_generation_workload_by_profile", {})[profile_id] = _profile_candidate_generation_workload_summary()
                 performance_report.setdefault("profile_scoring_workload_by_profile", {})[profile_id] = _profile_scoring_workload_summary()
+                performance_report.setdefault("profile_scoring_db_save_by_profile", {})[profile_id] = _profile_scoring_db_save_summary()
                 performance_report.setdefault("profile_total_time_by_profile", {})[profile_id] = profile_total
                 performance_report.setdefault("profile_phase_time_by_profile", {})[profile_id] = phase_snapshot["phases"]
                 performance_report.setdefault("profile_phase_accounting_delta_by_profile", {})[profile_id] = phase_snapshot["accounting_delta"]
@@ -5320,13 +5324,22 @@ def _restore_common_processed_cache(config: dict[str, Any], stage: str, target_d
     common_exists = common_path.exists()
     exists_elapsed = time.perf_counter() - exists_started
     _record_backtest_phase_time("materialize_file_exists_check_sec", exists_elapsed)
+    if stage == "candidates":
+        _record_backtest_phase_time("candidate_cache_lookup", exists_elapsed)
     if not common_exists:
         _record_backtest_phase_time("cache_lookup_total", time.perf_counter() - started)
+        if stage == "candidates":
+            _record_backtest_phase_time("candidate_cache_lookup", time.perf_counter() - started)
         return False
     lookup_elapsed = time.perf_counter() - started
     _record_backtest_phase_time("cache_lookup_total", lookup_elapsed)
+    if stage == "candidates":
+        _record_backtest_phase_time("candidate_cache_lookup", lookup_elapsed)
     materialize_started = time.perf_counter()
+    read_started = time.perf_counter()
     payload = read_json(common_path)
+    if stage == "candidates":
+        _record_backtest_phase_time("candidate_cache_read", time.perf_counter() - read_started)
     if stage == "candidates":
         payload = _with_profile_metadata(payload, config)
     skip_materialize = stage == "indicators" and _skip_profile_indicator_materialize(config)
@@ -5339,6 +5352,8 @@ def _restore_common_processed_cache(config: dict[str, Any], stage: str, target_d
         write_json(target_path, payload)
         copy_write_elapsed = time.perf_counter() - copy_started
         _record_backtest_phase_time("materialize_copy_write_sec", copy_write_elapsed)
+        if stage == "candidates":
+            _record_backtest_phase_time("candidate_cache_json_write", copy_write_elapsed)
         if stage == "indicators":
             _runtime_indicator_cache_set(target_path, payload)
         _record_materialize_required(stage)
@@ -5346,6 +5361,8 @@ def _restore_common_processed_cache(config: dict[str, Any], stage: str, target_d
     materialize_elapsed = time.perf_counter() - materialize_started
     _record_backtest_phase_time("cache_materialize_total", materialize_elapsed)
     _record_materialize_stage_time(stage, materialize_elapsed)
+    if stage == "candidates":
+        _record_backtest_phase_time("candidate_cache_materialize", materialize_elapsed)
     if stage == "indicators":
         _record_backtest_phase_time("indicator_copy_from_common_sec", copy_write_elapsed)
     _record_backtest_phase_time("cache_copy_or_write", time.perf_counter() - started)
@@ -5401,6 +5418,8 @@ def _save_common_processed_cache(config: dict[str, Any], stage: str, target_date
     materialize_started = time.perf_counter()
     if not common_path.exists():
         write_json(common_path, payload)
+        if stage == "candidates":
+            _record_backtest_phase_time("candidate_cache_json_write", time.perf_counter() - materialize_started)
         try:
             COMMON_CACHE_METRICS["generated_cache_size"] = COMMON_CACHE_METRICS.get("generated_cache_size", 0) + common_path.stat().st_size
         except OSError:
@@ -5414,6 +5433,8 @@ def _update_common_processed_cache(config: dict[str, Any], stage: str, target_da
     common_path = _common_processed_cache_path(config, stage, target_date_text)
     if common_path.exists():
         write_json(common_path, payload)
+        if stage == "candidates":
+            _record_backtest_phase_time("candidate_cache_json_write", time.perf_counter() - started)
     _record_backtest_phase_time("cache_copy_or_write", time.perf_counter() - started)
 
 
@@ -5422,20 +5443,30 @@ def _link_profile_processed_cache_to_common(config: dict[str, Any], stage: str, 
     common_path = _common_processed_cache_path(config, stage, target_date_text)
     if not common_path.exists() or not profile_path.exists() or _same_inode(profile_path, common_path):
         _record_backtest_phase_time("file_copy_or_link_total", time.perf_counter() - started)
+        if stage == "candidates":
+            _record_backtest_phase_time("candidate_cache_copy_or_link", time.perf_counter() - started)
         return
     try:
         if profile_path.stat().st_size != common_path.stat().st_size:
             _record_backtest_phase_time("file_copy_or_link_total", time.perf_counter() - started)
+            if stage == "candidates":
+                _record_backtest_phase_time("candidate_cache_copy_or_link", time.perf_counter() - started)
             return
         if _file_sha1(profile_path) != _file_sha1(common_path):
             _record_backtest_phase_time("file_copy_or_link_total", time.perf_counter() - started)
+            if stage == "candidates":
+                _record_backtest_phase_time("candidate_cache_copy_or_link", time.perf_counter() - started)
             return
         profile_path.unlink()
         os.link(common_path, profile_path)
     except OSError:
         _record_backtest_phase_time("file_copy_or_link_total", time.perf_counter() - started)
+        if stage == "candidates":
+            _record_backtest_phase_time("candidate_cache_copy_or_link", time.perf_counter() - started)
         return
     _record_backtest_phase_time("file_copy_or_link_total", time.perf_counter() - started)
+    if stage == "candidates":
+        _record_backtest_phase_time("candidate_cache_copy_or_link", time.perf_counter() - started)
 
 
 def print_run_experiments_performance_report(report: dict[str, Any]) -> None:
@@ -5456,7 +5487,9 @@ def print_run_experiments_performance_report(report: dict[str, Any]) -> None:
         "profile_scoring_time_by_profile",
         "profile_trade_time_by_profile",
         "profile_stage_time_by_profile",
+        "candidate_generation_workload_by_profile",
         "profile_scoring_workload_by_profile",
+        "profile_scoring_db_save_by_profile",
         "profile_report_time_by_profile",
         "feature_analysis_time_by_profile",
         "profile_total_time_by_profile",
@@ -6140,7 +6173,9 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             f"- profile_scoring_time_by_profile: {_compact_json(performance.get('profile_scoring_time_by_profile', {}))}",
             f"- profile_trade_time_by_profile: {_compact_json(performance.get('profile_trade_time_by_profile', {}))}",
             f"- profile_stage_time_by_profile: {_compact_json(performance.get('profile_stage_time_by_profile', {}))}",
+            f"- candidate_generation_workload_by_profile: {_compact_json(performance.get('candidate_generation_workload_by_profile', {}))}",
             f"- profile_scoring_workload_by_profile: {_compact_json(performance.get('profile_scoring_workload_by_profile', {}))}",
+            f"- profile_scoring_db_save_by_profile: {_compact_json(performance.get('profile_scoring_db_save_by_profile', {}))}",
             f"- profile_report_time_by_profile: {_compact_json(performance.get('profile_report_time_by_profile', {}))}",
             f"- feature_analysis_time_by_profile: {_compact_json(performance.get('feature_analysis_time_by_profile', {}))}",
             f"- profile_total_time_by_profile: {_compact_json(performance.get('profile_total_time_by_profile', {}))}",
@@ -9145,19 +9180,33 @@ def run_screen(provider_name: str, target_date_text: str) -> None:
         )
 
     config = load_config(CONFIG_PATH)
-    payload = _run_timed_backtest_phase("indicator_load", lambda: read_json(indicators_path))
+    payload = _run_timed_backtest_phase("candidate_price_load", lambda: read_json(indicators_path))
     indicators = payload.get("indicators", [])
+    raw_candidate_count = len(indicators)
     filter_started = time.perf_counter()
     market_filtered = _apply_market_section_filter(indicators, config)
-    _record_backtest_phase_time("market_filter", time.perf_counter() - filter_started)
+    filter_elapsed = time.perf_counter() - filter_started
+    _record_backtest_phase_time("market_filter", filter_elapsed)
+    _record_backtest_phase_time("candidate_market_section_lookup", filter_elapsed)
     indicators = market_filtered["allowed"]
 
     if indicators:
+        def candidate_timer(phase: str, elapsed: float) -> None:
+            _record_backtest_phase_time(phase, elapsed)
+
         candidate_started = time.perf_counter()
-        indicators = enrich_indicators_with_sector_momentum(indicators, target_date_text, provider_name)
-        result = screen_candidates(indicators, target_count=50, config=config)
+        indicators = _run_timed_backtest_phase(
+            "candidate_universe_build",
+            lambda: enrich_indicators_with_sector_momentum(indicators, target_date_text, provider_name),
+        )
+        result = screen_candidates(indicators, target_count=50, config=config, timer_callback=candidate_timer)
+        market_section_started = time.perf_counter()
         result["candidates"] = _fill_market_sections_from_master(result.get("candidates", []))
-        screening_market_audit = screening_market_rejection_audit(indicators, result["candidates"], target_count=50, config=config)
+        _record_backtest_phase_time("candidate_market_section_lookup", time.perf_counter() - market_section_started)
+        screening_market_audit = _run_timed_backtest_phase(
+            "candidate_screening_audit",
+            lambda: screening_market_rejection_audit(indicators, result["candidates"], target_count=50, config=config),
+        )
         _record_backtest_phase_time("candidate_filter", time.perf_counter() - candidate_started)
     else:
         result = {
@@ -9180,69 +9229,86 @@ def run_screen(provider_name: str, target_date_text: str) -> None:
             "representative_sample": [],
         }
     candidates = result["candidates"]
-    screening_log = {
-        "date": target_date_text,
-        "provider": provider_name,
-        "config_version": config_version_from(config),
-        "conditions": result["conditions"],
-        "total_target_count": len(indicators),
-        "condition_passed_count": result["strict_passed_count"],
-        "fallback_used": result["fallback_used"],
-        "fallback_passed_count": result["fallback_passed_count"],
-        "candidate_count": len(candidates),
-        "candidates": candidates,
-        "excluded_summary": {
-            **result["excluded_summary"],
-            "market_filter_excluded": market_filtered["excluded_count"],
+    screening_log = _run_timed_backtest_phase(
+        "candidate_cache_payload_build",
+        lambda: {
+            "date": target_date_text,
+            "provider": provider_name,
+            "config_version": config_version_from(config),
+            "conditions": result["conditions"],
+            "total_target_count": len(indicators),
+            "condition_passed_count": result["strict_passed_count"],
+            "fallback_used": result["fallback_used"],
+            "fallback_passed_count": result["fallback_passed_count"],
+            "candidate_count": len(candidates),
+            "candidates": candidates,
+            "excluded_summary": {
+                **result["excluded_summary"],
+                "market_filter_excluded": market_filtered["excluded_count"],
+            },
+            "market_coverage": {
+                "allowed_sections": sorted(allowed_market_sections(config)),
+                "allow_unknown_market": bool(config.get("market_filter", {}).get("allow_unknown_market", False)),
+                "input_counts": market_filtered["input_counts"],
+                "market_filter_allowed_counts": market_filtered["allowed_counts"],
+                "allowed_counts": market_filtered["allowed_counts"],
+                "excluded_counts": market_filtered["excluded_counts"],
+                "screening_candidate_counts": market_section_counts(candidates),
+                "candidate_counts": market_section_counts(candidates),
+                "market_filter_excluded_count": market_filtered["excluded_count"],
+                "unknown_market_count": market_filtered["input_counts"].get("Unknown", 0),
+                "market_section_lookup_source": market_filtered.get("lookup_source", {}),
+                "listed_info_match_count": market_filtered.get("listed_info_match_count", 0),
+                "listed_info_missing_count": market_filtered.get("listed_info_missing_count", 0),
+                "market_section_filled_from_master_count": market_filtered.get("market_section_filled_from_master_count", 0),
+                "screening_excluded_reason_by_market": screening_market_audit.get("screening_excluded_reason_by_market", {}),
+                "screening_excluded_date_by_market": screening_market_audit.get("screening_excluded_date_by_market", {}),
+                "screening_ranking_drop_by_market": screening_market_audit.get("screening_ranking_drop_by_market", {}),
+                "screening_representative_sample": screening_market_audit.get("representative_sample", []),
+                "sample": market_filtered.get("sample", []),
+            },
         },
-        "market_coverage": {
-            "allowed_sections": sorted(allowed_market_sections(config)),
-            "allow_unknown_market": bool(config.get("market_filter", {}).get("allow_unknown_market", False)),
-            "input_counts": market_filtered["input_counts"],
-            "market_filter_allowed_counts": market_filtered["allowed_counts"],
-            "allowed_counts": market_filtered["allowed_counts"],
-            "excluded_counts": market_filtered["excluded_counts"],
-            "screening_candidate_counts": market_section_counts(candidates),
-            "candidate_counts": market_section_counts(candidates),
-            "market_filter_excluded_count": market_filtered["excluded_count"],
-            "unknown_market_count": market_filtered["input_counts"].get("Unknown", 0),
-            "market_section_lookup_source": market_filtered.get("lookup_source", {}),
-            "listed_info_match_count": market_filtered.get("listed_info_match_count", 0),
-            "listed_info_missing_count": market_filtered.get("listed_info_missing_count", 0),
-            "market_section_filled_from_master_count": market_filtered.get("market_section_filled_from_master_count", 0),
-            "screening_excluded_reason_by_market": screening_market_audit.get("screening_excluded_reason_by_market", {}),
-            "screening_excluded_date_by_market": screening_market_audit.get("screening_excluded_date_by_market", {}),
-            "screening_ranking_drop_by_market": screening_market_audit.get("screening_ranking_drop_by_market", {}),
-            "screening_representative_sample": screening_market_audit.get("representative_sample", []),
-            "sample": market_filtered.get("sample", []),
-        },
-    }
+    )
 
     screening_log.setdefault("profile_id", profile_id_from(config))
     screening_log.setdefault("profile_name", profile_name_from(config))
     screening_path = ROOT / "logs" / "screening" / profile_id_from(config) / f"screening_{target_date_text}.json"
     candidates_path = processed_profile_path(config, f"candidates_{target_date_text}.json")
-    if _daily_detail_logs_enabled(config):
-        write_json(screening_path, screening_log)
-    candidate_payload = {
-        "date": target_date_text,
-        "provider": provider_name,
-        "profile_id": profile_id_from(config),
-        "profile_name": profile_name_from(config),
-        "config_version": config_version_from(config),
-        "candidate_count": len(candidates),
-        "candidates": candidates,
-        "market_coverage": screening_log["market_coverage"],
-    }
-    write_json(candidates_path, candidate_payload)
-    reloaded_candidate_payload = _run_timed_backtest_phase("candidate_load", lambda: read_json(candidates_path))
-    reloaded_candidates = _fill_market_sections_from_master(reloaded_candidate_payload.get("candidates", []))
-    candidate_payload["market_coverage"]["post_filter_validation"] = _candidate_market_filter_validation(reloaded_candidates, config)
-    write_json(candidates_path, candidate_payload)
-    if BACKTEST_MODE_ACTIVE:
-        _save_common_processed_cache(config, "candidates", target_date_text, candidate_payload)
-        _link_profile_processed_cache_to_common(config, "candidates", target_date_text, candidates_path)
+    candidate_payload = _run_timed_backtest_phase(
+        "candidate_cache_payload_build",
+        lambda: {
+            "date": target_date_text,
+            "provider": provider_name,
+            "profile_id": profile_id_from(config),
+            "profile_name": profile_name_from(config),
+            "config_version": config_version_from(config),
+            "candidate_count": len(candidates),
+            "candidates": candidates,
+            "market_coverage": screening_log["market_coverage"],
+        },
+    )
+
+    def write_candidate_outputs() -> None:
+        if _daily_detail_logs_enabled(config):
+            write_json(screening_path, screening_log)
+        write_json(candidates_path, candidate_payload)
+        reloaded_candidate_payload = read_json(candidates_path)
+        reloaded_candidates = _fill_market_sections_from_master(reloaded_candidate_payload.get("candidates", []))
+        candidate_payload["market_coverage"]["post_filter_validation"] = _candidate_market_filter_validation(reloaded_candidates, config)
+        write_json(candidates_path, candidate_payload)
+        if BACKTEST_MODE_ACTIVE:
+            _save_common_processed_cache(config, "candidates", target_date_text, candidate_payload)
+            _link_profile_processed_cache_to_common(config, "candidates", target_date_text, candidates_path)
+
+    _run_timed_backtest_phase("candidate_json_write", write_candidate_outputs)
     save_screening_results(config, ROOT, screening_log)
+    _record_candidate_generation_workload(
+        raw_candidate_count=raw_candidate_count,
+        after_market_filter_count=len(indicators),
+        after_screening_count=len(candidates),
+        json_written_count=1,
+        cache_reused=False,
+    )
 
     print(f"target stocks: {len(indicators)}")
     print(f"condition passed: {result['strict_passed_count']}")
@@ -9448,7 +9514,9 @@ def run_score(provider_name: str, target_date_text: str) -> None:
         },
     )
     _run_timed_backtest_phase("scored_candidates_json_write", lambda: write_json(scored_candidates_path, scored_payload))
-    _run_timed_backtest_phase("scoring_db_save", lambda: save_scoring_results(config, ROOT, storage_scoring_log))
+    db_started = time.perf_counter()
+    _run_timed_backtest_phase("scoring_results_db_save", lambda: save_scoring_results(config, ROOT, storage_scoring_log))
+    _record_scoring_results_db_save_metrics(len(storage_scoring_log.get("scores", [])), time.perf_counter() - db_started)
     if ai_decision_log and _daily_detail_logs_enabled(config):
         _run_timed_backtest_phase("scoring_ai_decision_save", lambda: save_ai_decision(config, ROOT, ai_decision_log))
     if _daily_detail_logs_enabled(config):
@@ -11010,6 +11078,7 @@ def _profile_phase_time_snapshot(profile_total_seconds: float) -> dict[str, Any]
         "directory_setup": round(float(BACKTEST_PROFILE_TIMINGS.get("directory_setup", 0.0)), 4),
         "state_initialization": round(float(BACKTEST_PROFILE_TIMINGS.get("state_initialization", 0.0)), 4),
         "backtest_setup_total": round(float(BACKTEST_PROFILE_TIMINGS.get("backtest_setup_total", 0.0)), 4),
+        "fetch_prices": round(float(BACKTEST_PROFILE_TIMINGS.get("fetch_prices", 0.0)), 4),
         "raw_price_loading": round(float(BACKTEST_PROFILE_TIMINGS.get("raw_price_loading", 0.0)), 4),
         "trading_day_detection": round(float(BACKTEST_PROFILE_TIMINGS.get("trading_day_detection", 0.0)), 4),
         "price_history_date_scan": round(float(BACKTEST_PROFILE_TIMINGS.get("price_history_date_scan", 0.0)), 4),
@@ -11026,6 +11095,21 @@ def _profile_phase_time_snapshot(profile_total_seconds: float) -> dict[str, Any]
         "per_day_pipeline_total": round(float(BACKTEST_PROFILE_TIMINGS.get("per_day_pipeline_total", 0.0)), 4),
         "backtest_day_iteration_total": round(float(BACKTEST_PROFILE_TIMINGS.get("backtest_day_iteration_total", 0.0)), 4),
         "candidate_generation_total": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_generation_total", 0.0)), 4),
+        "candidate_price_load": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_price_load", 0.0)), 4),
+        "candidate_universe_build": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_universe_build", 0.0)), 4),
+        "candidate_market_section_lookup": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_market_section_lookup", 0.0)), 4),
+        "candidate_screening_rules": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_screening_rules", 0.0)), 4),
+        "candidate_ranking_sort": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_ranking_sort", 0.0)), 4),
+        "candidate_cache_payload_build": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_cache_payload_build", 0.0)), 4),
+        "candidate_json_write": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_json_write", 0.0)), 4),
+        "candidate_screening_audit": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_screening_audit", 0.0)), 4),
+        "candidate_cache_lookup": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_cache_lookup", 0.0)), 4),
+        "candidate_cache_read": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_cache_read", 0.0)), 4),
+        "candidate_cache_materialize": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_cache_materialize", 0.0)), 4),
+        "candidate_cache_copy_or_link": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_cache_copy_or_link", 0.0)), 4),
+        "candidate_cache_json_write": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_cache_json_write", 0.0)), 4),
+        "candidate_workload_counting": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_workload_counting", 0.0)), 4),
+        "candidate_audit_or_summary": round(float(BACKTEST_PROFILE_TIMINGS.get("candidate_audit_or_summary", 0.0)), 4),
         "indicator_generation_total": round(float(BACKTEST_PROFILE_TIMINGS.get("indicator_generation_total", 0.0)), 4),
         "scoring_total": round(float(BACKTEST_PROFILE_TIMINGS.get("scoring_total", 0.0)), 4),
         "cache_lookup_total": round(float(BACKTEST_PROFILE_TIMINGS.get("cache_lookup_total", 0.0)), 4),
@@ -11111,59 +11195,72 @@ def _profile_phase_time_snapshot(profile_total_seconds: float) -> dict[str, Any]
         "json_write": round(float(BACKTEST_PROFILE_TIMINGS.get("json_write", 0.0)), 4),
         "sqlite_access": round(float(BACKTEST_PROFILE_TIMINGS.get("sqlite_access", 0.0)), 4),
     }
-    accounting_keys = [
-        "json_read",
-        "json_file_io_sec",
-        "candidate_load",
-        "indicator_load",
-        "score_load",
-        "scoring",
-        "trade",
-        "market_filter",
-        "score_integrity_audit",
-        "result_integrity_audit",
-        "feature_analysis_generation",
-        "experiment_summary_generation",
-        "cache_copy_or_write",
-        "report_write",
-        "trade_simulation",
-        "comparison_analysis",
-        "sqlite_access",
-        "json_write",
-        "summary_generation",
-        "runtime_date_resolution",
-        "config_profile_load",
-        "provider_session_reset",
-        "directory_setup",
-        "state_initialization",
-        "raw_price_loading",
-        "price_history_date_scan",
-        "light_context_preload",
-        "indicator_history_check",
-        "market_context",
-        "ai_decision",
-        "daily_report_skip_overhead",
-        "daily_bookkeeping_sec",
-        "progress_output_sec",
+    candidate_subphase_keys = [
+        "candidate_price_load",
+        "candidate_universe_build",
+        "candidate_market_section_lookup",
+        "candidate_screening_rules",
+        "candidate_ranking_sort",
+        "candidate_cache_payload_build",
+        "candidate_json_write",
+        "candidate_screening_audit",
+        "candidate_cache_lookup",
+        "candidate_cache_read",
+        "candidate_cache_materialize",
+        "candidate_cache_copy_or_link",
+        "candidate_cache_json_write",
+        "candidate_workload_counting",
+        "candidate_audit_or_summary",
     ]
-    measured_sum = round(
-        sum(float(phases.get(key, 0.0) or 0.0) for key in accounting_keys if key != "json_read")
-        + (float(phases.get("json_file_io_sec", 0.0) or 0.0) or float(phases.get("json_read", 0.0) or 0.0)),
-        4,
+    candidate_other = float(phases.get("candidate_generation_total", 0.0) or 0.0) - sum(
+        float(phases.get(key, 0.0) or 0.0) for key in candidate_subphase_keys
     )
+    phases["candidate_other"] = round(max(0.0, candidate_other), 4)
+    accounting_keys = _profile_phase_accounting_keys(phases)
+    measured_sum = round(sum(float(phases.get(key, 0.0) or 0.0) for key in accounting_keys), 4)
     delta = round(float(profile_total_seconds) - measured_sum, 4)
     if delta >= 0:
         phases["misc"] = delta
         phases["other_misc"] = 0.0
     else:
         phases["timing_overlap_adjustment"] = delta
-    accounting_sum = (
-        sum(float(phases.get(key, 0.0) or 0.0) for key in accounting_keys if key != "json_read")
-        + (float(phases.get("json_file_io_sec", 0.0) or 0.0) or float(phases.get("json_read", 0.0) or 0.0))
-        + float(phases.get("misc", 0.0) or 0.0)
-    )
+    accounting_sum = sum(float(phases.get(key, 0.0) or 0.0) for key in accounting_keys) + float(phases.get("misc", 0.0) or 0.0)
     final_delta = round(float(profile_total_seconds) - accounting_sum, 4)
     return {"phases": phases, "accounting_delta": final_delta}
+
+
+def _profile_phase_accounting_keys(phases: dict[str, Any]) -> list[str]:
+    def preferred(total_key: str, fallback_key: str) -> str:
+        return total_key if float(phases.get(total_key, 0.0) or 0.0) > 0 else fallback_key
+
+    keys = ["backtest_setup_total"] if float(phases.get("backtest_setup_total", 0.0) or 0.0) > 0 else [
+        "runtime_date_resolution",
+        "config_profile_load",
+        "provider_session_reset",
+        "directory_setup",
+        "state_initialization",
+    ]
+    keys.extend(["fetch_prices", "raw_price_loading", "price_history_date_scan", "light_context_preload"])
+    if float(phases.get("daily_loop_total", 0.0) or 0.0) > 0:
+        keys.append("daily_loop_total")
+    else:
+        keys.extend(
+            [
+                "indicator_history_check",
+                preferred("indicator_generation_total", "indicator_load"),
+                preferred("market_context_total", "market_context"),
+                preferred("candidate_generation_total", "candidate_load"),
+                preferred("scoring_total", "scoring"),
+                preferred("ai_decision_total", "ai_decision"),
+                "trade",
+                "report_write",
+                "sqlite_access",
+                "daily_bookkeeping_sec",
+                "progress_output_sec",
+            ]
+        )
+    keys.extend(["summary_generation", "feature_analysis_generation", "experiment_summary_generation", "comparison_analysis"])
+    return keys
 
 
 def _profile_stage_time_summary(analyze_sec: float = 0.0) -> dict[str, float]:
@@ -11176,6 +11273,62 @@ def _profile_stage_time_summary(analyze_sec: float = 0.0) -> dict[str, float]:
         "db_save_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("sqlite_access", 0.0) or BACKTEST_PROFILE_TIMINGS.get("db_read_write_total", 0.0)), 4),
         "report_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("report", 0.0) or BACKTEST_PROFILE_TIMINGS.get("report_write", 0.0)), 4),
         "analyze_sec": round(float(analyze_sec or 0.0), 4),
+    }
+
+
+def _record_candidate_generation_workload(
+    *,
+    raw_candidate_count: int,
+    after_market_filter_count: int,
+    after_screening_count: int,
+    json_written_count: int,
+    cache_reused: bool,
+) -> None:
+    if not BACKTEST_MODE_ACTIVE:
+        return
+
+    def add_metric(key: str, value: int | float) -> None:
+        BACKTEST_PROFILE_TIMINGS[key] = float(BACKTEST_PROFILE_TIMINGS.get(key, 0.0) or 0.0) + float(value or 0.0)
+
+    add_metric("candidate_generated_day_count", 0 if cache_reused else 1)
+    add_metric("candidate_cache_reused_day_count", 1 if cache_reused else 0)
+    add_metric("candidate_raw_candidate_count_total", max(0, int(raw_candidate_count or 0)))
+    add_metric("candidate_after_market_filter_count_total", max(0, int(after_market_filter_count or 0)))
+    add_metric("candidate_after_screening_count_total", max(0, int(after_screening_count or 0)))
+    add_metric("candidate_json_written_count_total", max(0, int(json_written_count or 0)))
+
+
+def _record_candidate_generation_workload_from_payload(
+    payload: dict[str, Any],
+    *,
+    cache_reused: bool,
+    json_written_count: int = 0,
+) -> None:
+    market_coverage = payload.get("market_coverage", {}) if isinstance(payload.get("market_coverage"), dict) else {}
+    raw_count = sum(int(value or 0) for value in (market_coverage.get("input_counts") or {}).values()) if isinstance(market_coverage.get("input_counts"), dict) else 0
+    after_market_filter = (
+        sum(int(value or 0) for value in (market_coverage.get("market_filter_allowed_counts") or market_coverage.get("allowed_counts") or {}).values())
+        if isinstance(market_coverage.get("market_filter_allowed_counts") or market_coverage.get("allowed_counts"), dict)
+        else int(payload.get("candidate_count") or len(payload.get("candidates", []) or []))
+    )
+    after_screening = int(payload.get("candidate_count") or len(payload.get("candidates", []) or []))
+    _record_candidate_generation_workload(
+        raw_candidate_count=raw_count or after_market_filter,
+        after_market_filter_count=after_market_filter,
+        after_screening_count=after_screening,
+        json_written_count=json_written_count,
+        cache_reused=cache_reused,
+    )
+
+
+def _profile_candidate_generation_workload_summary() -> dict[str, Any]:
+    return {
+        "generated_day_count": int(BACKTEST_PROFILE_TIMINGS.get("candidate_generated_day_count", 0) or 0),
+        "cache_reused_day_count": int(BACKTEST_PROFILE_TIMINGS.get("candidate_cache_reused_day_count", 0) or 0),
+        "raw_candidate_count": int(BACKTEST_PROFILE_TIMINGS.get("candidate_raw_candidate_count_total", 0) or 0),
+        "after_market_filter_count": int(BACKTEST_PROFILE_TIMINGS.get("candidate_after_market_filter_count_total", 0) or 0),
+        "after_screening_count": int(BACKTEST_PROFILE_TIMINGS.get("candidate_after_screening_count_total", 0) or 0),
+        "json_written_count": int(BACKTEST_PROFILE_TIMINGS.get("candidate_json_written_count_total", 0) or 0),
     }
 
 
@@ -11227,6 +11380,36 @@ def _profile_scoring_workload_summary() -> dict[str, Any]:
             section.capitalize(): int(BACKTEST_PROFILE_TIMINGS.get(f"scoring_selected_market_{section}_count_total", 0) or 0)
             for section in sections
         },
+    }
+
+
+def _record_scoring_results_db_save_metrics(row_count: int, elapsed: float = 0.0, *, skipped: bool = False) -> None:
+    if not BACKTEST_MODE_ACTIVE:
+        return
+    prefix = "scoring_results_db_save_skipped" if skipped else "scoring_results_db_save_saved"
+    BACKTEST_PROFILE_TIMINGS[f"{prefix}_day_count"] = BACKTEST_PROFILE_TIMINGS.get(f"{prefix}_day_count", 0.0) + 1
+    BACKTEST_PROFILE_TIMINGS[f"{prefix}_row_count"] = BACKTEST_PROFILE_TIMINGS.get(f"{prefix}_row_count", 0.0) + max(0, int(row_count or 0))
+    if not skipped:
+        BACKTEST_PROFILE_TIMINGS["scoring_results_db_save_elapsed_total"] = (
+            BACKTEST_PROFILE_TIMINGS.get("scoring_results_db_save_elapsed_total", 0.0) + max(0.0, float(elapsed or 0.0))
+        )
+
+
+def _profile_scoring_db_save_summary() -> dict[str, Any]:
+    saved_days = int(BACKTEST_PROFILE_TIMINGS.get("scoring_results_db_save_saved_day_count", 0) or 0)
+    skipped_days = int(BACKTEST_PROFILE_TIMINGS.get("scoring_results_db_save_skipped_day_count", 0) or 0)
+    saved_rows = int(BACKTEST_PROFILE_TIMINGS.get("scoring_results_db_save_saved_row_count", 0) or 0)
+    skipped_rows = int(BACKTEST_PROFILE_TIMINGS.get("scoring_results_db_save_skipped_row_count", 0) or 0)
+    elapsed = float(BACKTEST_PROFILE_TIMINGS.get("scoring_results_db_save_elapsed_total", 0.0) or 0.0)
+    avg_ms = (elapsed / saved_rows * 1000.0) if saved_rows else 0.0
+    return {
+        "saved_day_count": saved_days,
+        "skipped_day_count": skipped_days,
+        "saved_row_count": saved_rows,
+        "skipped_row_count": skipped_rows,
+        "elapsed_sec": round(elapsed, 4),
+        "avg_elapsed_ms_per_saved_row": round(avg_ms, 6),
+        "skip_policy": "cached_score_db_save_skipped_in_fast_run_experiments",
     }
 
 
@@ -11362,6 +11545,22 @@ def _aggregate_phase_elapsed(performance_report: dict[str, Any]) -> dict[str, fl
         "daily_loop_total",
         "per_day_pipeline_total",
         "candidate_generation_total",
+        "candidate_price_load",
+        "candidate_universe_build",
+        "candidate_market_section_lookup",
+        "candidate_screening_rules",
+        "candidate_ranking_sort",
+        "candidate_cache_payload_build",
+        "candidate_json_write",
+        "candidate_screening_audit",
+        "candidate_cache_lookup",
+        "candidate_cache_read",
+        "candidate_cache_materialize",
+        "candidate_cache_copy_or_link",
+        "candidate_cache_json_write",
+        "candidate_workload_counting",
+        "candidate_audit_or_summary",
+        "candidate_other",
         "indicator_generation_total",
         "scoring_total",
         "cache_lookup_total",
@@ -11959,6 +12158,15 @@ def _daily_detail_logs_enabled(config: dict[str, Any] | None = None) -> bool:
     return True
 
 
+def _skip_cached_scoring_results_db_save(config: dict[str, Any]) -> bool:
+    if not (BACKTEST_MODE_ACTIVE and RUN_EXPERIMENTS_SHARED_STAGE_ACTIVE):
+        return False
+    if not _fast_analysis_enabled(config):
+        return False
+    backtest_config = config.get("backtest", {}) if isinstance(config.get("backtest"), dict) else {}
+    return bool(backtest_config.get("skip_cached_scoring_db_save", True))
+
+
 def _score_cache_payload(config: dict[str, Any], target_date_text: str) -> dict[str, str]:
     signature = _experiment_scoring_signature(config)
     settings_hash = hashlib.sha1(signature.encode("utf-8")).hexdigest()[:16]
@@ -12334,25 +12542,42 @@ def ensure_screen(provider_name: str, target_date_text: str) -> None:
     config = load_config(CONFIG_PATH)
     path = processed_profile_path(config, f"candidates_{target_date_text}.json")
     if BACKTEST_MODE_ACTIVE and _restore_common_processed_cache(config, "candidates", target_date_text, path):
-        payload = _candidate_payload_with_market_sections(_run_timed_backtest_phase("candidate_load", lambda: read_json(path)), config)
-        write_json(path, payload)
+        payload = _run_timed_backtest_phase(
+            "candidate_cache_read",
+            lambda: _candidate_payload_with_market_sections(read_json(path), config),
+        )
+        _run_timed_backtest_phase("candidate_cache_json_write", lambda: write_json(path, payload))
         _update_common_processed_cache(config, "candidates", target_date_text, payload)
-        save_screening_results(config, ROOT, payload)
+        _run_timed_backtest_phase("candidate_audit_or_summary", lambda: save_screening_results(config, ROOT, payload))
+        _run_timed_backtest_phase(
+            "candidate_workload_counting",
+            lambda: _record_candidate_generation_workload_from_payload(payload, cache_reused=True, json_written_count=1),
+        )
         _record_cache_source("candidates", "common")
         print(f"{BACKTEST_DAY_LOG_PREFIX} candidates cache hit source=common path={_common_processed_cache_path(config, 'candidates', target_date_text).relative_to(ROOT)}")
         return
     if path.exists():
         screening_path = ROOT / "logs" / "screening" / profile_id_from(config) / f"screening_{target_date_text}.json"
-        candidate_payload = _candidate_payload_with_market_sections(_run_timed_backtest_phase("candidate_load", lambda: read_json(path)), config)
-        write_json(path, candidate_payload)
+        candidate_payload = _run_timed_backtest_phase(
+            "candidate_cache_read",
+            lambda: _candidate_payload_with_market_sections(read_json(path), config),
+        )
+        _run_timed_backtest_phase("candidate_cache_json_write", lambda: write_json(path, candidate_payload))
         _update_common_processed_cache(config, "candidates", target_date_text, candidate_payload)
-        payload_source = read_json(screening_path) if screening_path.exists() else candidate_payload
-        payload = _candidate_payload_with_market_sections(payload_source, config)
+        payload_source = _run_timed_backtest_phase("candidate_cache_read", lambda: read_json(screening_path)) if screening_path.exists() else candidate_payload
+        payload = _run_timed_backtest_phase(
+            "candidate_audit_or_summary",
+            lambda: _candidate_payload_with_market_sections(payload_source, config),
+        )
         payload.setdefault("config_version", config_version_from(config))
-        save_screening_results(config, ROOT, payload)
-        _save_common_processed_cache(config, "candidates", target_date_text, candidate_payload)
+        _run_timed_backtest_phase("candidate_audit_or_summary", lambda: save_screening_results(config, ROOT, payload))
+        _run_timed_backtest_phase("candidate_cache_materialize", lambda: _save_common_processed_cache(config, "candidates", target_date_text, candidate_payload))
         _link_profile_processed_cache_to_common(config, "candidates", target_date_text, path)
         COMMON_CACHE_METRICS["profile_specific_cache_count"] = COMMON_CACHE_METRICS.get("profile_specific_cache_count", 0) + 1
+        _run_timed_backtest_phase(
+            "candidate_workload_counting",
+            lambda: _record_candidate_generation_workload_from_payload(candidate_payload, cache_reused=True, json_written_count=1),
+        )
         _record_cache_source("candidates", "profile")
         return
     _record_cache_source("candidates", "generated")
@@ -12372,19 +12597,25 @@ def ensure_score(provider_name: str, target_date_text: str) -> dict[str, Any]:
         payload = _run_timed_backtest_phase("score_load", lambda: read_json(path))
     payload.setdefault("config_version", config_version_from(config))
     _run_timed_backtest_phase("scoring_selected_projection", lambda: payload.setdefault("selected", [item for item in payload.get("scores", []) if item.get("selected")]))
-    _run_timed_backtest_phase(
-        "scoring_results_db_save",
-        lambda: save_scoring_results(
-            config,
-            ROOT,
-            {
-                "date": payload.get("date", target_date_text),
-                "config_version": payload.get("config_version"),
-                "source_provider": provider_name,
-                "scores": payload.get("scores", []),
-            },
-        ),
-    )
+    scores = payload.get("scores", [])
+    if _skip_cached_scoring_results_db_save(config):
+        _record_scoring_results_db_save_metrics(len(scores), skipped=True)
+    else:
+        db_started = time.perf_counter()
+        _run_timed_backtest_phase(
+            "scoring_results_db_save",
+            lambda: save_scoring_results(
+                config,
+                ROOT,
+                {
+                    "date": payload.get("date", target_date_text),
+                    "config_version": payload.get("config_version"),
+                    "source_provider": provider_name,
+                    "scores": scores,
+                },
+            ),
+        )
+        _record_scoring_results_db_save_metrics(len(scores), time.perf_counter() - db_started)
     return _scored_payload_as_scoring_log(payload, provider_name, target_date_text)
 
 
@@ -12429,16 +12660,25 @@ def _copy_reusable_scoring_for_active_profile(target_date_text: str) -> dict[str
     write_json(target_processed, processed_payload)
     if _daily_detail_logs_enabled(target_config):
         write_json(target_log, scoring_payload)
-    save_scoring_results(
-        target_config,
-        ROOT,
-        {
-            "date": scoring_payload.get("date", target_date_text),
-            "config_version": scoring_payload.get("config_version"),
-            "source_provider": scoring_payload.get("source_provider", "jquants"),
-            "scores": scoring_payload.get("scores", []),
-        },
-    )
+    scores = scoring_payload.get("scores", [])
+    if _skip_cached_scoring_results_db_save(target_config):
+        _record_scoring_results_db_save_metrics(len(scores), skipped=True)
+    else:
+        db_started = time.perf_counter()
+        _run_timed_backtest_phase(
+            "scoring_results_db_save",
+            lambda: save_scoring_results(
+                target_config,
+                ROOT,
+                {
+                    "date": scoring_payload.get("date", target_date_text),
+                    "config_version": scoring_payload.get("config_version"),
+                    "source_provider": scoring_payload.get("source_provider", "jquants"),
+                    "scores": scores,
+                },
+            ),
+        )
+        _record_scoring_results_db_save_metrics(len(scores), time.perf_counter() - db_started)
     RUN_EXPERIMENTS_PERFORMANCE_REPORT["reused_scoring_count"] = int(RUN_EXPERIMENTS_PERFORMANCE_REPORT.get("reused_scoring_count", 0) or 0) + 1
     return {
         **scoring_payload,

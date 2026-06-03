@@ -22,6 +22,113 @@ def test_indicator_history_uses_precomputed_price_history_dates(monkeypatch, con
     assert has_history == (input_days >= min_days)
 
 
+def test_candidate_generation_workload_summary_counts_cache_and_generated_days(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "BACKTEST_MODE_ACTIVE", True)
+    monkeypatch.setattr(main_module, "BACKTEST_PROFILE_TIMINGS", {})
+
+    main_module._record_candidate_generation_workload(
+        raw_candidate_count=10,
+        after_market_filter_count=8,
+        after_screening_count=3,
+        json_written_count=1,
+        cache_reused=False,
+    )
+    main_module._record_candidate_generation_workload(
+        raw_candidate_count=7,
+        after_market_filter_count=7,
+        after_screening_count=2,
+        json_written_count=1,
+        cache_reused=True,
+    )
+
+    assert main_module._profile_candidate_generation_workload_summary() == {
+        "generated_day_count": 1,
+        "cache_reused_day_count": 1,
+        "raw_candidate_count": 17,
+        "after_market_filter_count": 15,
+        "after_screening_count": 5,
+        "json_written_count": 2,
+    }
+
+
+def test_candidate_phase_snapshot_reports_other_without_double_count(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main_module,
+        "BACKTEST_PROFILE_TIMINGS",
+        {
+            "candidate_generation_total": 10.0,
+            "candidate_price_load": 1.0,
+            "candidate_universe_build": 2.0,
+            "candidate_market_section_lookup": 1.0,
+            "candidate_screening_rules": 2.0,
+            "candidate_ranking_sort": 1.0,
+            "candidate_cache_payload_build": 1.0,
+            "candidate_json_write": 1.0,
+        },
+    )
+
+    snapshot = main_module._profile_phase_time_snapshot(12.0)
+    phases = snapshot["phases"]
+
+    assert phases["candidate_generation_total"] == 10.0
+    assert phases["candidate_other"] == 1.0
+    assert phases["misc"] == 2.0
+
+
+def test_candidate_phase_snapshot_breaks_down_cache_reuse(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main_module,
+        "BACKTEST_PROFILE_TIMINGS",
+        {
+            "candidate_generation_total": 8.0,
+            "candidate_cache_lookup": 0.5,
+            "candidate_cache_read": 2.0,
+            "candidate_cache_materialize": 1.5,
+            "candidate_cache_copy_or_link": 1.0,
+            "candidate_cache_json_write": 1.0,
+            "candidate_workload_counting": 0.5,
+            "candidate_audit_or_summary": 1.0,
+        },
+    )
+
+    snapshot = main_module._profile_phase_time_snapshot(9.0)
+    phases = snapshot["phases"]
+
+    assert phases["candidate_cache_read"] == 2.0
+    assert phases["candidate_cache_materialize"] == 1.5
+    assert phases["candidate_other"] == 0.5
+    assert phases["misc"] == 1.0
+
+
+def test_phase_accounting_uses_daily_loop_parent_without_candidate_overlap(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main_module,
+        "BACKTEST_PROFILE_TIMINGS",
+        {
+            "backtest_setup_total": 1.0,
+            "raw_price_loading": 2.0,
+            "price_history_date_scan": 0.5,
+            "light_context_preload": 0.5,
+            "daily_loop_total": 10.0,
+            "candidate_generation_total": 4.0,
+            "candidate_cache_materialize": 3.0,
+            "candidate_cache_json_write": 1.0,
+            "cache_materialize_total": 3.0,
+            "cache_copy_or_write": 1.0,
+            "summary_generation": 1.0,
+        },
+    )
+
+    snapshot = main_module._profile_phase_time_snapshot(15.0)
+    phases = snapshot["phases"]
+
+    assert phases["candidate_generation_total"] == 4.0
+    assert phases["candidate_cache_materialize"] == 3.0
+    assert "timing_overlap_adjustment" not in phases
+    assert phases["misc"] == 0.0
+    assert snapshot["accounting_delta"] == 0.0
+
+
 def _patch_minimal_backtest(monkeypatch, config: dict, tmp_path, trades: list[dict] | None = None) -> None:
     config["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
     portfolio = {"total_assets": 1_000_000, "safety_events": [], "date": "2026-01-02"}

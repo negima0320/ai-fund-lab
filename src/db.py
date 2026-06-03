@@ -19,6 +19,7 @@ WALK_FORWARD_PERIODS = [
     ("2025-07-01", "2025-10-31"),
     ("2025-11-01", "2026-03-06"),
 ]
+_INITIALIZED_DATABASE_PATHS: set[Path] = set()
 
 PENDING_ORDER_INSERT_COLUMNS = [
     "order_id",
@@ -687,6 +688,7 @@ def initialize_database(config: dict[str, Any], root: Path) -> Path:
         _add_column_if_missing(connection, "pending_orders", "config_version", "TEXT")
         _add_column_if_missing(connection, "ai_decisions", "config_version", "TEXT")
         _add_column_if_missing(connection, "market_contexts", "sector_momentum", "TEXT")
+    _INITIALIZED_DATABASE_PATHS.add(db_path)
     return db_path
 
 
@@ -1444,7 +1446,9 @@ def analyze_operation_data(config: dict[str, Any], root: Path) -> dict[str, Any]
 
 
 def _connect(config: dict[str, Any], root: Path) -> sqlite3.Connection:
-    db_path = initialize_database(config, root)
+    db_path = get_database_path(config, root)
+    if db_path not in _INITIALIZED_DATABASE_PATHS or not db_path.exists():
+        db_path = initialize_database(config, root)
     return sqlite3.connect(db_path)
 
 

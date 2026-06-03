@@ -651,8 +651,8 @@ def test_profile_phase_time_snapshot_accounts_for_profile_total(monkeypatch) -> 
     snapshot = main_module._profile_phase_time_snapshot(20.0)
 
     assert snapshot["accounting_delta"] == 0
-    assert round(sum(snapshot["phases"].values()), 4) == 20.0
-    assert snapshot["phases"]["misc"] == 3.0
+    assert "timing_overlap_adjustment" not in snapshot["phases"]
+    assert snapshot["phases"]["misc"] == 4.0
 
 
 def test_top_experiment_bottlenecks_are_sorted() -> None:
