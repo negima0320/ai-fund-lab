@@ -11,7 +11,7 @@
 
 ## Backtest Date Range Audit
 
-- requested_start_date: 2021-01-01
+- requested_start_date: 2021-05-01
 - requested_end_date: 2026-03-06
 - effective_trade_start_date: 2021-05-01
 - effective_trade_end_date: 2026-03-06
@@ -47,14 +47,14 @@
 
 ### Requested vs Effective Period
 
-- requested_period: 2021-01-01 to 2026-03-06
+- requested_period: 2021-05-01 to 2026-03-06
 - effective_period: 2021-06-01 to 2026-03-05
 - effective_range_warning: processed days end before requested_end_date; check latest_available_price_date and fetch-period-prices logs
 
 ### Hardcoded Date Audit
 
 - target: 2026-03-06
-- match_count: 618
+- match_count: 622
 - warning: 2026-03-06 remains in config/src/docs/reports/README
 
 ### Processed Data Audit
@@ -75,8 +75,8 @@
 - match: reports/backtest_2026-03-06_to_2026-03-06.json
 - match: reports/backtest_2026-03-06_to_2026-03-06.md
 - match: reports/day_2026-03-06.md
+- match: reports/rookie_dealer_02_v2_51/backtest_2026-01-01_to_2026-03-06.md
 - match: reports/rookie_dealer_02_v2_51/backtest_2026-01-05_to_2026-03-06.json
-- match: reports/rookie_dealer_02_v2_51/backtest_2025-01-01_to_2026-03-06.md
 
 ## 結果サマリ
 

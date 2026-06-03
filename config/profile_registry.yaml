@@ -431,7 +431,7 @@ profiles:
 
   rookie_dealer_02_v2_38:
     role: experiment
-    description: v2.37 + affordable fallback min_total_score 50 検証
+    description: 保有銘柄の再選定による保有延長・シグナル消失による早期売却検証
     required_plan: light
     compare_to: rookie_dealer_02_v2_26
     features:
@@ -442,7 +442,9 @@ profiles:
       capital_utilization: true
       allocation_strategy: true
       relaxed_pending_target_exposure: true
-      affordable_fallback_buy: true
+      holding_revaluation: true
+      hold_reselection_extension: true
+      signal_lost_exit: true
 
   rookie_dealer_02_v2_39:
     role: experiment

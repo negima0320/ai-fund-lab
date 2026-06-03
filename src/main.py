@@ -12743,12 +12743,15 @@ RUNTIME_TRADE_FIELDS = {
     "signal_date", "entry_date", "exit_date", "holding_days", "entry_price",
     "entry_price_source", "signal_close_price", "entry_open_price", "entry_gap_rate",
     "exit_price", "shares", "amount", "profit", "profit_rate", "exit_reason",
-    "result", "score", "total_score", "technical_score", "rsi", "volume_ratio",
+    "result", "score", "entry_score", "total_score", "technical_score", "rsi", "volume_ratio",
     "selected_reason", "reason", "broker_provider", "order_status", "status",
     "affordable_fallback_buy_selected", "affordable_fallback_original_code",
     "affordable_fallback_reason", "affordable_fallback_round_lot_amount",
     "affordable_fallback_original_name", "affordable_fallback_attempted",
     "affordable_fallback_replaced_by_code", "affordable_fallback_no_candidate",
+    "holding_signal_status", "holding_entry_score", "holding_current_score",
+    "holding_score_drop", "holding_effective_max_days", "holding_reselected",
+    "holding_extended",
     "config_version",
 }
 
@@ -14244,6 +14247,7 @@ def write_backtest_summary(
     take_profit_count = sum(1 for trade in closed_trades if trade.get("exit_reason") == "利確")
     stop_loss_count = sum(1 for trade in closed_trades if trade.get("exit_reason") == "損切り")
     max_holding_exit_count = sum(1 for trade in closed_trades if trade.get("exit_reason") == "最大保有期間到達")
+    holding_signal_revaluation_audit = _holding_signal_revaluation_summary(closed_trades)
     best_trade = max(closed_trades, key=lambda item: item.get("profit", 0), default=None)
     worst_trade = min(closed_trades, key=lambda item: item.get("profit", 0), default=None)
     daily_asset_curve = [
@@ -14339,6 +14343,13 @@ def write_backtest_summary(
         "take_profit_count": take_profit_count,
         "stop_loss_count": stop_loss_count,
         "max_holding_exit_count": max_holding_exit_count,
+        "holding_signal_revaluation_audit": holding_signal_revaluation_audit,
+        "reselected_hold_count": holding_signal_revaluation_audit["reselected_hold_count"],
+        "extended_holding_count": holding_signal_revaluation_audit["extended_holding_count"],
+        "signal_lost_exit_count": holding_signal_revaluation_audit["signal_lost_exit_count"],
+        "score_deteriorated_exit_count": holding_signal_revaluation_audit["score_deteriorated_exit_count"],
+        "average_holding_days": holding_signal_revaluation_audit["average_holding_days"],
+        "profit_by_exit_reason": holding_signal_revaluation_audit["profit_by_exit_reason"],
         "no_trade_days": no_trade_days,
         "selected_count_total": selected_count_total,
         "max_drawdown": daily_summaries[-1]["max_drawdown"] if daily_summaries else 0.0,
@@ -14413,6 +14424,52 @@ def _date_resolution_with_coverage(
         resolved["effective_start_date"] = first_price_date
         resolved["effective_start_date_source"] = "price_coverage"
     return resolved
+
+
+def _holding_signal_revaluation_summary(closed_trades: list[dict[str, Any]]) -> dict[str, Any]:
+    profit_by_reason: dict[str, dict[str, Any]] = {}
+    holding_days_values: list[float] = []
+    for trade in closed_trades:
+        holding_days = _safe_float(trade.get("holding_days"))
+        if holding_days is not None:
+            holding_days_values.append(holding_days)
+        reason = str(trade.get("exit_reason") or "unknown")
+        row = profit_by_reason.setdefault(
+            reason,
+            {
+                "count": 0,
+                "profit": 0.0,
+                "gross_profit": 0.0,
+                "avg_profit": 0.0,
+                "avg_holding_days": None,
+                "_holding_days_sum": 0.0,
+            },
+        )
+        row["count"] += 1
+        row["profit"] += float(trade.get("profit") or trade.get("net_profit") or 0)
+        row["gross_profit"] += float(trade.get("gross_profit") or trade.get("profit") or 0)
+        if holding_days is not None:
+            row["_holding_days_sum"] += holding_days
+    for row in profit_by_reason.values():
+        count = int(row.get("count") or 0)
+        row["profit"] = round(float(row.get("profit") or 0), 2)
+        row["gross_profit"] = round(float(row.get("gross_profit") or 0), 2)
+        row["avg_profit"] = round(row["profit"] / count, 2) if count else None
+        row["avg_holding_days"] = round(float(row.pop("_holding_days_sum", 0.0)) / count, 2) if count else None
+    return {
+        "reselected_hold_count": sum(1 for trade in closed_trades if _truthy_value(trade.get("holding_reselected"))),
+        "extended_holding_count": sum(1 for trade in closed_trades if _truthy_value(trade.get("holding_extended"))),
+        "signal_lost_exit_count": sum(1 for trade in closed_trades if trade.get("exit_reason") == "シグナル消失"),
+        "score_deteriorated_exit_count": sum(1 for trade in closed_trades if trade.get("exit_reason") == "スコア低下"),
+        "average_holding_days": round(sum(holding_days_values) / len(holding_days_values), 2) if holding_days_values else None,
+        "profit_by_exit_reason": dict(sorted(profit_by_reason.items())),
+    }
+
+
+def _truthy_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "y"}
+    return bool(value)
 
 
 def build_market_coverage_summary(
@@ -19908,6 +19965,7 @@ def write_trades_csv(path: Path, trades: list[dict[str, Any]]) -> None:
         "exit_reason",
         "result",
         "score",
+        "entry_score",
         "rsi",
         "volume_ratio",
         "total_score",
@@ -19953,6 +20011,13 @@ def write_trades_csv(path: Path, trades: list[dict[str, Any]]) -> None:
         "affordable_fallback_attempted",
         "affordable_fallback_replaced_by_code",
         "affordable_fallback_no_candidate",
+        "holding_signal_status",
+        "holding_entry_score",
+        "holding_current_score",
+        "holding_score_drop",
+        "holding_effective_max_days",
+        "holding_reselected",
+        "holding_extended",
         "broker_provider",
         "order_status",
         "config_version",

@@ -1048,6 +1048,14 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "affordable_fallback_original_name",
         "affordable_fallback_reason",
         "affordable_fallback_round_lot_amount",
+        "entry_score",
+        "holding_signal_status",
+        "holding_entry_score",
+        "holding_current_score",
+        "holding_score_drop",
+        "holding_effective_max_days",
+        "holding_reselected",
+        "holding_extended",
         "market_filter_reason",
         "earnings_filter_checked",
         "earnings_filter_blocked",
@@ -1125,7 +1133,17 @@ def execute_real_data_paper_trade(
     safety_events = []
     next_positions = list(state.get("positions", []))
     closed_today = []
-    price_by_code = {item["code"]: item for item in scored_candidates}
+    price_by_code = {str(item["code"]): item for item in scored_candidates}
+    selection = config.get("selection", {})
+    min_score = float(selection.get("fallback_min_score", selection.get("top_pick_min_score", 70)))
+    min_confidence = float(selection.get("min_confidence", config["scoring"].get("confidence_min_for_buy", 0.7)))
+    selected = [
+        item
+        for item in scored_candidates
+        if item.get("selected") and float(item["total_score"]) >= min_score and float(item["confidence"]) >= min_confidence
+    ]
+    selected = _sort_selected_candidates(selected, config)
+    selected_codes_for_hold = {str(item.get("code") or "") for item in selected if item.get("code")}
     pending_orders = list(state.get("pending_orders", []))
     due_pending, future_pending = _split_due_pending_orders(pending_orders, trade_date)
 
@@ -1188,6 +1206,7 @@ def execute_real_data_paper_trade(
                     "buy_commission": buy_commission,
                     "holding_days": 1,
                     "score": pending.get("score"),
+                    "entry_score": pending.get("entry_score") or pending.get("score"),
                     "reason": pending.get("reason", ""),
                     **_position_feature_snapshot(pending),
                     "unrealized_profit": 0.0,
@@ -1249,9 +1268,17 @@ def execute_real_data_paper_trade(
     pending_sell_codes = {order["code"] for order in future_pending if order.get("action") == "SELL"}
 
     for position in next_positions:
-        market = price_by_code.get(position["code"])
+        market = price_by_code.get(str(position["code"]))
         current_price = float(market["close"]) if market else float(position["current_price"])
         holding_days = int(position["holding_days"]) if position.get("entry_date") == trade_date else int(position["holding_days"]) + 1
+        holding_signal = _holding_signal_revaluation(
+            position,
+            market,
+            selected_codes_for_hold,
+            config,
+            holding_days,
+            max_holding_days,
+        )
         exit_plan = _real_exit_plan(
             position=position,
             market=market or {},
@@ -1260,8 +1287,15 @@ def execute_real_data_paper_trade(
             holding_days=holding_days,
             take_profit_pct=take_profit_pct,
             stop_loss_pct=stop_loss_pct,
-            max_holding_days=max_holding_days,
+            max_holding_days=int(holding_signal.get("holding_effective_max_days") or max_holding_days),
             stop_loss_execution=stop_loss_execution,
+        )
+        exit_plan = _apply_holding_revaluation_exit_plan(
+            exit_plan,
+            holding_signal,
+            config,
+            current_price,
+            holding_days,
         )
         profit_rate = exit_plan["mark_profit_rate"]
         exit_reason = exit_plan["exit_reason"]
@@ -1273,6 +1307,7 @@ def execute_real_data_paper_trade(
             "holding_days": holding_days,
             "unrealized_profit": round(int(position["shares"]) * (current_price - float(position["entry_price"])), 2),
             "unrealized_profit_rate": round(profit_rate, 4),
+            **holding_signal,
         }
         if exit_reason and position["code"] not in pending_sell_codes:
             execute_now = bool(exit_plan.get("execute_now", False))
@@ -1300,6 +1335,7 @@ def execute_real_data_paper_trade(
                     "exit_reason": exit_reason,
                     "buy_reason": position.get("reason", ""),
                     **_position_feature_snapshot(position),
+                    **holding_signal,
                     **_stop_loss_trade_fields(exit_plan, planned_exit_price),
                 },
                 entry_notional,
@@ -1335,15 +1371,6 @@ def execute_real_data_paper_trade(
 
     held_codes = {position["code"] for position in next_positions}
     pending_buy_codes = {order["code"] for order in future_pending if order.get("action") == "BUY"}
-    selection = config.get("selection", {})
-    min_score = float(selection.get("fallback_min_score", selection.get("top_pick_min_score", 70)))
-    min_confidence = float(selection.get("min_confidence", config["scoring"].get("confidence_min_for_buy", 0.7)))
-    selected = [
-        item
-        for item in scored_candidates
-        if item.get("selected") and float(item["total_score"]) >= min_score and float(item["confidence"]) >= min_confidence
-    ]
-    selected = _sort_selected_candidates(selected, config)
     same_day_regular_selected_codes = {str(item.get("code") or "") for item in selected if item.get("code")}
     same_day_allocation_budgets = _same_day_allocation_budgets(
         selected,
@@ -1564,6 +1591,7 @@ def execute_real_data_paper_trade(
             "buy_commission": buy_commission,
             "holding_days": 1,
             "score": item["total_score"],
+            "entry_score": item["total_score"],
             "reason": item.get("selection_reason") or item.get("selected_reason") or item["reason"],
             **_technical_snapshot(item),
             "unrealized_profit": round(shares * (current_price - entry_price), 2),
@@ -1585,6 +1613,7 @@ def execute_real_data_paper_trade(
             "allocation_strategy": _allocation_strategy(config),
             "buy_commission": buy_commission,
             "score": item["total_score"],
+            "entry_score": item["total_score"],
             "rank": item.get("rank"),
             "daily_score_rank": item.get("daily_score_rank") or item.get("rank"),
             "reason": item.get("selection_reason") or item.get("selected_reason") or item["reason"],
@@ -1837,6 +1866,110 @@ def _real_exit_plan(
         plan["stop_loss_trigger_price"] = trigger_price
         plan["stop_loss_triggered_date"] = trade_date
     return plan
+
+
+def _holding_revaluation_config(config: dict[str, Any]) -> dict[str, Any]:
+    value = config.get("holding_revaluation") or config.get("holding_signal_revaluation") or {}
+    return value if isinstance(value, dict) else {}
+
+
+def _holding_revaluation_enabled(config: dict[str, Any]) -> bool:
+    return bool(_holding_revaluation_config(config).get("enabled"))
+
+
+def _holding_signal_revaluation(
+    position: dict[str, Any],
+    market: dict[str, Any] | None,
+    selected_codes: set[str],
+    config: dict[str, Any],
+    holding_days: int,
+    default_max_holding_days: int,
+) -> dict[str, Any]:
+    cfg = _holding_revaluation_config(config)
+    enabled = bool(cfg.get("enabled"))
+    code = str(position.get("code") or "")
+    market = market or {}
+    row_score = _optional_float(market.get("total_score"))
+    entry_score = _optional_float(position.get("entry_score"))
+    if entry_score is None:
+        entry_score = _optional_float(position.get("score"))
+    if entry_score is None:
+        entry_score = _optional_float(position.get("total_score"))
+    score_drop = None
+    if entry_score is not None and row_score is not None:
+        score_drop = round(entry_score - row_score, 4)
+    if not enabled:
+        return {
+            "holding_signal_status": "",
+            "holding_entry_score": entry_score,
+            "holding_current_score": row_score,
+            "holding_score_drop": score_drop,
+            "holding_effective_max_days": default_max_holding_days,
+            "holding_reselected": False,
+            "holding_extended": False,
+        }
+
+    if code in selected_codes:
+        status = "reselected"
+    elif market:
+        status = "still_candidate"
+    else:
+        status = "signal_lost"
+
+    threshold = _optional_float(cfg.get("score_drop_exit_threshold"))
+    if market and threshold is not None and score_drop is not None and score_drop >= threshold:
+        status = "score_deteriorated"
+
+    effective_max_days = default_max_holding_days
+    reselected = status == "reselected"
+    extended = False
+    if reselected and bool(cfg.get("hold_reselection_enabled", False)):
+        effective_max_days = max(default_max_holding_days, int(cfg.get("hold_extension_max_days") or default_max_holding_days))
+        extended = effective_max_days > default_max_holding_days and holding_days >= default_max_holding_days
+
+    return {
+        "holding_signal_status": status,
+        "holding_entry_score": entry_score,
+        "holding_current_score": row_score,
+        "holding_score_drop": score_drop,
+        "holding_effective_max_days": effective_max_days,
+        "holding_reselected": reselected,
+        "holding_extended": extended,
+    }
+
+
+def _apply_holding_revaluation_exit_plan(
+    exit_plan: dict[str, Any],
+    holding_signal: dict[str, Any],
+    config: dict[str, Any],
+    current_price: float,
+    holding_days: int,
+) -> dict[str, Any]:
+    if not _holding_revaluation_enabled(config):
+        return exit_plan
+    cfg = _holding_revaluation_config(config)
+    if bool(cfg.get("stop_loss_always_priority", True)) and exit_plan.get("exit_reason") == "損切り":
+        return exit_plan
+    if holding_days < 2:
+        return exit_plan
+    status = str(holding_signal.get("holding_signal_status") or "")
+    reason = ""
+    if status == "signal_lost" and bool(cfg.get("early_exit_on_signal_lost", False)):
+        reason = "シグナル消失"
+    elif status == "score_deteriorated" and cfg.get("score_drop_exit_threshold") is not None:
+        reason = "スコア低下"
+    if not reason:
+        return exit_plan
+    updated = dict(exit_plan)
+    updated.update(
+        {
+            "exit_reason": reason,
+            "exit_price": current_price,
+            "intended_exit_price": current_price,
+            "execute_now": False,
+        }
+    )
+    return updated
 
 
 def _stop_loss_trade_fields(exit_plan: dict[str, Any], actual_exit_price: float) -> dict[str, Any]:

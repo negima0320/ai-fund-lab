@@ -285,16 +285,24 @@ def test_rookie_dealer_02_v2_dot_37_alias_loads() -> None:
     assert profile["affordable_fallback_buy"]["enabled"] is True
 
 
-def test_rookie_dealer_02_v2_38_to_40_affordable_fallback_quality_profiles_load() -> None:
+def test_rookie_dealer_02_v2_38_holding_revaluation_profile_loads() -> None:
     profile_38 = load_profile("rookie_dealer_02_v2_38")
+
+    assert profile_38["profile_id"] == "rookie_dealer_02_v2_38"
+    assert profile_38["holding_revaluation"]["enabled"] is True
+    assert profile_38["holding_revaluation"]["hold_extension_max_days"] == 10
+    assert profile_38["holding_revaluation"]["early_exit_on_signal_lost"] is True
+    assert profile_38["holding_revaluation"]["score_drop_exit_threshold"] == 10
+    assert profile_38["capital_utilization_policy"]["allocation_strategy"] == "relaxed_pending_target_exposure"
+    assert load_profile("rookie_dealer_02_v2.38")["profile_id"] == "rookie_dealer_02_v2_38"
+
+
+def test_rookie_dealer_02_v2_39_to_40_affordable_fallback_quality_profiles_load() -> None:
     profile_39 = load_profile("rookie_dealer_02_v2_39")
     profile_40 = load_profile("rookie_dealer_02_v2_40")
 
-    assert profile_38["affordable_fallback_buy"]["enabled"] is True
-    assert profile_38["affordable_fallback_buy"]["min_total_score"] == 50
     assert profile_39["affordable_fallback_buy"]["min_total_score"] == 55
     assert profile_40["affordable_fallback_buy"]["max_rank_in_day"] == 20
-    assert load_profile("rookie_dealer_02_v2.38")["profile_id"] == "rookie_dealer_02_v2_38"
     assert load_profile("rookie_dealer_02_v2.39")["profile_id"] == "rookie_dealer_02_v2_39"
     assert load_profile("rookie_dealer_02_v2.40")["profile_id"] == "rookie_dealer_02_v2_40"
 

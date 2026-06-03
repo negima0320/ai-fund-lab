@@ -336,6 +336,7 @@ def build_feature_analysis(
     )
     trade_expectancy_deep_analysis = timed("feature_analysis_score_component_sec", lambda: _trade_expectancy_deep_analysis(records, backtest_summary))
     exit_reason_profit_analysis = timed("feature_analysis_score_component_sec", lambda: _exit_reason_profit_analysis(records))
+    holding_signal_revaluation_audit = timed("feature_analysis_score_component_sec", lambda: _holding_signal_revaluation_audit(records, backtest_summary))
     profit_capture_analysis = timed("feature_analysis_score_component_sec", lambda: _profit_capture_analysis(records))
     opportunity_loss_analysis = timed(
         "feature_analysis_score_component_sec",
@@ -441,6 +442,7 @@ def build_feature_analysis(
         "profit_consistency_audit": profit_consistency_audit,
         "trade_expectancy_deep_analysis": trade_expectancy_deep_analysis,
         "exit_reason_profit_analysis": exit_reason_profit_analysis,
+        "holding_signal_revaluation_audit": holding_signal_revaluation_audit,
         "profit_capture_analysis": profit_capture_analysis,
         "opportunity_loss_analysis": opportunity_loss_analysis,
         "stop_loss_pattern_analysis": stop_loss_pattern_analysis,
@@ -663,6 +665,10 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "## Exit Reason Profit Analysis",
         "",
         *_exit_reason_profit_analysis_lines(analysis.get("exit_reason_profit_analysis", [])),
+        "",
+        "## Holding Signal Revaluation Audit",
+        "",
+        *_holding_signal_revaluation_audit_lines(analysis.get("holding_signal_revaluation_audit", {})),
         "",
         "## Profit Capture Analysis",
         "",
@@ -3530,6 +3536,76 @@ def _exit_reason_profit_analysis_lines(rows: list[dict[str, Any]]) -> list[str]:
             f"{_format_yen(row.get('total_profit'))} |"
         )
     return lines
+
+
+def _holding_signal_revaluation_audit(records: list[dict[str, Any]], backtest_summary: dict[str, Any]) -> dict[str, Any]:
+    summary_audit = backtest_summary.get("holding_signal_revaluation_audit") if isinstance(backtest_summary, dict) else {}
+    if not isinstance(summary_audit, dict):
+        summary_audit = {}
+    profit_by_reason: dict[str, dict[str, Any]] = {}
+    holding_days_values: list[float] = []
+    for record in records:
+        holding_days = _number(record.get("holding_days"))
+        if holding_days is not None:
+            holding_days_values.append(holding_days)
+        reason = str(record.get("exit_reason") or "unknown")
+        row = profit_by_reason.setdefault(reason, {"count": 0, "profit": 0.0, "gross_profit": 0.0, "_holding_days": 0.0})
+        row["count"] += 1
+        row["profit"] += float(_number(record.get("profit")) or _number(record.get("net_profit")) or 0)
+        row["gross_profit"] += float(_number(record.get("gross_profit")) or _number(record.get("profit")) or 0)
+        if holding_days is not None:
+            row["_holding_days"] += holding_days
+    for row in profit_by_reason.values():
+        count = int(row.get("count") or 0)
+        row["profit"] = round(float(row.get("profit") or 0), 2)
+        row["gross_profit"] = round(float(row.get("gross_profit") or 0), 2)
+        row["avg_profit"] = round(row["profit"] / count, 2) if count else None
+        row["avg_holding_days"] = round(float(row.pop("_holding_days", 0.0)) / count, 2) if count else None
+    return {
+        "enabled": any(record.get("holding_signal_status") for record in records) or bool(summary_audit),
+        "reselected_hold_count": int(summary_audit.get("reselected_hold_count") or sum(1 for record in records if _truthy(record.get("holding_reselected")))),
+        "extended_holding_count": int(summary_audit.get("extended_holding_count") or sum(1 for record in records if _truthy(record.get("holding_extended")))),
+        "signal_lost_exit_count": int(summary_audit.get("signal_lost_exit_count") or sum(1 for record in records if record.get("exit_reason") == "シグナル消失")),
+        "score_deteriorated_exit_count": int(summary_audit.get("score_deteriorated_exit_count") or sum(1 for record in records if record.get("exit_reason") == "スコア低下")),
+        "average_holding_days": summary_audit.get("average_holding_days")
+        if summary_audit.get("average_holding_days") is not None
+        else (round(sum(holding_days_values) / len(holding_days_values), 2) if holding_days_values else None),
+        "profit_by_exit_reason": summary_audit.get("profit_by_exit_reason") or dict(sorted(profit_by_reason.items())),
+    }
+
+
+def _holding_signal_revaluation_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- holding signal revaluation data unavailable"]
+    lines = [
+        f"- enabled: {audit.get('enabled')}",
+        f"- reselected_hold_count: {audit.get('reselected_hold_count', 0)}",
+        f"- extended_holding_count: {audit.get('extended_holding_count', 0)}",
+        f"- signal_lost_exit_count: {audit.get('signal_lost_exit_count', 0)}",
+        f"- score_deteriorated_exit_count: {audit.get('score_deteriorated_exit_count', 0)}",
+        f"- average_holding_days: {_format_number(audit.get('average_holding_days'))}",
+        "",
+        "### Profit By Exit Reason",
+        "",
+        "| exit_reason | count | profit | gross_profit | avg_profit | avg_holding_days |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    profit_by_reason = audit.get("profit_by_exit_reason") or {}
+    if isinstance(profit_by_reason, dict):
+        for reason, row in profit_by_reason.items():
+            row = row if isinstance(row, dict) else {}
+            lines.append(
+                f"| {reason} | {row.get('count', 0)} | {_format_yen(row.get('profit'))} | "
+                f"{_format_yen(row.get('gross_profit'))} | {_format_yen(row.get('avg_profit'))} | "
+                f"{_format_number(row.get('avg_holding_days'))} |"
+            )
+    return lines
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "y"}
+    return bool(value)
 
 
 def _profit_capture_analysis_lines(analysis: dict[str, Any]) -> list[str]:
