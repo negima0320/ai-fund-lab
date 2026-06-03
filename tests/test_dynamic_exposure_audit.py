@@ -175,6 +175,56 @@ def test_affordable_fallback_buy_audit_counts_surplus_fallback_buy() -> None:
     assert audit["fallback_samples"][0]["fallback_code"] == "2001"
 
 
+def test_affordable_fallback_buy_audit_rejections_exclude_selected_successes() -> None:
+    audit = _affordable_fallback_buy_audit(
+        {
+            "all_trades": [
+                {
+                    "action": "BUY",
+                    "signal_date": "2026-01-05",
+                    "code": "2001",
+                    "market_section": "Prime",
+                    "amount": 200000,
+                    "score": 50,
+                    "affordable_fallback_buy_selected": True,
+                    "affordable_fallback_round_lot_amount": 200000,
+                    "affordable_fallback_reason": "surplus_available_cash",
+                    "affordable_fallback_candidate_count": 1,
+                },
+                {
+                    "action": "BUY",
+                    "signal_date": "2026-01-06",
+                    "code": "2002",
+                    "market_section": "Prime",
+                    "amount": 180000,
+                    "score": 48,
+                    "affordable_fallback_buy_selected": True,
+                    "affordable_fallback_round_lot_amount": 180000,
+                    "affordable_fallback_reason": "surplus_available_cash",
+                    "affordable_fallback_candidate_count": 1,
+                },
+                {
+                    "action": "SKIP_BUY",
+                    "signal_date": "2026-01-07",
+                    "code": "1001",
+                    "affordable_fallback_attempted": True,
+                    "affordable_fallback_no_candidate": True,
+                },
+            ]
+        },
+        {
+            "selection": {"min_score": 45},
+            "affordable_fallback_buy": {"enabled": True, "surplus_after_selection": True},
+        },
+    )
+
+    assert audit["fallback_selected_count"] == 2
+    assert audit["rejected_total_count"] == 1
+    assert audit["fallback_attempt_count"] == 3
+    assert audit["fallback_attempt_count"] == audit["fallback_selected_count"] + audit["rejected_total_count"]
+    assert audit["fallback_rejected_reason_counts"]["no_affordable_candidate"] == 1
+
+
 def test_affordable_fallback_buy_audit_does_not_count_label_only_buy() -> None:
     audit = _affordable_fallback_buy_audit(
         {

@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import json
 import csv
+import sys
 import sqlite3
 import time
+from argparse import ArgumentParser
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
+
+SRC_DIR = Path(__file__).resolve().parent
+ROOT = SRC_DIR.parent
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 try:  # pragma: no cover - PyYAML is part of the supported runtime.
     import yaml
@@ -18,6 +25,7 @@ except ModuleNotFoundError:  # pragma: no cover
 from db import get_database_path
 from market_sections import SECTION_LABELS, market_section_from_row, normalize_market_section
 from market_regime import REGIME_ORDER, classify_market_regime, dynamic_exposure_policy, dynamic_exposure_target, effective_market_context_for_signal
+from profile_loader import load_profile
 from trade_metrics import is_closed_trade_for_metrics
 
 
@@ -4894,6 +4902,7 @@ def _repair_backtest_result_integrity_audit(
         and str(trade.get("action") or "").upper() == "BUY"
         and str(trade.get("order_status") or trade.get("status") or "FILLED").upper() == "FILLED"
     ]
+    _merge_affordable_fallback_selected_from_trades(selected_by_key, key_source, buy_trades)
     run_dates = sorted({key.split("|", 1)[0] for key in set(scored_by_key) | set(selected_by_key) if "|" in key})
     buy_keys = {_feature_trade_selection_key(trade) for trade in buy_trades if _feature_trade_selection_key(trade)}
     missing_keys = sorted(buy_keys - set(selected_by_key))
@@ -4929,6 +4938,40 @@ def _repair_backtest_result_integrity_audit(
     audit["integrity_error_count"] = len(errors)
     audit["result_integrity_status"] = "WARNING" if warnings or errors else "OK"
     return audit
+
+
+def _merge_affordable_fallback_selected_from_trades(
+    selected_by_key: dict[str, dict[str, Any]],
+    key_source: dict[str, str],
+    buy_trades: list[dict[str, Any]],
+) -> None:
+    for trade in buy_trades:
+        if not bool(trade.get("affordable_fallback_buy_selected")):
+            continue
+        key = _feature_trade_selection_key(trade)
+        if not key:
+            continue
+        selected_by_key.setdefault(key, _feature_affordable_fallback_selection_row(trade))
+        key_source.setdefault(key, "all_trades.affordable_fallback_buy")
+
+
+def _feature_affordable_fallback_selection_row(trade: dict[str, Any]) -> dict[str, Any]:
+    signal_date = str(trade.get("signal_date") or trade.get("date") or "")
+    return {
+        "date": signal_date,
+        "signal_date": signal_date,
+        "code": trade.get("code"),
+        "name": trade.get("name"),
+        "market_section": trade.get("market_section"),
+        "total_score": trade.get("total_score") if trade.get("total_score") is not None else trade.get("score"),
+        "rank": trade.get("rank"),
+        "selected": True,
+        "selection_source": "affordable_fallback",
+        "selected_reason": trade.get("selected_reason") or trade.get("selection_reason") or "affordable_fallback_buy",
+        "affordable_fallback_buy_selected": True,
+        "affordable_fallback_original_code": trade.get("affordable_fallback_original_code"),
+        "affordable_fallback_reason": trade.get("affordable_fallback_reason"),
+    }
 
 
 def _feature_market_trade_samples(
@@ -6482,7 +6525,14 @@ def _affordable_fallback_buy_audit(backtest_summary: dict[str, Any], config: dic
         in replacement_keys
     ]
     label_only_buys = [item for item in raw_buys if item not in buys]
-    no_candidate = [item for item in attempts if bool(item.get("affordable_fallback_no_candidate"))]
+    rejected_attempts = [
+        item
+        for item in attempts
+        if not item.get("affordable_fallback_replaced_by_code")
+        and not item.get("affordable_fallback_replaced_by_name")
+        and not item.get("affordable_fallback_buy_selected")
+    ]
+    no_candidate = [item for item in rejected_attempts if bool(item.get("affordable_fallback_no_candidate"))]
     selected_but_not_affordable = [
         item
         for item in events
@@ -6495,8 +6545,8 @@ def _affordable_fallback_buy_audit(backtest_summary: dict[str, Any], config: dic
     buy_amounts = [_number(item.get("amount")) for item in buys]
     fallback_scores = [_number(item.get("total_score") if item.get("total_score") is not None else item.get("score")) for item in buys]
     fallback_ranks = [_number(item.get("daily_score_rank") if item.get("daily_score_rank") is not None else item.get("rank")) for item in buys]
-    score_below_min_count = sum(int(_number(item.get("fallback_score_below_min_count")) or 0) for item in attempts)
-    rank_out_of_range_count = sum(int(_number(item.get("fallback_rank_out_of_range_count")) or 0) for item in attempts)
+    score_below_min_count = sum(int(_number(item.get("fallback_score_below_min_count")) or 0) for item in rejected_attempts)
+    rank_out_of_range_count = sum(int(_number(item.get("fallback_rank_out_of_range_count")) or 0) for item in rejected_attempts)
     samples = []
     for item in buys[:20]:
         samples.append(
@@ -6512,14 +6562,16 @@ def _affordable_fallback_buy_audit(backtest_summary: dict[str, Any], config: dic
             }
         )
     logged_candidate_count = sum(int(_number(item.get("affordable_fallback_candidate_count")) or 0) for item in buys)
-    candidate_count = logged_candidate_count if logged_candidate_count else len(attempts)
+    candidate_count = logged_candidate_count if logged_candidate_count else len(buys) + len(rejected_attempts)
+    rejected_total_count = len(rejected_attempts)
     return {
         "enabled": enabled,
         "affordable_fallback_candidate_count": candidate_count,
         "candidate_count": candidate_count,
-        "fallback_attempt_count": len(attempts),
+        "fallback_attempt_count": len(buys) + rejected_total_count,
         "fallback_selected_count": len(buys),
         "fallback_buy_trade_count": len(buys),
+        "rejected_total_count": rejected_total_count,
         "selected_count": len(buys),
         "selected_by_market": _count_by_market(buys),
         "fallback_selected_by_market": _count_by_market(buys),
@@ -6558,6 +6610,7 @@ def _affordable_fallback_buy_audit_lines(audit: dict[str, Any]) -> list[str]:
         "fallback_selected_count",
         "selected_count",
         "fallback_buy_trade_count",
+        "rejected_total_count",
         "selected_by_market",
         "fallback_selected_by_market",
         "fallback_rejected_reason_counts",
@@ -6731,9 +6784,10 @@ def _compounding_capital_flow_audit(
         sum((_trade_profit(item) or 0.0) for item in sells),
         2,
     )
+    external_cash_flow_total = _external_cash_flow_total(summary_rows, backtest_summary)
     unrealized_profit_total = _number(backtest_summary.get("unrealized_profit_total"))
-    if unrealized_profit_total is None and net_cumulative_profit is not None:
-        unrealized_profit_total = round(net_cumulative_profit - realized_profit_total, 2)
+    if unrealized_profit_total is None and initial_capital is not None and final_assets is not None:
+        unrealized_profit_total = round(final_assets - initial_capital - realized_profit_total - external_cash_flow_total, 2)
     buy_amounts = [_trade_amount(item) for item in buys]
     buy_amounts = [value for value in buy_amounts if value is not None]
     sell_amounts = [_trade_amount(item) for item in sells]
@@ -6762,13 +6816,17 @@ def _compounding_capital_flow_audit(
     if sell_cash_issues:
         warnings.append(f"SELL proceeds/profit did not clearly return to cash on {len(sell_cash_issues)} event(s)")
 
-    final_profit_match = None
-    if initial_capital is not None and final_assets is not None and net_cumulative_profit is not None:
-        expected_final = initial_capital + net_cumulative_profit
-        tolerance = max(1000.0, abs(initial_capital) * 0.01)
-        final_profit_match = abs(final_assets - expected_final) <= tolerance
-        if not final_profit_match:
-            warnings.append("final_assets differs from initial_capital + net_cumulative_profit")
+    asset_reconciliation = _asset_reconciliation(
+        initial_capital=initial_capital,
+        final_assets=final_assets,
+        net_cumulative_profit=net_cumulative_profit,
+        realized_profit_total=realized_profit_total,
+        unrealized_profit_total=unrealized_profit_total,
+        external_cash_flow_total=external_cash_flow_total,
+    )
+    final_profit_match = asset_reconciliation.get("final_assets_matches_mark_to_market_profit")
+    if asset_reconciliation.get("status") == "WARNING":
+        warnings.append(str(asset_reconciliation.get("warning_reason") or "asset reconciliation mismatch"))
 
     profit_reinvested_check = _profit_reinvested_check(summary_rows, buys, sells)
     if profit_reinvested_check.get("status") == "WARNING":
@@ -6779,8 +6837,14 @@ def _compounding_capital_flow_audit(
         "initial_capital": initial_capital,
         "final_assets": final_assets,
         "net_cumulative_profit": net_cumulative_profit,
+        "net_cumulative_profit_definition": (
+            "Period-level net P/L reported by backtest_summary. Treat as a reported strategy P/L metric; "
+            "do not assume it alone reconciles final_assets when open positions or external cash-flow adjustments exist."
+        ),
+        "recommended_performance_profit_metric": "final_assets - initial_capital for mark-to-market total return; net_cumulative_profit for reported period net P/L",
         "realized_profit_total": realized_profit_total,
         "unrealized_profit_total": unrealized_profit_total,
+        "asset_reconciliation": asset_reconciliation,
         "cash_start": cash_start,
         "cash_end": cash_end,
         "average_cash": _average(cash_values),
@@ -6803,6 +6867,80 @@ def _compounding_capital_flow_audit(
             "summary_csv": str((log_dir / "summary.csv").relative_to(root)) if (log_dir / "summary.csv").exists() else "",
             "backtest_summary": str((log_dir / "backtest_summary.json").relative_to(root)),
         },
+    }
+
+
+def _external_cash_flow_total(summary_rows: list[dict[str, Any]], backtest_summary: dict[str, Any]) -> float:
+    direct = _number(backtest_summary.get("external_cash_flow_total"))
+    if direct is not None:
+        return direct
+    total = 0.0
+    found = False
+    for row in summary_rows:
+        for key in ["external_cash_flow", "cash_flow", "deposit_withdrawal", "deposit", "withdrawal"]:
+            value = _number(row.get(key))
+            if value is None:
+                continue
+            found = True
+            if key == "withdrawal":
+                total -= value
+            else:
+                total += value
+    return round(total, 2) if found else 0.0
+
+
+def _asset_reconciliation(
+    *,
+    initial_capital: float | None,
+    final_assets: float | None,
+    net_cumulative_profit: float | None,
+    realized_profit_total: float | None,
+    unrealized_profit_total: float | None,
+    external_cash_flow_total: float,
+) -> dict[str, Any]:
+    tolerance = max(1000.0, abs(initial_capital or 0.0) * 0.01)
+    mark_to_market_profit = None
+    expected_final_assets = None
+    final_delta_from_net_cumulative_profit = None
+    final_assets_matches_mark_to_market_profit = None
+    status = "OK"
+    warning_reason = ""
+    if initial_capital is not None and final_assets is not None:
+        mark_to_market_profit = round(final_assets - initial_capital - external_cash_flow_total, 2)
+        if realized_profit_total is not None and unrealized_profit_total is not None:
+            expected_final_assets = round(initial_capital + realized_profit_total + unrealized_profit_total + external_cash_flow_total, 2)
+            final_assets_matches_mark_to_market_profit = abs(final_assets - expected_final_assets) <= tolerance
+            if not final_assets_matches_mark_to_market_profit:
+                status = "WARNING"
+                warning_reason = "final_assets differs from initial_capital + realized_profit_total + unrealized_profit_total + external_cash_flow_total"
+    if initial_capital is not None and final_assets is not None and net_cumulative_profit is not None:
+        final_delta_from_net_cumulative_profit = round(final_assets - (initial_capital + net_cumulative_profit + external_cash_flow_total), 2)
+    implied_adjustment = None
+    if initial_capital is not None and final_assets is not None and realized_profit_total is not None and unrealized_profit_total is not None:
+        implied_adjustment = round(final_assets - initial_capital - realized_profit_total - unrealized_profit_total, 2)
+    return {
+        "status": status,
+        "warning_reason": warning_reason,
+        "initial_capital": initial_capital,
+        "final_assets": final_assets,
+        "mark_to_market_profit": mark_to_market_profit,
+        "net_cumulative_profit": net_cumulative_profit,
+        "net_cumulative_profit_definition": "reported period-level net P/L; not the sole final-assets reconciliation metric",
+        "realized_profit_total": realized_profit_total,
+        "unrealized_profit_total": unrealized_profit_total,
+        "external_cash_flow_total": external_cash_flow_total,
+        "implied_external_cash_flow_or_unexplained_delta": implied_adjustment,
+        "expected_final_assets_from_realized_unrealized": expected_final_assets,
+        "final_assets_minus_expected_final_assets": (
+            round(final_assets - expected_final_assets, 2)
+            if final_assets is not None and expected_final_assets is not None
+            else None
+        ),
+        "final_assets_minus_initial_plus_net_cumulative_profit": final_delta_from_net_cumulative_profit,
+        "final_assets_matches_mark_to_market_profit": final_assets_matches_mark_to_market_profit,
+        "recommended_profit_metric_for_total_return": "mark_to_market_profit",
+        "recommended_profit_metric_for_realized_tax_net": "net_cumulative_profit",
+        "tolerance": tolerance,
     }
 
 
@@ -7818,8 +7956,11 @@ def _compounding_capital_flow_audit_lines(audit: dict[str, Any]) -> list[str]:
         f"- initial_capital: {_format_yen(audit.get('initial_capital'))}",
         f"- final_assets: {_format_yen(audit.get('final_assets'))}",
         f"- net_cumulative_profit: {_format_yen(audit.get('net_cumulative_profit'))}",
+        f"- net_cumulative_profit_definition: {audit.get('net_cumulative_profit_definition') or ''}",
+        f"- recommended_performance_profit_metric: {audit.get('recommended_performance_profit_metric') or ''}",
         f"- realized_profit_total: {_format_yen(audit.get('realized_profit_total'))}",
         f"- unrealized_profit_total: {_format_yen(audit.get('unrealized_profit_total'))}",
+        f"- asset_reconciliation: {json.dumps(audit.get('asset_reconciliation', {}), ensure_ascii=False, sort_keys=True)}",
         f"- cash_start: {_format_yen(audit.get('cash_start'))}",
         f"- cash_end: {_format_yen(audit.get('cash_end'))}",
         f"- average_cash: {_format_yen(audit.get('average_cash'))}",
@@ -8227,3 +8368,58 @@ def _profile_id(config: dict[str, Any]) -> str:
 
 def _profile_name(config: dict[str, Any]) -> str:
     return str(config.get("profile_name") or config.get("dealer", {}).get("name") or _profile_id(config))
+
+
+def _infer_feature_analysis_period(root: Path, profile_id: str) -> tuple[str, str]:
+    log_root = root / "logs" / "backtests" / profile_id
+    candidates: list[Path] = []
+    if log_root.exists():
+        for path in log_root.iterdir():
+            if not path.is_dir() or "_to_" not in path.name:
+                continue
+            if (path / "backtest_summary.json").exists():
+                candidates.append(path)
+    if not candidates:
+        raise FileNotFoundError(f"No backtest_summary.json found under {log_root}")
+    latest = max(candidates, key=lambda item: (item / "backtest_summary.json").stat().st_mtime)
+    start_date, end_date = latest.name.split("_to_", 1)
+    return start_date, end_date
+
+
+def _write_feature_analysis_outputs(config: dict[str, Any], root: Path, start_date: str, end_date: str) -> tuple[Path, Path]:
+    analysis = build_feature_analysis(config, root, start_date, end_date)
+    profile_id = _profile_id(config)
+    output_dir = root / "reports" / profile_id / "backtests"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = output_dir / "feature_analysis.json"
+    markdown_path = output_dir / "feature_analysis.md"
+    json_path.write_text(json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
+    markdown_path.write_text(render_feature_analysis_markdown(analysis), encoding="utf-8")
+    return json_path, markdown_path
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = ArgumentParser(description="Regenerate feature_analysis.md/json from existing backtest artifacts.")
+    parser.add_argument("--profile", required=True, help="Profile id, e.g. rookie_dealer_02_v2_51")
+    parser.add_argument("--start-date", help="Backtest start date. If omitted, infer from latest logs/backtests period.")
+    parser.add_argument("--end-date", help="Backtest end date. If omitted, infer from latest logs/backtests period.")
+    args = parser.parse_args(argv)
+
+    config = load_profile(args.profile)
+    start_date = args.start_date
+    end_date = args.end_date
+    if not start_date or not end_date:
+        inferred_start, inferred_end = _infer_feature_analysis_period(ROOT, _profile_id(config))
+        start_date = start_date or inferred_start
+        end_date = end_date or inferred_end
+    json_path, markdown_path = _write_feature_analysis_outputs(config, ROOT, start_date, end_date)
+    print(f"profile_id: {_profile_id(config)}")
+    print(f"start_date: {start_date}")
+    print(f"end_date: {end_date}")
+    print(f"feature_analysis_json: {json_path.relative_to(ROOT)}")
+    print(f"feature_analysis_markdown: {markdown_path.relative_to(ROOT)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

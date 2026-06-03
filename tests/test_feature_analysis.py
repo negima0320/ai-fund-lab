@@ -831,7 +831,7 @@ def test_compounding_capital_flow_audit_tracks_loss_reduced_cash(config_copy: di
     assert audit["sell_cash_flow_issue_count"] == 0
 
 
-def test_compounding_capital_flow_audit_warns_on_final_assets_mismatch(config_copy: dict, tmp_path) -> None:
+def test_compounding_capital_flow_audit_documents_net_profit_definition_without_warning(config_copy: dict, tmp_path) -> None:
     profile_id = config_copy["profile_id"]
     log_dir = tmp_path / "logs" / "backtests" / profile_id / "2026-01-01_to_2026-01-01"
     log_dir.mkdir(parents=True)
@@ -856,9 +856,42 @@ def test_compounding_capital_flow_audit_warns_on_final_assets_mismatch(config_co
         config_copy,
     )
 
+    assert audit["capital_flow_status"] == "OK"
+    assert audit["final_assets_profit_match"] is True
+    assert audit["asset_reconciliation"]["final_assets_minus_initial_plus_net_cumulative_profit"] == -50000
+    assert "Period-level net P/L" in audit["net_cumulative_profit_definition"]
+
+
+def test_compounding_capital_flow_audit_warns_on_asset_reconciliation_mismatch(config_copy: dict, tmp_path) -> None:
+    profile_id = config_copy["profile_id"]
+    log_dir = tmp_path / "logs" / "backtests" / profile_id / "2026-01-01_to_2026-01-01"
+    log_dir.mkdir(parents=True)
+    (log_dir / "summary.csv").write_text(
+        "date,total_assets,cash,positions_value,open_positions_count\n"
+        "2026-01-01,1000000,1000000,0,0\n",
+        encoding="utf-8",
+    )
+    backtest_summary = {
+        "initial_capital": 1000000,
+        "final_assets": 1000000,
+        "net_cumulative_profit": 50000,
+        "realized_profit_total": 50000,
+        "unrealized_profit_total": 0,
+        "all_trades": [{"action": "SELL", "exit_date": "2026-01-01", "code": "1001", "amount": 100000, "profit": 50000}],
+    }
+
+    audit = _compounding_capital_flow_audit(
+        tmp_path,
+        profile_id,
+        "2026-01-01",
+        "2026-01-01",
+        backtest_summary,
+        config_copy,
+    )
+
     assert audit["capital_flow_status"] == "WARNING"
     assert audit["final_assets_profit_match"] is False
-    assert "final_assets differs" in audit["capital_flow_warning_reason"]
+    assert "realized_profit_total + unrealized_profit_total" in audit["capital_flow_warning_reason"]
 
 
 def test_feature_analysis_repairs_stale_trade_without_selected_audit(config_copy: dict, tmp_path) -> None:
@@ -898,6 +931,64 @@ def test_feature_analysis_repairs_stale_trade_without_selected_audit(config_copy
             {
                 "scores": [{"date": "2026-01-05", "code": "67230", "selected": True}],
                 "selected": [{"date": "2026-01-05", "code": "67230", "selected": True}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    audits = _backtest_integrity_audits(tmp_path, profile_id, "2026-01-01", "2026-03-06")
+    result = audits["backtest_result_integrity_audit"]
+
+    assert result["trade_without_selected_count"] == 0
+    assert result["trade_without_selected_sample"] == []
+    assert result["trade_without_selected_debug_sample"] == []
+    assert result["result_integrity_status"] == "OK"
+    assert result["warnings"] == []
+
+
+def test_feature_analysis_treats_affordable_fallback_buy_as_selected(config_copy: dict, tmp_path) -> None:
+    profile_id = config_copy["profile_id"]
+    log_dir = tmp_path / "logs" / "backtests" / profile_id / "2026-01-01_to_2026-03-06"
+    log_dir.mkdir(parents=True)
+    processed_dir = tmp_path / "data" / "processed" / profile_id
+    processed_dir.mkdir(parents=True)
+    (log_dir / "backtest_summary.json").write_text(
+        json.dumps(
+            {
+                "all_trades": [
+                    {
+                        "action": "BUY",
+                        "order_status": "FILLED",
+                        "signal_date": "2026-01-05",
+                        "entry_date": "2026-01-06",
+                        "code": "1002",
+                        "name": "Fallback Buy",
+                        "market_section": "Prime",
+                        "total_score": 52,
+                        "affordable_fallback_buy_selected": True,
+                        "affordable_fallback_reason": "surplus_available_cash",
+                    }
+                ],
+                "backtest_result_integrity_audit": {
+                    "result_integrity_status": "WARNING",
+                    "trade_without_selected_count": 1,
+                    "trade_without_selected_sample": ["2026-01-05|1002"],
+                    "warnings": ["buy trade exists without selected candidate in the run period"],
+                    "errors": [],
+                    "integrity_warning_count": 1,
+                    "integrity_error_count": 0,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (processed_dir / "scored_candidates_2026-01-05.json").write_text(
+        json.dumps(
+            {
+                "scores": [{"date": "2026-01-05", "code": "1002", "selected": False, "market_section": "Prime"}],
+                "selected": [],
             },
             ensure_ascii=False,
         ),

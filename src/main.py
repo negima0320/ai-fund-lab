@@ -5397,6 +5397,8 @@ def build_experiment_batch_summary(
                 "market_candidate_count": row_market_coverage.get("candidate_count", {}),
                 "market_scored_count": scored_candidate_audit.get("scored_count_by_market", row_market_coverage.get("candidate_count", {})),
                 "market_selected_count": row_market_coverage.get("selected_count", {}),
+                "market_regular_selected_count": row_market_coverage.get("regular_selected_count", {}),
+                "market_fallback_selected_count": row_market_coverage.get("fallback_selected_count", {}),
                 "market_buy_trade_count": trade_market_audit.get("buy_trade_count_by_market", {}),
                 "market_sell_trade_count": trade_market_audit.get("sell_trade_count_by_market", {}),
                 "market_profit_by_section": trade_market_audit.get("gross_profit_by_market", {}),
@@ -5542,6 +5544,8 @@ def build_experiment_batch_summary(
             "market_candidate_count": base_market_coverage.get("candidate_count", {}),
             "market_scored_count": base_scored_candidate_audit.get("scored_count_by_market", base_market_coverage.get("candidate_count", {})),
             "market_selected_count": base_market_coverage.get("selected_count", {}),
+            "market_regular_selected_count": base_market_coverage.get("regular_selected_count", {}),
+            "market_fallback_selected_count": base_market_coverage.get("fallback_selected_count", {}),
             "market_buy_trade_count": base_trade_market_audit.get("buy_trade_count_by_market", {}),
             "market_sell_trade_count": base_trade_market_audit.get("sell_trade_count_by_market", {}),
             "market_profit_by_section": base_trade_market_audit.get("gross_profit_by_market", {}),
@@ -6332,7 +6336,28 @@ def _profile_compare_row_with_backtest_summary(
 def _backtest_summary_market_coverage(profile_id: str, start_date_text: str, end_date_text: str) -> dict[str, Any]:
     payload = _backtest_summary_payload(profile_id, start_date_text, end_date_text)
     coverage = payload.get("market_coverage", {})
-    return coverage if isinstance(coverage, dict) else {}
+    if not isinstance(coverage, dict):
+        coverage = {}
+    coverage = dict(coverage)
+    fallback_rows = _affordable_fallback_selected_rows_from_buy_trades(
+        [
+            trade
+            for trade in payload.get("all_trades", []) or []
+            if isinstance(trade, dict)
+            and str(trade.get("action") or "").upper() == "BUY"
+            and _trade_is_filled_or_unknown(trade)
+            and _trade_row_in_period(trade, start_date_text, end_date_text)
+        ]
+    )
+    fallback_counts = market_section_counts(fallback_rows)
+    selected_counts = dict(coverage.get("selected_count", {}) if isinstance(coverage.get("selected_count"), dict) else {})
+    regular_selected_counts = dict(selected_counts)
+    if fallback_rows:
+        _merge_count_dict(selected_counts, fallback_counts)
+    coverage["selected_count"] = selected_counts
+    coverage["regular_selected_count"] = regular_selected_counts
+    coverage["fallback_selected_count"] = fallback_counts
+    return coverage
 
 
 def _backtest_summary_result_integrity(profile_id: str, start_date_text: str, end_date_text: str) -> dict[str, Any]:
@@ -14403,8 +14428,7 @@ def build_backtest_result_integrity_audit(
         if item.get("date") and start_date_text <= str(item.get("date")) <= end_date_text
     ]
     score_rows, selected_rows = _score_rows_for_result_integrity(config, backtest_dir, run_dates)
-    selected_keys = {_selection_trade_key(row) for row in selected_rows if _selection_trade_key(row)}
-    selected_by_key = {_selection_trade_key(row): row for row in selected_rows if _selection_trade_key(row)}
+    regular_selected_rows = list(selected_rows)
     buy_trades = [
         trade
         for trade in all_trades
@@ -14415,16 +14439,14 @@ def build_backtest_result_integrity_audit(
         for trade in all_trades
         if str(trade.get("action") or "").upper() == "SELL" and _trade_is_filled_or_unknown(trade)
     ]
-    affordable_fallback_selected_rows = [
-        {**trade, "selected": True, "date": str(trade.get("signal_date") or trade.get("date") or "")}
-        for trade in buy_trades
-        if bool(trade.get("affordable_fallback_buy_selected"))
-    ]
+    selected_by_key = {_selection_trade_key(row): row for row in selected_rows if _selection_trade_key(row)}
+    affordable_fallback_selected_rows = _affordable_fallback_selected_rows_from_buy_trades(buy_trades)
     for row in affordable_fallback_selected_rows:
         key = _selection_trade_key(row)
-        if key:
-            selected_keys.add(key)
-            selected_by_key.setdefault(key, row)
+        if key and key not in selected_by_key:
+            selected_rows.append(row)
+            selected_by_key[key] = row
+    selected_keys = set(selected_by_key)
     buy_missing_key_count = sum(1 for trade in buy_trades if not _trade_selection_key(trade))
     buy_keys = {_trade_selection_key(trade) for trade in buy_trades if _trade_selection_key(trade)}
     selected_without_trade = selected_keys - buy_keys
@@ -14488,6 +14510,8 @@ def build_backtest_result_integrity_audit(
         warnings.append("period-outside JSON cache was read")
     scored_market_candidate_count = market_section_counts(score_rows)
     scored_market_selected_count = market_section_counts(selected_rows)
+    scored_market_regular_selected_count = market_section_counts(regular_selected_rows)
+    scored_market_fallback_selected_count = market_section_counts(affordable_fallback_selected_rows)
     reported_market_coverage = build_market_coverage_summary(backtest_dir, config, run_dates)
     reported_market_coverage_has_files = int(reported_market_coverage.get("files_read", 0) or 0) > 0
     reported_market_candidate_count = reported_market_coverage.get("candidate_count", {})
@@ -14541,8 +14565,12 @@ def build_backtest_result_integrity_audit(
         "market_coverage_source": reported_market_coverage.get("source", "scored_candidates_period"),
         "market_candidate_count": market_candidate_count,
         "market_selected_count": market_selected_count,
+        "market_regular_selected_count": scored_market_regular_selected_count,
+        "market_fallback_selected_count": scored_market_fallback_selected_count,
         "scored_market_candidate_count": scored_market_candidate_count,
         "scored_market_selected_count": scored_market_selected_count,
+        "scored_market_regular_selected_count": scored_market_regular_selected_count,
+        "scored_market_fallback_selected_count": scored_market_fallback_selected_count,
         "market_trade_count": market_trade_count,
         "unknown_market_trade_count": unknown_market_trade_count,
         "result_integrity_status": status,
@@ -14585,6 +14613,27 @@ def _score_rows_for_result_integrity(config: dict[str, Any], backtest_dir: Path,
     if not scores:
         scores = list(selected_rows)
     return scores, selected_rows
+
+
+def _affordable_fallback_selected_rows_from_buy_trades(buy_trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for trade in buy_trades:
+        if not bool(trade.get("affordable_fallback_buy_selected")):
+            continue
+        signal_date = str(trade.get("signal_date") or trade.get("date") or "")
+        if not signal_date or not trade.get("code"):
+            continue
+        rows.append(
+            {
+                **trade,
+                "date": signal_date,
+                "signal_date": signal_date,
+                "selected": True,
+                "selection_source": "affordable_fallback",
+                "selected_reason": trade.get("selected_reason") or trade.get("selection_reason") or "affordable_fallback_buy",
+            }
+        )
+    return rows
 
 
 def _selected_without_trade_reason_breakdown(

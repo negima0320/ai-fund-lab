@@ -845,6 +845,8 @@ def test_backtest_result_integrity_treats_affordable_fallback_buy_as_selected(co
     assert audit["buy_trade_count"] == 1
     assert audit["trade_without_selected_count"] == 0
     assert audit["market_filter_violation_count"] == 0
+    assert audit["market_fallback_selected_count"]["Prime"] == 1
+    assert audit["market_regular_selected_count"]["Prime"] == 1
 
 
 def test_backtest_result_integrity_audit_ok_for_portfolio_limited_selected_without_trade(
