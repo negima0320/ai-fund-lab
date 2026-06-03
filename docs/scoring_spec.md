@@ -1,115 +1,84 @@
 # 銘柄選定スコア計算仕様
 
-この資料は、現在の実装をもとに、銘柄選定に使うスコア計算の仕様と、各入力値がどのAPI・保存ファイルから来ているかを整理したものです。
+この資料は、現在の実装に基づくスコア計算仕様です。正は `src/scoring.py` の `score_real_candidates()` です。旧資料にあった「100点満点、ニュース30、財務20」の固定配点は現在の実装では使っていません。
 
-対象実装:
+## 全体式
 
-- `src/scoring.py`
-- `src/indicators.py`
-- `src/technical_indicators.py`
-- `src/real_screening.py`
-- `src/data_provider.py`
-- `config/profiles/rookie_dealer_02_v2_1.yaml`
-
-## 全体の流れ
-
-銘柄選定はおおまかに以下の流れです。
-
-1. J-Quants APIから上場銘柄マスターと日次株価を取得する
-2. 日次株価からテクニカル指標を計算する
-3. テクニカル指標から候補銘柄を一次スクリーニングする
-4. 候補銘柄にスコアを付ける
-5. `total_score`、出来高、RSI、Market Filterなどで最終選定する
-
-## 基本スコア式
-
-現在の実スコア計算本体は `src/scoring.py` の `score_real_candidates()` です。
-
-`rookie_dealer_02_v2_1` では実質的に以下の式です。
+現在の `total_score` は、候補ごとに次の形で計算されます。
 
 ```text
 total_score =
-  technical_score
-  + market_context_score
-  + penalty_score
+  max(0,
+    technical_score
+    + relative_strength_score
+    + investor_context_score
+    + market_context_score
+    + winner_loser_rule_score
+    + penalty_score
+  )
 ```
 
-ただし、現在 `market_context_score` は `0` 固定です。
-
-そのため、実質的には以下です。
+`penalty_score` は負値です。実装上は `rsi_selection_penalty` と `affordability_penalty` を合算し、`score_components.penalty_score` に負値として保存します。
 
 ```text
-total_score = technical_score - RSI過熱ペナルティ
+penalty_score = -(rsi_selection_penalty + affordability_penalty)
 ```
 
-ただし `rookie_dealer_02_v2_1` では `reject_overheated_rsi: true` のため、RSIが閾値を超えた場合は減点ではなく新規買付除外になります。
+`market_context_score` は現在0固定です。market regimeやdynamic exposureは主に選定・資金配分・監査で使われ、現行のスコア加点ではありません。
 
-## profile別の追加スコア
+## score_components
 
-profileによって追加されるスコアが変わります。
+`scored_candidates_YYYY-MM-DD.json` と scoring logには、主に以下が保存されます。
 
-| profile | 追加要素 | スコア式 |
-| --- | --- | --- |
-| `rookie_dealer_02_v2_1` | なし | `technical_score + market_context_score + penalty_score` |
-| `rookie_dealer_02_v2_6` | Relative Strength | `technical_score + relative_strength_score + market_context_score + penalty_score` |
-| `rookie_dealer_02_v2_8` | 投資部門別需給 | `technical_score + investor_context_score + market_context_score + penalty_score` |
-| `rookie_dealer_02_v2_11` | 投資部門別需給をフィルター利用 | スコア加算せず、需給が悪い場合に除外 |
-| `rookie_dealer_02_v2_9` | 財務情報capability検証 | 財務スコアは現在未使用 |
-| `rookie_dealer_02_v2_10` | 決算予定フィルター | スコア加算せず、決算前後を除外 |
+| field | 意味 |
+| --- | --- |
+| `ma_score` / `trend_score` | 移動平均条件のスコア |
+| `volume_score` | 出来高倍率と売買代金のスコア |
+| `rsi_score` | RSIゾーンのスコア |
+| `candlestick_score` | ローソク足シグナルのスコア |
+| `technical_score` | technical合計。sector補正後に0〜50へclamp |
+| `sector_score` | sector momentumによるtechnical内の補正差分 |
+| `relative_strength_score` | profileで有効な場合のTOPIX等に対する相対強度 |
+| `investor_context_score` | profileで有効な場合の投資部門別需給スコア |
+| `market_context_score` | 現在0 |
+| `winner_loser_rule_score` | 勝ち負け分析から作った実験的加減点 |
+| `penalty_score` | RSI/affordabilityなどの減点 |
+| `component_total` | component合計 |
+| `total_score` | 最終スコア |
+| `matches_total_score` | component合計とtotal_scoreの整合性 |
 
 ## technical_score
 
 `technical_score` は最大50点です。
 
-内訳は以下です。
-
-| 項目 | 最大点 | 使う値 | 内容 |
-| --- | ---: | --- | --- |
-| `trend_score` | 15 | `close`, `ma5`, `ma25` | 終値が5日線より上、5日線が25日線より上、MA乖離が適度か |
-| `volume_score` | 10 | `volume_ratio`, `turnover_value` | 出来高前日比と売買代金 |
-| `rsi_score` | 10 | `rsi` | RSIが短期買い候補として適切な範囲か |
-| `candlestick_score` | 15 | ローソク足シグナル | 陽線、強い陽線、下ヒゲ、5日線回復、出来高ブレイクなど |
-| `sector_score` | +/-5 | `sector_momentum_score` | 業種モメンタムによる加減点 |
-
-実装上は以下の形です。
-
 ```text
-base_technical_score =
-  trend_score
-  + volume_score
-  + rsi_score
-  + candlestick_score
-
 technical_score =
-  clamp(base_technical_score + sector_adjustment, 0, 50)
+  clamp(
+    trend_score
+    + volume_score
+    + rsi_score
+    + candlestick_score
+    + sector_adjustment,
+    0,
+    50
+  )
 ```
 
-## trend_score
+| component | 最大 | 主な入力 |
+| --- | ---: | --- |
+| `trend_score` | 15 | `close`, `ma5`, `ma25` |
+| `volume_score` | 10 | `volume_ratio`, `turnover_value` |
+| `rsi_score` | 10 | `rsi` |
+| `candlestick_score` | 15 | `candlestick_signals`, candle shape |
+| `sector_adjustment` | おおむね -5〜+5 | `sector_momentum_score` |
 
-最大15点です。
+### trend_score
 
-計算内容:
+- `close > ma5`: +5
+- `ma5 > ma25`: +5
+- `(ma5 - ma25) / ma25` が3%付近に近いほど最大+5
 
-| 条件 | 加点 |
-| --- | ---: |
-| `close > ma5` | +5 |
-| `ma5 > ma25` | +5 |
-| `(ma5 - ma25) / ma25` が約3%に近い | 最大+5 |
-
-MA乖離の加点は、3%付近を良い形として評価し、離れすぎると点数が下がります。
-
-## volume_score
-
-最大10点です。
-
-計算内容:
-
-| 条件 | 加点 |
-| --- | ---: |
-| `volume_ratio` が高い | 最大+6 |
-| `turnover_value` が大きい | 最大+4 |
-
-式のイメージ:
+### volume_score
 
 ```text
 volume_ratio_part = min(volume_ratio, 2.5) / 2.5 * 6
@@ -117,30 +86,28 @@ turnover_part = min(turnover_value / 2,000,000,000, 1.0) * 4
 volume_score = clamp(round(volume_ratio_part + turnover_part), 0, 10)
 ```
 
-## rsi_score
+`turnover_value` はJ-Quants日次株価の `Va` がある場合はそれを優先し、欠損時は価格×出来高の推定値へfallbackします。どちらを使ったかは `direct_turnover_value_source` / API Field Usage Auditで確認します。
 
-最大10点です。
+### rsi_score
 
-RSI 50〜65を最も良い短期買いゾーンとして扱います。
+短期買い候補として、RSI 50〜65を最も良いゾーンとして扱います。
 
-| RSI | 点数 |
+| RSI | スコア |
 | --- | ---: |
 | 50〜65 | 10 |
 | 40〜50 | 6〜10 |
 | 65〜70 | 8〜6 |
 | 30〜40 | 0〜6 |
 | 70〜80 | 6〜0 |
-| 30未満または80超 | 0 |
+| 30未満 / 80超 | 0 |
 
-なお、`rookie_dealer_02_v2_1` では `selection.max_rsi_for_new_position: 65` かつ `reject_overheated_rsi: true` なので、RSIが65を超えるとスコア以前に新規買付除外になります。
+profileで `selection.reject_overheated_rsi: true` の場合、RSI過熱は減点ではなく選定除外になります。
 
-## candlestick_score
+### candlestick_score
 
-最大15点です。
+ローソク足データがある場合、以下のようなシグナルを評価します。
 
-ローソク足シグナルは `src/candlestick.py` で計算され、スコアでは以下のように使われます。
-
-| シグナル | 加減点 |
+| signal | 加減点 |
 | --- | ---: |
 | `bullish_candle` | +4 |
 | `strong_bullish_candle` | +5 |
@@ -150,240 +117,94 @@ RSI 50〜65を最も良い短期買いゾーンとして扱います。
 | `long_upper_shadow_warning` | -4 |
 | `overheated_warning` | -5 |
 
-ローソク足データが欠けている場合は、互換用に `candlestick_score = 12` として扱われます。
+ローソク足データが欠ける場合は互換用に `candlestick_score=12` として扱います。fallback候補には追加で -2 が入ります。
 
-fallback候補の場合はさらに `-2` されます。
+## profile別の追加スコア
 
-## sector_score
+`features.*` と `scoring.use_*` は別物です。
 
-`sector_momentum_score` がある場合のみ、`technical_score` に加減点されます。
+- `features.*`: データ取得・特徴量生成を有効化する
+- `scoring.use_*`: 生成済み特徴量を `total_score` に加算する
 
-```text
-sector_adjustment = clamp(round((sector_momentum_score - 50) / 10), -5, +5)
-```
+例:
 
-つまり、業種モメンタムが50なら中立、60なら約+1、40なら約-1です。
+| feature | data_enabled | scoring_enabled | 現在の扱い |
+| --- | --- | --- | --- |
+| `relative_strength` | `features.relative_strength` | `scoring.use_relative_strength_score` | 有効時は最大10点程度の追加スコア |
+| `investor_context` | `features.investor_context` | `scoring.use_investor_context_score` | 有効時は -3〜+5 程度の補正 |
+| `financial_context` | `features.financial_context` | `scoring.use_financial_score` | 現在は主にdata/audit用。通常の実験ではtotal_scoreへ加算しない |
+| `market_context` | `features.market_context` | なし | regime、risk、dynamic exposure、監査に利用。scoreは0固定 |
+
+Feature Activation Auditでは `data_enabled`、`scoring_enabled`、`actual_trigger_count` が分かれます。data-only profileは、APIや保存の検証だけを行い、scoreには足しません。
 
 ## relative_strength_score
 
-`rookie_dealer_02_v2_6` など、`features.relative_strength: true` かつ `scoring.use_relative_strength_score: true` のprofileで有効です。
+`features.relative_strength: true` かつ `scoring.use_relative_strength_score: true` のprofileで有効です。
 
-最大10点です。
+主な入力:
 
-計算対象:
+- `stock_return_5d`, `stock_return_10d`, `stock_return_20d`
+- `benchmark_return_5d`, `benchmark_return_10d`, `benchmark_return_20d`
+- `relative_strength_5d`, `relative_strength_10d`, `relative_strength_20d`
 
-- `stock_return_5d`
-- `stock_return_10d`
-- `stock_return_20d`
-- `benchmark_return_5d`
-- `benchmark_return_10d`
-- `benchmark_return_20d`
-
-個別株リターンからベンチマークリターンを引いた値が `relative_strength_*d` です。
-
-```text
-relative_strength_5d = stock_return_5d - benchmark_return_5d
-relative_strength_10d = stock_return_10d - benchmark_return_10d
-relative_strength_20d = stock_return_20d - benchmark_return_20d
-```
-
-加点ルール:
-
-| 条件 | 加点 |
-| --- | ---: |
-| `relative_strength_5d > 0.03` | +3 |
-| `relative_strength_10d > 0.05` | +4 |
-| `relative_strength_20d > 0.08` | +3 |
-
-合計最大10点です。
-
-ベンチマークは設定上TOPIXを優先します。TOPIXが使えない場合は市場平均にフォールバックします。
+ベンチマークはLight planではTOPIXを優先します。利用不能な場合はmarket average等へfallbackします。fallback状態はfeature analysisのRelative Strength系監査で確認します。
 
 ## investor_context_score
 
-`rookie_dealer_02_v2_8` など、`features.investor_context: true` かつ `scoring.use_investor_context_score: true` のprofileで有効です。
+`features.investor_context: true` かつ `scoring.use_investor_context_score: true` のprofileで有効です。J-Quants `/equities/investor-types` をもとに、海外投資家の買越、4週合計、トレンド、個人投資家との差などを補助的に評価します。
 
-スコア範囲は `-3` 〜 `+5` です。
+`rookie_dealer_02_v2_11` のように、スコア加算ではなくフィルターとして使うprofileもあります。
 
-主に投資部門別売買情報から以下を見ます。
+## affordability / winner-loser adjustments
 
-- 海外投資家の買越額
-- 海外投資家の4週合計買越額
-- 海外投資家需給トレンド
-- 個人投資家の売買動向
+`affordability_filter` が有効なprofileでは、100株購入金額が `preferred_round_lot_amount` を超える候補に `price_band_penalty` を入れます。これは買付ロジックではなくスコア上の順位調整です。
 
-加点・減点:
+`winner_loser_rule_adjustment` は、勝ち負け分析から作った実験的な加点/減点です。指定条件に合う候補だけ `winner_loser_rule_score` を加えます。
 
-| 条件 | 加減点 |
-| --- | ---: |
-| 海外投資家4週合計が買い越し | +2 |
-| 海外投資家4週合計が売り越し | -2 |
-| 海外投資家需給トレンドが改善 | +2 |
-| 海外投資家需給トレンドが悪化 | -1 |
-| 個人が売り越し、海外が買い越し | +1 |
+## 一次スクリーニング
 
-最終的に `-3` 〜 `+5` に丸められます。
+スコア計算前に `src/real_screening.py` の `screen_candidates()` で候補を絞ります。通常の主な条件は以下です。
 
-## 一次スクリーニング条件
+- 売買代金
+- 出来高倍率
+- `close > ma5`
+- `ma5 > ma25`
+- RSI範囲
+- 短期ボラティリティ
 
-スコア計算の前に、`src/real_screening.py` の `screen_candidates()` で候補を絞ります。
+Standard市場拡張profileでは、Primeの条件を維持したまま、Standardだけ売買代金・出来高・移動平均などを緩和する実験があります。Candidate Universe AuditとScreening Auditでは、market filter直後とscreening後を分けて集計します。
 
-通常条件:
+## 選定ルール
 
-| 条件 | 閾値 |
-| --- | ---: |
-| `turnover_value` | 500,000,000円以上 |
-| `volume_ratio` | 1.5以上 |
-| `close > ma5` | 必須 |
-| `ma5 > ma25` | 必須 |
-| `rsi` | 40〜70 |
-| `five_day_volatility` | 0.12以下 |
+スコア計算後、`_apply_selection_rules()` が以下を判定します。
 
-候補が足りない場合は fallback 条件を使います。
+- `selection.min_score`
+- `selection.market_min_score_overrides` / `selection.min_score_by_market_section`
+- `selection.min_confidence`
+- `selection.max_selected`
+- `allow_top_pick_when_no_selection`
+- `top_pick_min_score`
+- volume filter
+- RSI過熱フィルター
+- RSI×出来高過熱ゾーン
+- earnings filter
+- investor context filter
+- market filter
 
-fallback条件:
+`market_filter.allowed_sections` に含まれない市場区分は除外されます。`allow_unknown_market: false` の場合、Unknown / None / 空文字も除外です。
 
-| 条件 | 閾値 |
-| --- | ---: |
-| `turnover_value` | 300,000,000円以上 |
-| `volume_ratio` | 1.2以上 |
-| `rsi` | 35〜75 |
-| `five_day_volatility` | 0.16以下 |
+`allow_top_pick_when_no_selection` によるtop-pick採用は、profile設定通りならScore Integrity上の異常とは扱いません。通常選定で市場別min scoreを下回った候補が選ばれた場合は、`invalid_below_threshold_selected_count` として警告対象です。
 
-候補のランキングでは以下を重視します。
+## APIと保存値の対応
 
-1. `volume_ratio` が高い
-2. `turnover_value` が大きい
-3. `sector_momentum_score` が高い
-4. MA乖離が約3%に近い
-5. RSIが65を超えすぎていない
+| API / cache | 主なフィールド | processed/scoringでの利用 |
+| --- | --- | --- |
+| `/equities/master` | `Code`, `CoName`, `Mkt/MktNm`, `S17/S17Nm`, `S33/S33Nm`, `ScaleCat`, `Mrgn/MrgnNm`, `ProdCat` | code/name/market_section/sector/scale/margin/product category |
+| `/equities/bars/daily` | `O/H/L/C/Vo`, `AdjO/AdjH/AdjL/AdjC/AdjVo`, `Va`, `UL`, `LL` | adjusted priceベースの指標、turnover、limit flag audit |
+| `/indices/bars/daily/topix` | TOPIX daily bars | relative strength benchmark |
+| `/equities/investor-types` | 投資部門別売買情報 | investor context score/filter |
+| `/equities/earnings-calendar` | 決算予定 | earnings filter |
+| `/fins/summary` | 財務サマリ | 現在は主にaudit/future candidate |
 
-## 最終選定条件
+future data leakを避けるため、dynamic exposureの市場局面はsignal dateの前営業日以前のmarket contextを使います。同日終値由来contextを同日判断に使った場合はIntegrity側で検出対象です。
 
-`rookie_dealer_02_v2_1` の主な設定は以下です。
-
-```yaml
-selection:
-  min_score: 45
-  fallback_min_score: 40
-  min_confidence: 0.70
-  allow_top_pick_when_no_selection: true
-  top_pick_min_score: 40
-  max_selected: 5
-  max_rsi_for_new_position: 65
-  reject_overheated_rsi: true
-
-market_filter:
-  prime: true
-  standard: false
-  growth: false
-  allow_unknown_market: false
-
-volume_filter:
-  enabled: true
-  min_volume_ratio: 2.0
-```
-
-つまり、スコアが高くても以下の場合は除外されます。
-
-- `market_section` が `TSEPrime` ではない
-- `market_section` が `Unknown` / `None` / 空文字
-- `volume_ratio < 2.0`
-- `rsi > 65`
-- `confidence < 0.70`
-- 最大採用数5件を超える
-
-通常基準で1件も選ばれない場合、`allow_top_pick_when_no_selection: true` により、`top_pick_min_score: 40` 以上の最上位候補を1件だけ採用する可能性があります。
-
-## confidence
-
-confidenceは以下の形で計算されます。
-
-```text
-confidence = 0.45 + technical_score / 100
-```
-
-ただし、以下で減点されます。
-
-- fallback候補なら `-0.08`
-- 必須フィールド欠損1つにつき `-0.04`
-
-必須フィールド:
-
-- `close`
-- `volume`
-- `ma5`
-- `ma25`
-- `rsi`
-- `volume_ratio`
-- `turnover_value`
-- `five_day_volatility`
-
-最終的に `0.10` 〜 `0.95` に丸められます。
-
-## 入力値とAPI由来
-
-| 値 | 用途 | API endpoint | 保存先 |
-| --- | --- | --- | --- |
-| `code` | 銘柄コード | `/equities/master`, `/equities/bars/daily` | `data/raw/listed_stocks_jquants.json`, `data/raw/prices_YYYY-MM-DD.json` |
-| `name` | 銘柄名 | `/equities/master` | `data/raw/listed_stocks_jquants.json` |
-| `market_section` | Prime/Standard/Growth判定 | `/equities/master` | `data/raw/listed_stocks_jquants.json` |
-| `sector_name` | 業種モメンタム | `/equities/master` | `data/raw/listed_stocks_jquants.json` |
-| `open` | ローソク足 | `/equities/bars/daily` | `data/raw/prices_YYYY-MM-DD.json` |
-| `high` | ローソク足 | `/equities/bars/daily` | `data/raw/prices_YYYY-MM-DD.json` |
-| `low` | ローソク足 | `/equities/bars/daily` | `data/raw/prices_YYYY-MM-DD.json` |
-| `close` | MA/RSI/リターン/売買代金 | `/equities/bars/daily` | `data/raw/prices_YYYY-MM-DD.json` |
-| `volume` | 出来高倍率/売買代金 | `/equities/bars/daily` | `data/raw/prices_YYYY-MM-DD.json` |
-| `ma5` | トレンド評価 | raw pricesから計算 | `data/processed/.../indicators_YYYY-MM-DD.json` |
-| `ma25` | トレンド評価 | raw pricesから計算 | `data/processed/.../indicators_YYYY-MM-DD.json` |
-| `rsi` | RSIスコア/過熱除外 | raw pricesから計算 | `data/processed/.../indicators_YYYY-MM-DD.json` |
-| `volume_ratio` | 出来高スコア/出来高フィルター | raw pricesから計算 | `data/processed/.../indicators_YYYY-MM-DD.json` |
-| `turnover_value` | 出来高スコア/候補条件 | raw pricesから計算。API値があれば保持 | `data/processed/.../indicators_YYYY-MM-DD.json` |
-| `candlestick_signals` | ローソク足スコア | raw pricesから計算 | `data/processed/.../indicators_YYYY-MM-DD.json` |
-| `sector_momentum_score` | sector_score | raw prices + listed stock master | `data/processed/.../candidates_YYYY-MM-DD.json` |
-| `relative_strength_score` | v2_6追加スコア | TOPIXまたは市場平均 | `data/processed/.../indicators_YYYY-MM-DD.json` |
-| `investor_context_score` | v2_8追加スコア/ v2_11フィルター | `/equities/investor-types` | `data/cache/jquants/investor_types/...json` |
-| `earnings_announcement_date` | 決算フィルター | `/equities/earnings-calendar` | `data/cache/jquants/earnings_calendar/...json` |
-| 財務情報 | 現状スコア未使用 | `/fins/summary` | `data/cache/jquants/financial_statements/...json` |
-
-## J-Quants API endpoint対応
-
-実装上のJ-Quants API呼び出しは `src/data_provider.py` にまとまっています。
-
-| 用途 | endpoint | 実装関数 | 主な保存先 |
-| --- | --- | --- | --- |
-| 銘柄マスター | `/equities/master` | `get_listed_stocks()` | `data/raw/listed_stocks_jquants.json` |
-| 日次株価 | `/equities/bars/daily` | `get_daily_prices()` / `get_daily_prices_range()` | `data/raw/prices_YYYY-MM-DD.json` |
-| TOPIX | `/indices/bars/daily/topix` | `get_topix_prices()` | `data/cache/jquants/topix_prices/...json` |
-| 投資部門別売買 | `/equities/investor-types` | `fetch_investor_types()` | `data/cache/jquants/investor_types/...json` |
-| 決算予定 | `/equities/earnings-calendar` | `fetch_earnings_calendar()` | `data/cache/jquants/earnings_calendar/...json` |
-| 財務サマリー | `/fins/summary` | `fetch_financial_statements()` | `data/cache/jquants/financial_statements/...json` |
-
-## 現在スコアに入っていないもの
-
-以下は現在の主要profileでは銘柄選定スコアに直接入っていません。
-
-- ニュース
-- OpenAI判断
-- 財務スコア
-- PER/PBR/ROE
-- 為替
-- 米国市場サマリー
-
-一部はレポートや将来拡張用のフィールドとして存在しますが、`rookie_dealer_02_v2_1` の選定スコアには加算されません。
-
-## まとめ
-
-現在の銘柄選定は、J-Quantsの日次株価から作った短期テクニカル指標を中心にしています。
-
-特に `rookie_dealer_02_v2_1` は以下を強く重視します。
-
-- 東証Primeのみ
-- 出来高倍率2倍以上
-- RSI 65超えを追わない
-- `close > ma5 > ma25`
-- 売買代金が十分ある
-- ローソク足が短期買いに向いている
-- 業種モメンタムが悪すぎない
-
-つまり、現在の仕様は「短期で資金が入っているPrime銘柄を拾うが、過熱しすぎた銘柄は買わない」設計です。

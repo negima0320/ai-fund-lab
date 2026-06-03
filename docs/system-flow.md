@@ -1,59 +1,46 @@
-# システムフロー
+# System Flow
 
-AIファンド1号は、当面ローカルMacで実行します。実売買へ進む前に、ダミーデータと仮想売買でログ設計、採点、日報生成、note記事生成を検証します。
+現在のAI Fund Labの主要フローです。
 
-## 現時点の方針
+## Daily / Backtest Pipeline
 
-Phase1はローカルMacで動かします。
+```text
+profile load
+  -> listed info / prices / calendar load
+  -> indicators
+  -> market context
+  -> candidate universe
+  -> market filter
+  -> screening
+  -> scoring
+  -> selection
+  -> PaperBroker simulation
+  -> logs / DB / reports
+  -> feature analysis / experiment summary
+```
 
-理由は以下です。
+## Source of Truth
 
-- 開発しやすい
-- デバッグしやすい
-- コストを抑えられる
-- API連携前の検証がしやすい
+- Config: `config/profiles/*.yaml`, `config/profile_registry.yaml`
+- Scoring: `src/scoring.py`
+- Screening: `src/real_screening.py`
+- Paper execution: `src/paper_trade.py`
+- Feature reports: `src/feature_analysis.py`
+- CLI orchestration: `src/main.py`
 
-## Phase1: ローカル実行
+## Runtime Paths
 
-1. Mac上でPythonスクリプトを実行
-2. ダミーデータ、将来的にはJ-Quants APIから株価取得
-3. 東証プライム銘柄をスクリーニング
-4. 候補50銘柄を生成
-5. AIが採点
-6. 仮想売買を実行
-7. 損益・ポジション・判断ログを保存
-8. 日報Markdownを生成
-9. note用記事Markdownを生成
-10. GitHubにコミットして履歴保存
+- Raw/provider cache: `data/raw/`, `data/cache/jquants/`
+- Processed cache: `data/processed/common/`, `data/processed/<profile_id>/`
+- Daily logs: `logs/<kind>/<profile_id>/`
+- Backtest logs: `logs/backtests/<profile_id>/<START>_to_<END>/`
+- Reports: `reports/<profile_id>/backtests/`, `reports/experiments/`
 
-## Phase2: 半自動運用
+## AI / OpenAI Boundary
 
-- ローカルMacのcronまたはlaunchdで定時実行
-- 毎日引け後に自動実行
-- 生成された記事を人間が確認
-- noteへ手動投稿
-- 実売買前に仮想売買で検証
+OpenAI is optional. The deterministic scoring and selection path is implemented in Python. AI commentary or decision logs may be generated when enabled, but AI output does not rewrite rules unless code/config is explicitly changed.
 
-## Phase3: 実売買
+## Safety Boundary
 
-- J-Quants Lightで日次株価データ取得
-- 第一候補は立花証券 e支店 API
-- まずはデモ環境で検証し、その後live環境を検討
-- kabuステーションAPIは代替候補として残す
-- AIは銘柄選定と採点を担当
-- Python側が売買ルールを厳格に適用
-- AIは勝手に売買ルールを変更しない
+PaperBroker is the normal execution path. Tachibana is read-only guarded, and KabuStation is a stub. Live automatic trading is not enabled.
 
-## Phase4: クラウド化
-
-将来的にはGitHub Actionsやクラウド環境での自動実行を検討します。
-
-ただし、証券APIやローカル運用上の制約により、完全クラウド化できない可能性があります。そのため当面はローカルMac実行を正とします。
-
-## 設計思想
-
-AIは「判断補助・採点・コメント生成」を担当します。Pythonは「ルール判定・売買執行・ログ保存」を担当します。
-
-AIに自由裁量を持たせすぎず、必ず売買ルールエンジンを通します。
-
-この設計により、後から新人ディーラー2号、3号を追加しやすくします。

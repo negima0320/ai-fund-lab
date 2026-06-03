@@ -1,68 +1,89 @@
 # J-Quants Plan Matrix
 
-J-Quants Free / Light のどちらでも ai-fund-lab が停止せずに動くことを確認するための互換マトリクスです。Light専用機能はLight時のみ有効化し、Free時はfallbackまたは無効化して処理を継続します。
+この文書は `config/jquants.yaml` と `src/jquants_plan.py` に基づくJ-Quants plan整理です。
 
-## Plan Capabilities
+## Plans
 
-J-Quants連携はv2 endpointだけを使います。旧v1 endpoint（`/listed/info`, `/prices/daily_quotes`, `/indices/topix`, `/fins/statements`, `/markets/trades_spec`）は使用しません。
+| plan | Earliest supported date | Rate limit setting | Parallel |
+| --- | --- | ---: | --- |
+| `free` | 2024-01-01 | 5 req/min | false |
+| `light` | 2021-05-01 | 60 req/min | true, max 4 |
 
-| capability | Free | Light | 用途 |
+`investor_types` はFreeでは2024-01-01以降、Lightでは2021-05-31以降を想定します。
+
+## Capabilities
+
+| Capability | Free | Light | Notes |
 | --- | --- | --- | --- |
-| listed_info | OK | OK | 上場銘柄一覧 |
-| prices | OK | OK | 株価四本値 |
-| financial_statements | OK | OK | 財務情報capability検証 |
-| earnings_calendar | OK | OK | 決算発表予定日フィルター |
-| trading_calendar | disabled | OK | 営業日判定 |
-| topix_prices | disabled | OK | TOPIX Relative Strength |
-| investor_types | disabled | OK | 投資部門別情報 |
+| `listed_info` | yes | yes | 銘柄マスター、市場区分、業種など |
+| `prices` | yes | yes | 日次株価。調整済み価格、売買代金、値幅制限flagを利用可能 |
+| `financial_statements` | yes | yes | 現在は主にaudit/future candidate。通常scoreには加算しない |
+| `earnings_calendar` | yes | yes | 決算予定フィルター |
+| `trading_calendar` | no | yes | 営業日判定、前営業日fallbackなど |
+| `topix_prices` | no | yes | relative strength benchmark |
+| `investor_types` | no | yes | 投資部門別需給 |
 
-## Profile Matrix
+## Profile Compatibility
 
-| profile | earnings_calendar | topix_prices | investor_types | financial_statements | free対応 | light対応 |
-| --- | --- | --- | --- | --- | --- | --- |
-| rookie_dealer_02_v2_1 | - | - | - | - | OK | OK |
-| rookie_dealer_02_v2_6 | - | preferred | - | - | OK: Prime平均/候補中央値へfallback | OK: TOPIX利用 |
-| rookie_dealer_02_v2_8 | - | - | required | - | OK: investor_context_scoreを0にして無効化 | OK: investor_types利用 |
-| rookie_dealer_02_v2_9 | - | - | - | required | OK | OK |
-| rookie_dealer_02_v2_10 | required | - | - | - | OK | OK |
-| rookie_dealer_02_v2_11 | - | - | required | - | OK: investor_context_filterを無効化 | OK: investor_types利用 |
+`config/profile_registry.yaml` の `required_plan` が実験上の推奨planです。`validate-config` は現在planとprofile要件を照合し、fallback可能な不足はwarning、fallback不可な不足はfailureにします。
 
-## Fallback Policy
+代表例:
 
-- `topix_prices` がないFree planで `rookie_dealer_02_v2_6` を使う場合、TOPIX APIは呼ばず、Prime市場平均または候補中央値をbenchmarkにします。fallbackも使えない場合はRelative Strengthを0点扱いにします。
-- `investor_types` がないFree planで `rookie_dealer_02_v2_8` を使う場合、投資部門別APIは呼ばず、`investor_context_score=0` として処理を継続します。`rookie_dealer_02_v2_11` では `investor_context_filter` を無効化し、除外なしで処理します。
-- `earnings_calendar` と `financial_statements` はFree / Lightの両方で利用可能なcapabilityとして扱います。
-- capability不足はpreflightでwarning表示し、fallback可能な不足は `can_run_backtest: true` / `can_run_live/paper: true` のままにします。
+| Profile family | Required plan | Reason |
+| --- | --- | --- |
+| `rookie_dealer_02_v2_1` | free | technical baseline |
+| relative strength系 (`v2_6`, `v2_26`, `v2_51` など) | light | TOPIX benchmark / trading calendarを使うため |
+| investor context系 (`v2_8`, `v2_11`) | light | `/equities/investor-types` を使うため |
+| earnings filter系 | free | earnings calendarがfree capabilityに含まれる |
 
-## Preflight Checks
+後続の実験profileはregistryの `required_plan` を確認してください。
 
-preflightでは以下を表示します。
+## Fallback Behavior
 
-- profile required capabilities
-- current plan capabilities
-- missing capabilities
-- fallback applied
-- can_run_backtest
-- can_run_live/paper
+| Missing capability | Fallback |
+| --- | --- |
+| `topix_prices` | Prime平均やcandidate medianなど、実装されたmarket average系benchmarkへfallback |
+| `investor_types` | investor context score/filterを無効または中立扱い |
+| `trading_calendar` | 利用可能な日付リストや既存価格日付から営業日を推定 |
+| unsupported/no-data ranges | `data/cache/jquants/unsupported_ranges` / `empty_ranges` に記録 |
 
-例:
+Fallbackは検証継続のための機構です。比較実験では、同じplan・同じfallback状態で揃えてください。
+
+## Cache Paths
+
+J-Quants response cache:
 
 ```text
-J-Quants Plan: free
-profile required capabilities: listed_info, prices, topix_prices
-missing capabilities: topix_prices
-fallback applied: topix_prices -> fallback to prime market average or candidate median benchmark
-can_run_backtest: true
-can_run_live/paper: true
+data/cache/jquants/
+  prices/
+  topix_prices/
+  earnings_calendar/
+  investor_types/
+  financial_statements/
+  listed_info/
+  trading_calendar/
 ```
 
-## Recommended Plans
+Processed common cache:
 
-| profile | 推奨plan | 理由 |
-| --- | --- | --- |
-| rookie_dealer_02_v2_1 | Free | 基本の株価取得だけで検証可能 |
-| rookie_dealer_02_v2_6 | Light | TOPIX Relative Strengthを正式benchmarkで検証できる |
-| rookie_dealer_02_v2_8 | Light | investor_typesがLight専用 |
-| rookie_dealer_02_v2_9 | Free | financial_statementsはFree/Light両対応 |
-| rookie_dealer_02_v2_10 | Free | earnings_calendarはFree/Light両対応 |
-| rookie_dealer_02_v2_11 | Light | investor_typesを除外フィルターとして検証できる |
+```text
+data/processed/common/
+  indicators/<cache_key>/indicators_YYYY-MM-DD.json
+  candidates/<cache_key>/candidates_YYYY-MM-DD.json
+```
+
+Profile runtime path:
+
+```text
+data/processed/<profile_id>/
+  indicators_YYYY-MM-DD.json
+  candidates_YYYY-MM-DD.json
+  scored_candidates_YYYY-MM-DD.json
+```
+
+## API Field Notes
+
+Daily prices use adjusted fields where available for technical indicators and relative strength. Turnover value uses API `Va` when present and falls back to price × volume only when necessary. Limit up/down flags are saved/audited but are disabled-by-default rule candidates unless a profile explicitly enables a guard.
+
+Financial summary data is audited for freshness and future data leak risk. It is not part of the default short-term score.
+

@@ -1,91 +1,30 @@
-# OpenAI API は任意です
+# OpenAI Optional Usage
 
-AI Fund Lab は、`OPENAI_API_KEY` が未設定でも通常動作します。OpenAI APIは追加機能であり、未設定時やAPI失敗時は `rule_based` 処理へフォールバックします。
+OpenAI連携は任意です。`OPENAI_API_KEY` が未設定でも、データ取得、screening、scoring、PaperBroker、backtest、feature analysisは動作します。
 
-APIキーの値は、ログ、DB、README、生成記事には出力しません。
+## Current Role
 
-## OpenAIを使わない場合
+OpenAIは、現在の主スコア式の必須componentではありません。
 
-- ルールベースで銘柄選定する
-- テクニカル、ニューススコア、財務スコア、market_contextなどで判断する
-- APIコストがかからない
-- 再現性が高い
-- コメントはテンプレート寄りになる
-- AI Decisionによる柔軟な市場判断は使えない
+現在のスコア計算は `src/scoring.py::score_real_candidates()` が行い、technical score、relative strength、investor context、各種penalty/adjustmentを使います。旧式の「AIがニュース30点・財務20点を固定採点する」仕様は現行の `total_score` では使っていません。
 
-設定例です。
+## Fallback
 
-```yaml
-ai_decision:
-  enabled: false
-  provider: openai
-  fallback_to_rule_based: true
+OpenAIが未設定または失敗した場合:
 
-ai_commentary:
-  enabled: true
-  provider: rule_based
-  fallback_to_rule_based: true
-```
+- commentaryはrule-basedへfallback
+- AI decisionが必要な箇所は安全側にfallback
+- scoring本体は停止しない
 
-この状態では、OpenAI API呼び出しは行いません。
+## Where Outputs May Appear
 
-## OpenAIを使う場合
+- `logs/ai_decision/<profile_id>/ai_decision_YYYY-MM-DD.json`
+- article/commentary generation
+- optional analysis text
 
-- 候補銘柄をまとめてOpenAIに渡して最終判断できる
-- market_contextを踏まえた見送り判断が可能
-- note記事や振り返りコメントが自然になる
-- APIコストが発生する
-- API失敗時はrule_basedへフォールバックする
-- 銘柄ごとの個別API呼び出しは禁止
+## Safety
 
-AI Decisionを使う場合の例です。
+OpenAI出力は売買ルールを勝手に変更しません。改善案やコメントとして保存される場合でも、profile YAMLや実装を変更しない限り、選定・買付ロジックには反映されません。
 
-```yaml
-ai_decision:
-  enabled: true
-  provider: openai
-  fallback_to_rule_based: true
-  daily_call_limit: 3
-```
+このプロジェクトは投資助言ではなく、研究・検証・PaperBroker前提です。
 
-コメント生成だけOpenAIにする場合の例です。
-
-```yaml
-ai_commentary:
-  enabled: true
-  provider: openai
-  fallback_to_rule_based: true
-```
-
-`OPENAI_API_KEY` が未設定の場合、どちらも自動的に `rule_based` へフォールバックします。
-
-## 推奨
-
-初期開発・バックテスト:
-
-`rule_based`
-
-記事品質を上げたい時:
-
-`ai_commentary` のみ `openai`
-
-最終判断もAIにさせたい時:
-
-`ai_decision` を `openai`
-
-## preflightでの扱い
-
-`preflight` では、OpenAI APIキー未設定をエラーにしません。
-
-- `ai_decision.enabled=false`: `SKIP`
-- `ai_decision.enabled=true` かつ `OPENAI_API_KEY` なし: `WARN` + fallback確認
-- `ai_commentary.provider=rule_based`: `SKIP`
-- `ai_commentary.provider=openai` かつ `OPENAI_API_KEY` なし: `WARN` + fallback確認
-
-OpenAI接続確認は、OpenAI系機能が有効で、かつ `OPENAI_API_KEY` が設定されている場合だけ行います。
-
-## 注意
-
-OpenAI出力は投資助言ではなく、AI Fund Lab内の実験用判断です。
-
-OpenAI APIを使う場合でも、売買ルール、Safety Guard、Brokerの安全設計はPython側が管理します。AIが売買ルールを勝手に変更することはありません。

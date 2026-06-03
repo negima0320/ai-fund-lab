@@ -1,121 +1,51 @@
-# 立花証券 e支店 API 接続計画
+# Tachibana Broker Status
 
-## 採用候補にした理由
+Tachibana連携は現在 **Read-only / guarded demo検証** の状態です。実売買の自動発注は運用していません。
 
-AI Fund Lab では、将来の実売買API候補として立花証券 e支店 API を第一候補にします。
+## Current Implementation
 
-理由は以下です。
+Source: `src/broker.py`, `src/demo_auto_order.py`
 
-- Mac/Linuxから利用しやすい
-- 現物取引に対応している
-- デモ環境がある
-- ローカルMac運用や自動売買システムと相性がよい
+| Component | Status |
+| --- | --- |
+| `PaperBroker` | 実装済み。通常の検証・backtest・paper runで使用 |
+| `TachibanaBroker` | Read-only broker。口座、残高、保有、注文、約定参照IF |
+| `TachibanaDemoBroker` | Read-only派生。demo用guard pathはあるが、外部実発注は無効 |
+| `TachibanaLiveBroker` | Read-only派生。注文送信は無効 |
+| `place_buy_order` / `place_sell_order` | `LiveTradingDisabledError` で停止 |
 
-## 現時点の状態
+## Demo Auto Order Guard
 
-現時点では未実装です。
+`demo_auto_order.py` には、注文候補をdemo環境へ流す前の安全確認があります。
 
-実API接続、認証、注文送信、約定確認、口座情報取得は行いません。
+主なguard:
 
-当面は `PaperBroker` で仮想売買を検証し、売買ルール、ログ、セーフティガード、注文プレビューを固めます。
+- `broker.provider` が `tachibana_demo`
+- `execution_mode` が `auto_demo`
+- `forbid_live_auto_order: true`
+- live環境・live brokerを拒否
+- preflight成功
+- cash/position/order limit確認
+- duplicate holding/order確認
 
-## 認証方式
+ただし、現行broker実装ではTachibanaへの外部注文送信はread-only guardで止まります。ドキュメントや運用上、demo自動発注がproduction-readyであるとは扱いません。
 
-立花証券 e支店 API は単純なAPIキー方式ではありません。
+## Live Trading Policy
 
-v4r9では公開鍵暗号化方式を利用する前提で設計します。
+- live自動売買は禁止
+- live brokerへの自動発注例はdocsに載せない
+- 実注文を出すコードは安全ロックなしに有効化しない
+- PaperBrokerと既存成果物分析を研究・検証の主経路とする
 
-- デモ環境URL: `https://demo-kabuka.e-shiten.jp/e_api_v4r9/`
-- 本番環境URL: `https://kabuka.e-shiten.jp/e_api_v4r9/`
-- e支店の利用設定画面でAPI利用を有効化する必要があります
-- 秘密キー・公開キーの作成と登録が必要です
-- 実装前に公式マニュアルの認証機能を精読します
+## What Must Change Before Any Real Trading Review
 
-秘密鍵、パスワード、第二パスワードはGit管理しません。
+これは実装済み機能ではなく、将来レビュー項目です。
 
-認証方式の詳細メモは `docs/tachibana-auth-v4r9.md` に分離しています。実装前にこのメモと公式マニュアルを確認します。
+- broker API仕様の再確認
+- 注文送信の手動承認フロー
+- 誤発注防止limit
+- 注文取消/失敗時処理
+- 監査ログ
+- 少額・手動承認・段階的検証
+- legal/compliance確認
 
-## Broker差し替え設計
-
-売買実行の出口は `src/broker.py` に分離しています。
-
-- `PaperBroker`: 現在使用する仮想売買Broker
-- `TachibanaDemoBrokerStub`: 立花証券デモ環境用の将来スタブ
-- `TachibanaLiveBrokerStub`: 立花証券ライブ環境用の将来スタブ
-- `KabuStationBrokerStub`: 代替候補として残すkabuステーション用スタブ
-
-次の段階では `TachibanaDemoBroker` を実装し、デモ環境で注文形式、認証、レスポンス、エラー処理を検証します。
-
-最終段階で `TachibanaLiveBroker` を検討します。
-
-## 実売買前の安全条件
-
-立花証券ライブ環境を使う場合、最低限以下が必要です。
-
-- `broker.live_trading_enabled: true`
-- `safety.allow_live_trading: true`
-- `tachibana.environment: live`
-- `storage/STOP_TRADING` が存在しない
-- preflightが重大なエラーを出していない
-- 注文プレビューを人間が確認している
-
-現時点では、これらの条件がそろっても `TachibanaLiveBrokerStub` は例外を出すため、実売買は行われません。
-
-## 誤発注防止方針
-
-- 最初はデモ環境で検証する
-- live移行時も最小金額、少数注文から始める
-- 1日1注文など強い制限を設定する
-- 注文前に必ず `safety.py` を通す
-- 注文前に `preview-orders` で内容を確認する
-- STOP_TRADING ファイルで即時停止できるようにする
-- 注文、約定、拒否、エラーをすべてSQLiteとログに保存する
-
-## 実装予定
-
-- デモ環境ログイン
-- デモ環境トークン管理
-- 現物買い注文
-- 現物売り注文
-- 注文状態確認
-- 約定確認
-- 口座残高取得
-- 保有銘柄取得
-- APIエラー分類
-- レート制限対応
-
-## 次に必要な調査項目
-
-- デモ環境ログイン方式
-- セッション管理
-- 口座情報取得
-- 現物買い注文API
-- 現物売り注文API
-- 注文取消API
-- 約定照会API
-- API仕様書のURLまたはローカル保存場所
-- 二段階認証の扱い
-- 自動売買時の制約
-- 公開鍵暗号化方式の認証リクエスト形式
-- 秘密キー形式と鍵ファイルの安全な保存方法
-
-## 接続前ヘルスチェック
-
-現時点では実API通信を行わず、設定と認証情報の有無だけを確認します。
-
-```bash
-python src/main.py --mode tachibana-healthcheck --env demo
-```
-
-出力先は以下です。
-
-- `reports/backtests/tachibana_healthcheck_latest.md`
-- `reports/backtests/tachibana_healthcheck_latest.json`
-
-認証情報の値は表示・保存しません。
-
-## 注意
-
-本計画は実売買の準備であり、投資助言ではありません。
-
-実売買へ進む場合は、必ず小さく始め、手動監視を行い、誤発注防止を最優先にします。

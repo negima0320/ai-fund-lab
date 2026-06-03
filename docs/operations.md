@@ -1,345 +1,159 @@
-# 運用手順
+# Operations
 
-このRunbookは、Mac上で `ai-fund-lab` をPaperBroker前提で定期実行するための手順です。実売買は行いません。`tachibana_live` の自動実行例は意図的に載せていません。
+このRunbookは、AI Fund Labを研究・検証・PaperBroker前提で使うための手順です。投資助言ではなく、live自動売買は行いません。
 
-## 初回セットアップ
-
-作業ディレクトリへ移動します。
+## First Setup
 
 ```bash
 cd /Users/negishi/work/ai-fund-lab
-```
-
-`.env` を作成し、J-QuantsなどのAPIキーを設定します。秘密情報やAPIキーはREADME、docs、Git管理対象ファイルには書きません。
-
-```bash
-cp .env.example .env
-```
-
-`.env.example` がない場合は `.env` を新規作成し、必要な環境変数だけを書きます。`.env` はGit管理しません。
-
-仮想環境を作成します。
-
-```bash
 python3 -m venv .venv
-```
-
-依存関係をインストールします。
-
-```bash
 .venv/bin/python -m pip install -r requirements.txt
-```
-
-DBを初期化します。
-
-```bash
 .venv/bin/python src/main.py --mode init-db --profile rookie_dealer_02_v2_1
+.venv/bin/python src/main.py --mode validate-config
 ```
 
-J-Quants接続を確認します。
+`.env` にはJ-Quants等の秘密情報を置きます。APIキーや口座情報はdocsやGit管理対象ファイルに書きません。
+
+## Lightweight Health Checks
 
 ```bash
-.venv/bin/python src/main.py --mode healthcheck --provider jquants --profile rookie_dealer_02_v2_1
+.venv/bin/python src/main.py --mode help
+.venv/bin/python src/main.py --mode status --profile rookie_dealer_02_v2_1
+.venv/bin/python src/main.py --mode list-profiles
+.venv/bin/python src/main.py --mode profile-info --profile rookie_dealer_02_v2_51
+.venv/bin/python src/main.py --mode validate-config
 ```
 
-## 基本運用フロー
+`validate-config --strict` はwarningも失敗扱いにするため、長期検証前の最終確認に使います。
 
-毎朝の基本フローは以下です。
+## Backtest
 
-1. `preflight`
-2. `full-paper-run`
-3. `analyze`
-4. report確認
-
-例:
+単体profileの検証:
 
 ```bash
-python src/main.py --mode preflight --provider jquants --profile rookie_dealer_02_v2_1
-python src/main.py --mode full-paper-run --provider jquants --profile rookie_dealer_02_v2_1 --start-date YYYY-MM-DD --end-date YYYY-MM-DD
-python src/main.py --mode analyze --profile rookie_dealer_02_v2_1
+.venv/bin/python src/main.py --mode backtest \
+  --profile rookie_dealer_02_v2_26 \
+  --start-date YYYY-MM-DD \
+  --end-date YYYY-MM-DD \
+  --skip-price-fetch \
+  --fast-analysis \
+  --strict-integrity
 ```
 
-定期実行では、直接 `python` を呼ばず、`.venv/bin/python` を絶対パスで指定するか、`scripts/run_daily_paper.sh` を呼びます。
+主な出力:
+
+- `logs/backtests/<profile_id>/<START>_to_<END>/backtest_summary.json`
+- `logs/backtests/<profile_id>/<START>_to_<END>/summary.csv`
+- `logs/backtests/<profile_id>/<START>_to_<END>/trades.csv`
+- `reports/<profile_id>/backtests/analysis_latest.md`
+- `reports/<profile_id>/backtests/feature_analysis.md`
+- `reports/<profile_id>/backtests/selection_quality.md`
+
+## Run Experiments
+
+registry上のbaseとexperimentを同一期間で比較します。
 
 ```bash
-scripts/run_daily_paper.sh
+.venv/bin/python src/main.py --mode run-experiments \
+  --base-profile rookie_dealer_02_v2_26 \
+  --profiles rookie_dealer_02_v2_26 rookie_dealer_02_v2_51 \
+  --start-date YYYY-MM-DD \
+  --end-date YYYY-MM-DD \
+  --skip-price-fetch \
+  --fast-analysis \
+  --summary-only \
+  --strict-integrity
 ```
 
-分析だけ再実行する場合:
+`--profiles` にはbase profileを含めても構いません。`run-experiments` は、指定profileが `config/profile_registry.yaml` 上でbaseのexperimentとして認識されるか検証します。`deprecated` profileは一括実験対象から外れます。
+
+主な出力:
+
+- `reports/experiments/<START>_to_<END>/<base_profile>/experiment_summary.md`
+- `reports/experiments/<START>_to_<END>/<base_profile>/experiment_summary.json`
+- `reports/experiments/<START>_to_<END>/<base_profile>/compare_profiles.md`
+- `reports/experiments/<START>_to_<END>/<base_profile>/compare_profiles.json`
+
+## Feature Analysis Regeneration
+
+既存成果物から `feature_analysis.*` だけ再生成できます。
 
 ```bash
-scripts/run_analyze.sh
+.venv/bin/python src/feature_analysis.py --profile rookie_dealer_02_v2_51
+PYTHONPATH=. .venv/bin/python -m src.feature_analysis --profile rookie_dealer_02_v2_51
 ```
 
-## 運用スケジュール
-
-運用時刻は `config/operation_schedule.yaml` に明記します。基準市場は東京市場、タイムゾーンは `Asia/Tokyo` です。
-
-基本スケジュール:
-
-- 16:00以降に当日終値ベースのデータ取得を行う
-- 16:10に当日終値ベースで銘柄選定を行う
-- 16:30にPaperBroker runとレポート作成を行う
-- 翌営業日 08:30 に注文候補を確認する
-- 翌営業日 08:35 に `tachibana_demo` の自動発注検証を行う
-- 09:00〜09:30 に人間が手動で発注判断する
-
-実行ポリシー:
-
-- 銘柄選定は `previous_close`、つまり前営業日または当日確定済み終値を基準にする
-- 注文判断は `next_business_day_after_open` を想定する
-- `tachibana_demo` では `auto_demo` を使い、テスト環境の自動発注を検証する
-- `auto_order_enabled: true` は `tachibana_demo` だけに限定する
-- `forbid_live_auto_order: true` を維持する
-- live実売買は手動で行う
-
-cron / launchd は16:30の銘柄選定と、08:35の `tachibana_demo` 自動発注検証だけを設定します。`tachibana_live` の自動実行例は作りません。
-
-## PaperBroker実行
-
-PaperBrokerで通し実行します。実売買は行わず、発注先はpaperです。
+期間を指定する場合:
 
 ```bash
-.venv/bin/python src/main.py --mode full-paper-run --provider jquants --profile rookie_dealer_02_v2_1 --start-date YYYY-MM-DD --end-date YYYY-MM-DD
+.venv/bin/python src/feature_analysis.py \
+  --profile rookie_dealer_02_v2_51 \
+  --start-date YYYY-MM-DD \
+  --end-date YYYY-MM-DD
 ```
 
-実行後、以下を確認します。
+## Reading Experiment Summary
 
-- `reports/rookie_dealer_02_v2_1/backtests/`
-- `reports/rookie_dealer_02_v2_1/backtests/analysis_latest.md`
-- `logs/paper_run.log`
+`experiment_summary.md/json` の主な項目です。
 
-## tachibana_demo自動売買フロー
+| field | Meaning |
+| --- | --- |
+| `final_assets` | 最終総資産 |
+| `net_cumulative_profit` | レポート上の累積損益指標。最終資産検算にはasset reconciliationを優先 |
+| `realized_profit_total` | 決済済み実現損益 |
+| `unrealized_profit_total` | 期末保有分の含み損益 |
+| `profit_factor` | gross profit / gross loss |
+| `selection_diff_count` | baseと選定が変わった件数 |
+| `outcome_diff_count` | baseと取引・損益結果が変わった件数 |
+| `practical_effect` | 差分が実質的に出たか |
+| `verdict` | `candidate` / `needs_review` / `rejected` / `no_practical_effect` |
+| `verdict_reason` | 判定理由 |
 
-立花証券のテスト環境だけで、自動発注の流れを検証できます。
+## Integrity and Capital Flow
 
-夕方の銘柄選定:
+`feature_analysis.md` で重要な監査:
 
-```bash
-scripts/run_evening_selection.sh
-```
+- `Backtest Result Integrity Audit`
+- `Score Integrity Audit`
+- `Market Filter Audit`
+- `Compounding / Capital Flow Audit`
+- `Monthly Performance Audit`
+- `Capital Utilization Audit`
+- `Affordable Fallback Buy Audit`
+- `Allocation Strategy Audit`
+- `Trade Market Audit`
 
-このスクリプトは `preflight`、データ取得、screen、score、`preview-orders`、analyzeを実行し、翌営業日の注文候補を `reports/<profile_id>/order_previews/` に保存します。
-
-翌朝のdemo自動発注:
-
-```bash
-scripts/run_demo_auto_order.sh
-```
-
-このスクリプトは以下を確認してから `tachibana_demo` に注文候補を送ります。
-
-- `tachibana.environment` が `demo`
-- `broker.provider` が `tachibana_demo`
-- `broker.provider` が `tachibana_live` ではない
-- `auto_order_enabled` が `true`
-- `forbid_live_auto_order` が `true`
-- `preflight` が成功する
-- 残高取得
-- 保有銘柄取得
-- 二重注文チェック
-- `max_positions` チェック
-- `max_daily_buy_amount` チェック
-- `max_single_order_amount` チェック
-
-以下の場合は必ず停止します。
-
-- `env=live`
-- `broker=tachibana_live`
-- `auto_order_enabled=false`
-- `forbid_live_auto_order=true` かつlive broker
-- `preflight` 失敗
-- cash不足
-- 同一銘柄保有中
-- `max_positions` 超過
-- 当日注文上限超過
-
-発注結果は `logs/demo_orders.log` に保存します。これはテスト環境向けです。live自動売買は禁止です。
-
-## 分析実行
-
-```bash
-.venv/bin/python src/main.py --mode analyze --profile rookie_dealer_02_v2_1
-```
-
-分析レポート:
-
-- `reports/rookie_dealer_02_v2_1/backtests/analysis_latest.md`
-- `reports/rookie_dealer_02_v2_1/backtests/analysis_latest.json`
-
-## レポート確認
-
-毎朝、最低限以下を確認します。
-
-- 日次損益
-- 勝率
-- PF
-- 最大ドローダウン
-- Exit Reason Analysis
-- Holding Period Optimization
-- Walk Forward Validation
-- Market Regime Performance Analysis
-- Daily Paper Report
-- Manual Approval Flow
-- `preview_orders`
-
-## cron運用例
-
-Macのcronで平日朝に実行する例です。
-
-```bash
-crontab -e
-```
-
-平日 16:30 に実行:
-
-```cron
-30 16 * * 1-5 cd /Users/negishi/work/ai-fund-lab && /Users/negishi/work/ai-fund-lab/.venv/bin/python src/main.py --mode full-paper-run --provider jquants --profile rookie_dealer_02_v2_1 >> logs/cron.log 2>&1
-```
-
-推奨はスクリプト経由です。
-
-```cron
-30 16 * * 1-5 cd /Users/negishi/work/ai-fund-lab && scripts/run_evening_selection.sh >> logs/evening_selection.log 2>&1
-35 8 * * 1-5 cd /Users/negishi/work/ai-fund-lab && scripts/run_demo_auto_order.sh >> logs/demo_auto_order.log 2>&1
-```
-
-注意:
-
-- cronはログインシェルの環境変数を読まない
-- `.env` を必ずアプリ側で読み込む
-- python は `.venv/bin/python` を絶対パスで指定
-- 作業ディレクトリを `cd` で明示
-- `logs` ディレクトリが必要
-- 自動実行はPaperBrokerだけにする
-
-## launchd運用例
-
-Macではcronよりlaunchd推奨です。plist例は以下にあります。
+`Compounding / Capital Flow Audit` では `asset_reconciliation` を確認します。
 
 ```text
-docs/launchd/com.negima.ai-fund-lab.paper-run.plist
+final_assets ≒ initial_capital
+  + realized_profit_total
+  + unrealized_profit_total
+  + external_cash_flow_total
 ```
 
-配置例:
+`final_assets` と `initial_capital + net_cumulative_profit` が一致しないだけでは、必ずしも資金フロー異常ではありません。`capital_flow_status` と `asset_reconciliation.status` を見ます。
+
+## PaperBroker and Live Safety
+
+通常運用はPaperBrokerです。TachibanaはRead-only brokerとして残高・保有・注文・約定参照IFがありますが、実API発注は `LiveTradingDisabledError` で止まります。KabuStationは現時点ではスタブです。
+
+`storage/STOP_TRADING` を置くと新規買付を止める安全フラグとして扱います。
+
+## Cleanup
+
+大きいファイルは主に以下に溜まります。
+
+- `data/raw/prices_*.json`
+- `data/processed/<profile_id>/`
+- `data/processed/common/`
+- `logs/backtests/<profile_id>/`
+- `reports/experiments/`
+
+削除前に `storage-audit` / `cleanup-storage` / `inspect-cache` / `clean-*` 系modeを確認してください。
 
 ```bash
-mkdir -p ~/Library/LaunchAgents
-cp docs/launchd/com.negima.ai-fund-lab.paper-run.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.negima.ai-fund-lab.paper-run.plist
+.venv/bin/python src/main.py --mode storage-audit
+.venv/bin/python src/main.py --mode inspect-cache --profile rookie_dealer_02_v2_51
 ```
 
-停止する場合:
-
-```bash
-launchctl unload ~/Library/LaunchAgents/com.negima.ai-fund-lab.paper-run.plist
-```
-
-plistには以下を含めます。
-
-- `WorkingDirectory`
-- `ProgramArguments`
-- `StandardOutPath`
-- `StandardErrorPath`
-- `StartCalendarInterval`
-- `Weekday`
-- `Hour`
-- `Minute`
-
-## ログ
-
-主な確認先:
-
-- `logs/cron.log`
-- `logs/paper_run.log`
-- `reports/{profile}/backtests/`
-- `reports/{profile}/backtests/analysis_latest.md`
-
-ログが出ていない場合は、cron/launchdの作業ディレクトリ、`.venv/bin/python` の絶対パス、`logs` ディレクトリの有無を確認します。
-
-## 異常時の停止方法
-
-新規買付を止める場合:
-
-```bash
-mkdir -p storage
-touch storage/STOP_TRADING
-```
-
-解除する場合:
-
-```bash
-rm storage/STOP_TRADING
-```
-
-自動実行そのものを止める場合は、cronの行をコメントアウトするか、launchdのAgentをunloadします。
-
-## 安全運用ルール
-
-- 初期はpaper brokerのみ
-- `tachibana_live` は明示的に有効化しない限り使わない
-- live発注は手動承認フローが完成するまで禁止
-- `.env` にAPIキーを置き、Git管理しない
-- READMEやdocsに秘密情報を書かない
-- 自動実行例はPaperBrokerだけにする
-- `preview_orders` は確認用であり、発注ではない
-
-## よく使うコマンド
-
-状態確認:
-
-```bash
-.venv/bin/python src/main.py --mode status --profile rookie_dealer_02_v2_1
-```
-
-J-Quants接続確認:
-
-```bash
-.venv/bin/python src/main.py --mode healthcheck --provider jquants --profile rookie_dealer_02_v2_1
-```
-
-事前チェック:
-
-```bash
-.venv/bin/python src/main.py --mode preflight --provider jquants --profile rookie_dealer_02_v2_1
-```
-
-PaperBroker通し実行:
-
-```bash
-.venv/bin/python src/main.py --mode full-paper-run --provider jquants --profile rookie_dealer_02_v2_1 --start-date YYYY-MM-DD --end-date YYYY-MM-DD
-```
-
-分析:
-
-```bash
-.venv/bin/python src/main.py --mode analyze --profile rookie_dealer_02_v2_1
-```
-
-profile比較:
-
-```bash
-.venv/bin/python src/main.py --mode compare-profiles --profiles rookie_dealer_02_v2_1 rookie_dealer_02_v2_4 --start-date YYYY-MM-DD --end-date YYYY-MM-DD
-```
-
-AI改善サマリ:
-
-```bash
-.venv/bin/python src/main.py --mode export-ai-summary --profile rookie_dealer_02_v2_1 --start-date YYYY-MM-DD --end-date YYYY-MM-DD
-```
-
-## 生成物の保存方針
-
-SQLiteは運用データの正本です。DBファイルはGit管理しません。
-
-`logs/` は分析用データとして扱い、Git管理しません。
-
-`data/raw/` はJ-Quants APIの取得キャッシュです。再取得可能なデータであり、Git管理しません。
-
-`data/processed/` は指標、候補銘柄、採点済み候補などの中間生成物です。再生成可能なため、Git管理しません。
-
-`articles/drafts/` はnote投稿前の生成物です。ローカルで確認・編集する下書きとして扱い、Git管理しません。
-
-`articles/published/` は公開済み記事としてGit管理します。
-
-`reports/` は通常の生成レポートをGit管理しません。ただし、バックテストの共有・比較に使う `reports/backtests/` はGit管理対象とします。
