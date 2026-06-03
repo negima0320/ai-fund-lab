@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from copy import deepcopy
 
-from db import initialize_database, save_market_context, save_scoring_results, save_trades
+from db import get_database_path, initialize_database, save_market_context, save_scoring_results, save_trades
 from feature_analysis import (
     _backtest_integrity_audits,
     _capital_utilization_audit,
     _compounding_capital_flow_audit,
     _market_section_performance_audit,
     _market_section_performance_audit_lines,
+    _merge_scoring_rows_with_processed_scores,
     _monthly_performance_audit,
     _price_band_affordability_audit,
     _standard_ranking_input_audit,
@@ -201,6 +203,190 @@ def test_market_section_performance_audit_summarizes_market_sections(config_copy
     assert "- above_min_score: 1" in rendered
     assert "| 2026-01-05 | 1002 | Standard Winner | Standard | 51.00 | 2.00 | true |" in rendered
     assert any("Standard" in line for line in lines)
+
+
+def test_save_scoring_results_persists_standard_market_section(config_copy: dict, tmp_path) -> None:
+    config_copy["profile_id"] = "rookie_dealer_02_v2_47"
+    initialize_database(config_copy, tmp_path)
+    save_scoring_results(
+        config_copy,
+        tmp_path,
+        {
+            "date": "2026-01-05",
+            "scores": [
+                {
+                    "code": "2001",
+                    "name": "Standard Scored",
+                    "section": "TSEStandard",
+                    "market_section": "TSEStandard",
+                    "listing_market": "TSEStandard",
+                    "rank": 3,
+                    "total_score": 48,
+                    "technical_score": 44,
+                    "confidence": 0.8,
+                    "selected": False,
+                    "reason": "通常基準45点には届かないため落選",
+                }
+            ],
+        },
+    )
+
+    with sqlite3.connect(get_database_path(config_copy, tmp_path)) as connection:
+        row = connection.execute(
+            "SELECT section, market_section, listing_market FROM scoring_results WHERE profile_id = ? AND code = ?",
+            ("rookie_dealer_02_v2_47", "2001"),
+        ).fetchone()
+
+    assert row == ("TSEStandard", "TSEStandard", "TSEStandard")
+
+
+def test_processed_scored_candidates_fill_standard_scoring_audit(config_copy: dict, tmp_path) -> None:
+    profile_id = "rookie_dealer_02_v2_47"
+    processed_dir = tmp_path / "data" / "processed" / profile_id
+    processed_dir.mkdir(parents=True)
+    (processed_dir / "scored_candidates_2026-01-05.json").write_text(
+        json.dumps(
+            {
+                "date": "2026-01-05",
+                "scores": [
+                    {
+                        "date": "2026-01-05",
+                        "code": "60470",
+                        "name": "Gunosy",
+                        "market_section": "TSEStandard",
+                        "section": "TSEStandard",
+                        "listing_market": "TSEStandard",
+                        "rank": 49,
+                        "total_score": 23.0,
+                        "selected": False,
+                        "rejected_reason": "below_min_score",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    merged = _merge_scoring_rows_with_processed_scores(
+        [
+            {
+                "date": "2026-01-05",
+                "code": "60470",
+                "name": "Gunosy",
+                "market_section": None,
+                "rank": 49,
+                "total_score": 23.0,
+                "selected": False,
+            }
+        ],
+        tmp_path,
+        profile_id,
+        "2026-01-01",
+        "2026-01-31",
+    )
+
+    audit = _market_section_performance_audit(
+        {"all_trades": []},
+        config_copy,
+        merged,
+        market_filter_audit={
+            "candidate_market_breakdown_before_filter": {"Standard": 1},
+            "candidate_market_breakdown_after_filter": {"Standard": 1},
+            "candidate_market_breakdown_after_screening": {"Standard": 1},
+        },
+    )
+
+    assert len(merged) == 1
+    assert merged[0]["market_section"] == "TSEStandard"
+    assert audit["scored_candidate_audit"]["scored_count_by_market"]["Standard"] == 1
+    assert audit["standard_funnel_audit"]["after_scoring"] == 1
+    assert audit["standard_funnel_audit"]["score_assigned"] == 1
+    assert audit["standard_funnel_audit"]["top_20_standard_by_total_score"][0]["code"] == "60470"
+
+
+def test_standard_funnel_uses_market_specific_min_score(config_copy: dict) -> None:
+    config_copy["selection"]["min_score"] = 45
+    config_copy["selection"]["market_min_score_overrides"] = {"TSEStandard": 35}
+    audit = _market_section_performance_audit(
+        {"all_trades": []},
+        config_copy,
+        [
+            {
+                "date": "2026-01-05",
+                "code": "2001",
+                "name": "Standard Candidate",
+                "market_section": "TSEStandard",
+                "total_score": 37,
+                "selected": True,
+            }
+        ],
+        market_filter_audit={
+            "candidate_market_breakdown_before_filter": {"Standard": 1},
+            "candidate_market_breakdown_after_filter": {"Standard": 1},
+            "candidate_market_breakdown_after_screening": {"Standard": 1},
+        },
+    )
+
+    assert audit["standard_funnel_audit"]["min_score"] == 35
+    assert audit["standard_funnel_audit"]["above_min_score"] == 1
+    assert audit["standard_funnel_audit"]["selected"] == 1
+
+
+def test_standard_selection_audit_reports_scored_but_not_selected_reason(config_copy: dict) -> None:
+    config_copy["selection"]["min_score"] = 45
+    config_copy["selection"]["max_selected"] = 10
+    config_copy["selection"]["market_min_score_overrides"] = {"TSEStandard": 35}
+    config_copy.setdefault("market_filter", {})["allowed_sections"] = ["TSEPrime", "TSEStandard"]
+    audit = _market_section_performance_audit(
+        {"all_trades": []},
+        config_copy,
+        [
+            {
+                "date": "2026-01-05",
+                "code": "2001",
+                "name": "Standard Above Min",
+                "market_section": "TSEStandard",
+                "total_score": 37,
+                "rank": 12,
+                "selected": False,
+                "rejected_reason": "上位候補だが最大採用数を超えたため落選",
+            },
+            {
+                "date": "2026-01-05",
+                "code": "2002",
+                "name": "Standard Below Min",
+                "market_section": "TSEStandard",
+                "total_score": 32,
+                "rank": 13,
+                "selected": False,
+                "rejected_reason": "通常基準35点には届かないため落選",
+            },
+        ],
+        market_filter_audit={
+            "candidate_market_breakdown_before_filter": {"Standard": 2},
+            "candidate_market_breakdown_after_filter": {"Standard": 2},
+            "candidate_market_breakdown_after_screening": {"Standard": 2},
+        },
+    )
+
+    selection_audit = audit["standard_selection_audit"]
+    assert audit["standard_funnel_audit"]["above_min_score"] == 1
+    assert audit["standard_funnel_audit"]["selected"] == 0
+    assert selection_audit["standard_above_min_score_count"] == 1
+    assert selection_audit["standard_selected_count"] == 0
+    assert selection_audit["above_min_not_selected_count"] == 1
+    assert selection_audit["selection_exclusion_reason_counts"]["outside_selection_rank"] == 1
+    assert selection_audit["selection_exclusion_reason_counts"]["below_market_min_score"] == 1
+    rendered = render_feature_analysis_markdown(
+        {
+            "profile_id": "p",
+            "profile_name": "p",
+            "closed_trade_count": 0,
+            "market_section_performance_audit": audit,
+        }
+    )
+    assert "## Standard Selection Audit" in rendered
+    assert "| 2026-01-05 | 2001 | Standard Above Min | Standard | 37.00 | 12.00 | 35.00 | false | outside_selection_rank |" in rendered
 
 
 def test_standard_scoring_funnel_audit_reports_candidates_missing_from_scored_output(

@@ -5300,11 +5300,21 @@ def select_experiment_profiles(
     experiments = registry_experiment_profile_ids(base_profile_id, registry)
     if not requested_profiles:
         return experiments
-    requested = [profile_id for profile_id in requested_profiles if profile_id != base_profile_id]
+    requested = [profile_id for profile_id in _normalize_profile_ids(requested_profiles) if profile_id != base_profile_id]
     unknown = sorted(set(requested) - set(experiments))
     if unknown:
         raise SystemExit(f"Profiles are not experiments for base {base_profile_id}: {', '.join(unknown)}")
     return [profile_id for profile_id in experiments if profile_id in set(requested)]
+
+
+def _normalize_profile_ids(profile_ids: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    for value in profile_ids or []:
+        for item in str(value).split(","):
+            profile_id = item.strip()
+            if profile_id:
+                normalized.append(profile_id)
+    return normalized
 
 
 def build_experiment_batch_summary(
@@ -6954,6 +6964,7 @@ def _effective_config_differences(base_config: dict[str, Any], target_config: di
         ("selection", "min_score"),
         ("selection", "fallback_min_score"),
         ("selection", "top_pick_min_score"),
+        ("selection", "market_min_score_overrides"),
         ("selection", "conditional_selection"),
         ("selection", "max_rsi_for_new_position"),
         ("volume_filter", "min_volume_ratio"),
@@ -14966,12 +14977,17 @@ def build_score_integrity_audit(
     stale_score_cache_files = _stale_score_cache_files(payloads, config)
     stale_score_cache_count = len(stale_score_cache_files)
     profile_config_mismatch_count = sum(1 for payload in payloads if _score_payload_profile_config_mismatch(payload, config))
-    selected_below_regular_min_score_count = sum(1 for row in selected_rows if _selected_below_threshold(row, config))
+    selected_below_regular_min_score_count = sum(1 for row in selected_rows if _selected_below_regular_threshold(row, config))
+    market_min_score_override_selected_count = sum(
+        1
+        for row in selected_rows
+        if _selected_below_regular_threshold(row, config) and not _selected_below_effective_threshold(row, config)
+    )
     fallback_top_pick_selected_count = sum(1 for row in selected_rows if _fallback_top_pick_selected(row, config))
     invalid_below_threshold_selected_count = sum(
         1
         for row in selected_rows
-        if _selected_below_threshold(row, config) and not _fallback_top_pick_selected(row, config)
+        if _selected_below_effective_threshold(row, config) and not _fallback_top_pick_selected(row, config)
     )
     selected_below_threshold_count = selected_below_regular_min_score_count
     no_trade_fallback_selected_count = fallback_top_pick_selected_count
@@ -15022,6 +15038,7 @@ def build_score_integrity_audit(
         "selected_below_threshold_count": selected_below_threshold_count,
         "no_trade_fallback_selected_count": no_trade_fallback_selected_count,
         "selected_below_regular_min_score_count": selected_below_regular_min_score_count,
+        "market_min_score_override_selected_count": market_min_score_override_selected_count,
         "fallback_top_pick_selected_count": fallback_top_pick_selected_count,
         "invalid_below_threshold_selected_count": invalid_below_threshold_selected_count,
         "market_filter_after_scoring_violation_count": market_filter_after_scoring_violation_count,
@@ -15219,10 +15236,38 @@ def _score_integrity_error_details(counts: dict[str, int]) -> list[str]:
 
 
 def _selected_below_threshold(row: dict[str, Any], config: dict[str, Any]) -> bool:
+    return _selected_below_effective_threshold(row, config)
+
+
+def _selected_below_regular_threshold(row: dict[str, Any], config: dict[str, Any]) -> bool:
     if not row.get("selected"):
         return False
     min_score = float(config.get("selection", {}).get("min_score", 0) or 0)
     return (_safe_float(row.get("total_score")) or 0.0) < min_score
+
+
+def _selected_below_effective_threshold(row: dict[str, Any], config: dict[str, Any]) -> bool:
+    if not row.get("selected"):
+        return False
+    min_score = _effective_market_min_score(row, config)
+    return (_safe_float(row.get("total_score")) or 0.0) < min_score
+
+
+def _effective_market_min_score(row: dict[str, Any], config: dict[str, Any]) -> float:
+    selection = config.get("selection", {}) if isinstance(config.get("selection"), dict) else {}
+    min_score = float(selection.get("min_score", 0) or 0)
+    overrides = selection.get("market_min_score_overrides") or selection.get("min_score_by_market_section") or {}
+    if not isinstance(overrides, dict):
+        return min_score
+    section = market_section_from_row(row)
+    for key, value in overrides.items():
+        if normalize_market_section(key) != section:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return min_score
+    return min_score
 
 
 def _no_trade_fallback_selected(row: dict[str, Any], config: dict[str, Any]) -> bool:
@@ -15277,6 +15322,7 @@ def _score_integrity_audit_lines(audit: dict[str, Any]) -> list[str]:
         "selected_below_threshold_count",
         "no_trade_fallback_selected_count",
         "selected_below_regular_min_score_count",
+        "market_min_score_override_selected_count",
         "fallback_top_pick_selected_count",
         "invalid_below_threshold_selected_count",
         "market_filter_after_scoring_violation_count",

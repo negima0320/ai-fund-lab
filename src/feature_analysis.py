@@ -16,7 +16,7 @@ except ModuleNotFoundError:  # pragma: no cover
     yaml = None
 
 from db import get_database_path
-from market_sections import SECTION_LABELS, market_section_from_row
+from market_sections import SECTION_LABELS, market_section_from_row, normalize_market_section
 from market_regime import REGIME_ORDER, classify_market_regime, dynamic_exposure_policy, dynamic_exposure_target, effective_market_context_for_signal
 from trade_metrics import is_closed_trade_for_metrics
 
@@ -165,6 +165,10 @@ def build_feature_analysis(
             """,
             tuple(scoring_params),
         ))
+    scoring_rows = timed(
+        "feature_analysis_load_processed_sec",
+        lambda: _merge_scoring_rows_with_processed_scores(scoring_rows, root, profile_id, start_date, end_date),
+    )
     closed = timed("feature_analysis_result_integrity_sec", lambda: [row for row in trade_rows if is_closed_trade_for_metrics(row)])
     baseline_closed = timed("feature_analysis_result_integrity_sec", lambda: [row for row in baseline_trade_rows if is_closed_trade_for_metrics(row)])
     market_by_date = timed("feature_analysis_load_processed_sec", lambda: {row.get("date"): row for row in market_rows})
@@ -507,6 +511,10 @@ def render_feature_analysis_markdown(analysis: dict[str, Any]) -> str:
         "## Standard Funnel Audit",
         "",
         *_standard_funnel_audit_lines((analysis.get("market_section_performance_audit", {}) or {}).get("standard_funnel_audit", {})),
+        "",
+        "## Standard Selection Audit",
+        "",
+        *_standard_selection_audit_lines((analysis.get("market_section_performance_audit", {}) or {}).get("standard_selection_audit", {})),
         "",
         "## Standard Scoring Funnel Audit",
         "",
@@ -2394,6 +2402,71 @@ def _processed_scored_rows(root: Path, profile_id: str, start_date: str | None, 
             continue
         rows.append(row)
     return rows
+
+
+def _merge_scoring_rows_with_processed_scores(
+    scoring_rows: list[dict[str, Any]],
+    root: Path,
+    profile_id: str,
+    start_date: str | None,
+    end_date: str | None,
+) -> list[dict[str, Any]]:
+    """Fill stale DB scoring rows from persisted scored_candidates artifacts."""
+    rows: list[dict[str, Any]] = []
+    by_key: dict[str, dict[str, Any]] = {}
+    for row in scoring_rows:
+        item = dict(row)
+        key = _selection_row_key(item)
+        if key:
+            by_key[key] = item
+        rows.append(item)
+
+    for row in _processed_json_stage_rows(root, profile_id, "scored_candidates", start_date, end_date):
+        if not isinstance(row, dict):
+            continue
+        if _number(row.get("total_score")) is None:
+            continue
+        item = dict(row)
+        key = _selection_row_key(item)
+        if not key:
+            continue
+        existing = by_key.get(key)
+        if existing is None:
+            item.setdefault("source", "processed_scored_candidates")
+            rows.append(item)
+            by_key[key] = item
+            continue
+        for field in [
+            "section",
+            "market_section",
+            "listing_market",
+            "name",
+            "total_score",
+            "rank",
+            "selected",
+            "rejected_reason",
+            "reason",
+            "score_components",
+            "round_lot_amount",
+        ]:
+            if _is_missing_scoring_field(existing.get(field)) and not _is_missing_scoring_field(item.get(field)):
+                existing[field] = item.get(field)
+
+    return sorted(rows, key=lambda item: (
+        str(item.get("date") or item.get("signal_date") or ""),
+        _number(item.get("rank")) if _number(item.get("rank")) is not None else 999999,
+        str(item.get("code") or ""),
+    ))
+
+
+def _is_missing_scoring_field(value: Any) -> bool:
+    if value is None:
+        return True
+    if value == "":
+        return True
+    if isinstance(value, str) and value.lower() in {"unknown", "nan", "none", "null"}:
+        return True
+    return False
 
 
 def _processed_json_stage_rows(root: Path, profile_id: str, stage: str, start_date: str | None, end_date: str | None) -> list[dict[str, Any]]:
@@ -5243,6 +5316,7 @@ def _market_section_performance_audit(
     selected_candidate_audit = _selected_candidate_audit(rows, config, market_section_master)
     trade_market_audit = _trade_market_audit(events, config, market_section_master)
     standard_funnel_audit = _standard_funnel_audit(candidate_universe_audit, scored_candidate_audit, selected_candidate_audit, rows, config, market_section_master)
+    standard_selection_audit = _standard_selection_audit(rows, config, market_section_master)
     return {
         "status": "OK",
         "market_section_master_lookup_count": len(market_section_master),
@@ -5255,6 +5329,7 @@ def _market_section_performance_audit(
         "average_round_lot_amount_by_market": _average_by_market(rows, config, selected_only=False, market_section_master=market_section_master),
         "stage_funnel_by_market": _market_stage_funnel(candidate_universe_audit, scored_candidate_audit, selected_candidate_audit, trade_market_audit),
         "standard_funnel_audit": standard_funnel_audit,
+        "standard_selection_audit": standard_selection_audit,
         "candidate_universe_audit": candidate_universe_audit,
         "scored_candidate_audit": scored_candidate_audit,
         "selected_candidate_audit": selected_candidate_audit,
@@ -5401,12 +5476,10 @@ def _standard_funnel_audit(
         for row in scoring_rows
         if isinstance(row, dict) and _market_section_label(row, market_section_master) == "Standard"
     ]
-    min_score = _number((config or {}).get("selection", {}).get("min_score") if isinstance((config or {}).get("selection"), dict) else None)
-    if min_score is None:
-        min_score = 45.0
+    min_score = _market_specific_min_score_for_label(config, "Standard")
     score_assigned_rows = [row for row in standard_rows if _number(row.get("total_score")) is not None]
     above_min_score_rows = [
-        row for row in score_assigned_rows if (_number(row.get("total_score")) or 0.0) >= min_score
+        row for row in score_assigned_rows if (_number(row.get("total_score")) or 0.0) >= _market_specific_min_score_for_row(row, config, market_section_master)
     ]
     selected_rows = [row for row in standard_rows if bool(row.get("selected"))]
     raw_counts = candidate_universe_audit.get("raw_candidate_count_by_market", {}) if isinstance(candidate_universe_audit, dict) else {}
@@ -5427,6 +5500,140 @@ def _standard_funnel_audit(
         "selected": int((selected_counts or {}).get("Standard", len(selected_rows)) or 0),
         "top_20_standard_by_total_score": _top_standard_candidate_samples(standard_rows, config, market_section_master),
     }
+
+
+def _market_specific_min_score_for_label(config: dict[str, Any] | None, market_label: str) -> float:
+    selection = (config or {}).get("selection", {}) if isinstance((config or {}).get("selection"), dict) else {}
+    default = _number(selection.get("min_score"))
+    if default is None:
+        default = 45.0
+    overrides = selection.get("market_min_score_overrides") or selection.get("min_score_by_market_section") or {}
+    if not isinstance(overrides, dict):
+        return default
+    target_section = {
+        "Prime": "TSEPrime",
+        "Standard": "TSEStandard",
+        "Growth": "TSEGrowth",
+    }.get(market_label, "Unknown")
+    for key, value in overrides.items():
+        if normalize_market_section(key) != target_section:
+            continue
+        override = _number(value)
+        return override if override is not None else default
+    return default
+
+
+def _market_specific_min_score_for_row(
+    row: dict[str, Any],
+    config: dict[str, Any] | None,
+    market_section_master: dict[str, str] | None = None,
+) -> float:
+    return _market_specific_min_score_for_label(config, _market_section_label(row, market_section_master))
+
+
+def _standard_selection_audit(
+    scoring_rows: list[dict[str, Any]],
+    config: dict[str, Any] | None,
+    market_section_master: dict[str, str] | None,
+) -> dict[str, Any]:
+    standard_rows = [
+        row
+        for row in scoring_rows
+        if isinstance(row, dict) and _market_section_label(row, market_section_master) == "Standard"
+    ]
+    scored_rows = [row for row in standard_rows if _number(row.get("total_score")) is not None]
+    above_min_rows = [
+        row
+        for row in scored_rows
+        if (_number(row.get("total_score")) or 0.0) >= _market_specific_min_score_for_row(row, config, market_section_master)
+    ]
+    selected_rows = [row for row in scored_rows if bool(row.get("selected"))]
+    audit_rows = [
+        _standard_selection_row(row, config, market_section_master)
+        for row in scored_rows
+    ]
+    reason_counts: dict[str, int] = {}
+    for row in audit_rows:
+        reason = str(row.get("selection_exclusion_reason") or "unknown")
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    return {
+        "status": "OK",
+        "standard_scored_count": len(scored_rows),
+        "standard_above_min_score_count": len(above_min_rows),
+        "standard_selected_count": len(selected_rows),
+        "above_min_not_selected_count": sum(1 for row in audit_rows if bool(row.get("above_min_score")) and not bool(row.get("selected"))),
+        "selection_exclusion_reason_counts": reason_counts,
+        "rows": audit_rows[:100],
+    }
+
+
+def _standard_selection_row(
+    row: dict[str, Any],
+    config: dict[str, Any] | None,
+    market_section_master: dict[str, str] | None,
+) -> dict[str, Any]:
+    standard_min_score = _market_specific_min_score_for_row(row, config, market_section_master)
+    total_score = _number(row.get("total_score"))
+    selected = bool(row.get("selected"))
+    return {
+        "date": row.get("date") or row.get("signal_date") or row.get("entry_date") or "",
+        "code": row.get("code") or "",
+        "name": row.get("name") or row.get("company_name") or "",
+        "market_section": _market_section_label(row, market_section_master),
+        "total_score": total_score,
+        "score_rank": _number(row.get("rank") or row.get("score_rank")),
+        "standard_min_score": standard_min_score,
+        "above_min_score": bool(total_score is not None and total_score >= standard_min_score),
+        "selected": selected,
+        "selection_exclusion_reason": "selected" if selected else _standard_selection_exclusion_reason(row, config, market_section_master),
+        "raw_reason": row.get("rejected_reason") or row.get("reason") or row.get("selection_reason") or row.get("selected_reason") or "",
+    }
+
+
+def _standard_selection_exclusion_reason(
+    row: dict[str, Any],
+    config: dict[str, Any] | None,
+    market_section_master: dict[str, str] | None,
+) -> str:
+    min_score = _market_specific_min_score_for_row(row, config, market_section_master)
+    total_score = _number(row.get("total_score"))
+    if total_score is None or total_score < min_score:
+        return "below_market_min_score"
+    if not _market_allowed_for_selection(row, config):
+        return "market_not_allowed_for_selection"
+    text = str(row.get("rejected_reason") or row.get("reason") or row.get("selection_reason") or "")
+    lowered = text.lower()
+    if "selected_but_not_affordable" in lowered or "unaffordable" in lowered:
+        return "selected_but_not_affordable"
+    if "allocation" in lowered or "cash" in lowered or "affordable" in lowered or "資金" in text:
+        return "allocation_blocked"
+    max_selected = None
+    selection = (config or {}).get("selection", {}) if isinstance((config or {}).get("selection"), dict) else {}
+    if selection:
+        max_selected = _number(selection.get("max_selected"))
+    rank = _number(row.get("rank") or row.get("score_rank"))
+    if (
+        "最大採用数" in text
+        or "上位候補" in text
+        or "rank" in lowered
+        or (max_selected is not None and rank is not None and rank > max_selected)
+    ):
+        return "outside_selection_rank"
+    return "unknown"
+
+
+def _market_allowed_for_selection(row: dict[str, Any], config: dict[str, Any] | None) -> bool:
+    if not isinstance(config, dict):
+        return True
+    section = market_section_from_row(row)
+    if section == "Unknown":
+        market_filter = config.get("market_filter", {}) if isinstance(config.get("market_filter"), dict) else {}
+        return bool(market_filter.get("allow_unknown_market", False))
+    market_filter = config.get("market_filter", {}) if isinstance(config.get("market_filter"), dict) else {}
+    allowed = market_filter.get("allowed_sections")
+    if isinstance(allowed, list) and allowed:
+        return section in {normalize_market_section(item) for item in allowed}
+    return section == "TSEPrime"
 
 
 def _standard_scoring_funnel_audit(
@@ -7260,6 +7467,34 @@ def _standard_funnel_audit_lines(audit: dict[str, Any]) -> list[str]:
             f"| {row.get('date') or ''} | {row.get('code') or ''} | {row.get('name') or ''} | "
             f"{row.get('market_section') or 'Unknown'} | {_format_number(row.get('total_score'))} | "
             f"{_format_number(row.get('score_rank'))} | {str(bool(row.get('selected'))).lower()} |"
+        )
+    return lines
+
+
+def _standard_selection_audit_lines(audit: dict[str, Any]) -> list[str]:
+    if not audit:
+        return ["- audit: unavailable"]
+    lines = [
+        f"- standard_scored_count: {audit.get('standard_scored_count', 0)}",
+        f"- standard_above_min_score_count: {audit.get('standard_above_min_score_count', 0)}",
+        f"- standard_selected_count: {audit.get('standard_selected_count', 0)}",
+        f"- above_min_not_selected_count: {audit.get('above_min_not_selected_count', 0)}",
+        f"- selection_exclusion_reason_counts: {json.dumps(audit.get('selection_exclusion_reason_counts', {}), ensure_ascii=False, sort_keys=True)}",
+        "",
+        "| date | code | name | market_section | total_score | score_rank | standard_min_score | selected | selection_exclusion_reason |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | --- | --- |",
+    ]
+    rows = audit.get("rows", []) if isinstance(audit.get("rows"), list) else []
+    if not rows:
+        lines.append("| - | - | - | - | - | - | - | - | - |")
+    for row in rows[:100]:
+        if not isinstance(row, dict):
+            continue
+        lines.append(
+            f"| {row.get('date') or ''} | {row.get('code') or ''} | {row.get('name') or ''} | "
+            f"{row.get('market_section') or 'Unknown'} | {_format_number(row.get('total_score'))} | "
+            f"{_format_number(row.get('score_rank'))} | {_format_number(row.get('standard_min_score'))} | "
+            f"{str(bool(row.get('selected'))).lower()} | {row.get('selection_exclusion_reason') or 'unknown'} |"
         )
     return lines
 

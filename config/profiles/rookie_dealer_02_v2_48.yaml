@@ -1,0 +1,110 @@
+# AI Fund Lab profile YAML
+# rookie_dealer_02_v2_47 をベースに、Standard専用min_score 35を検証します。
+
+profile_id: rookie_dealer_02_v2_48
+profile_name: 新人ディーラー2号 v2.48
+description: v2.47ベース Standard専用 min_score 35 検証
+disable_single_order_amount_limit: true
+
+features:
+  market_context: true
+  sector_analysis: true
+  ai_decision: false
+  news: false
+  candlestick_analysis: true
+  relative_strength: true
+  openai_commentary: false
+
+scoring:
+  total_score_formula: technical_plus_relative_strength_market_penalty
+  use_relative_strength_score: true
+  relative_strength_score_weight: 10
+  relative_strength:
+    benchmark: topix
+    windows: [5, 10, 20]
+    score_rules:
+      rs_5d_gt: 0.03
+      rs_5d_points: 3
+      rs_10d_gt: 0.05
+      rs_10d_points: 4
+      rs_20d_gt: 0.08
+      rs_20d_points: 3
+
+ai_decision:
+  enabled: false
+  provider: openai
+  fallback_to_rule_based: true
+  daily_call_limit: 3
+
+ai_commentary:
+  enabled: true
+  provider: rule_based
+  fallback_to_rule_based: true
+
+initial_capital: 1000000
+
+trading:
+  max_positions: 10
+  position_size_ratio: 0.20
+  stop_loss_rate: -0.03
+  take_profit_rate: 0.06
+  max_holding_days: 5
+  use_round_lot: true
+  round_lot_size: 100
+
+execution:
+  stop_loss_execution: intraday_stop
+
+selection:
+  min_score: 45
+  market_min_score_overrides:
+    TSEStandard: 35
+  fallback_min_score: 40
+  min_confidence: 0.70
+  allow_top_pick_when_no_selection: true
+  top_pick_min_score: 40
+  max_selected: 10
+  max_rsi_for_new_position: 65
+  reject_overheated_rsi: true
+
+market_filter:
+  allowed_sections:
+    - TSEPrime
+    - TSEStandard
+  risk_off_min_score: 50
+
+screening:
+  market_overrides:
+    TSEStandard:
+      min_turnover_value: 300000000
+      min_volume_ratio: 1.2
+      require_close_above_ma5: false
+      require_ma5_above_ma25: false
+      rsi_min: 35
+      rsi_max: 75
+      max_five_day_volatility: 0.16
+      fallback:
+        min_turnover_value: 200000000
+        min_volume_ratio: 1.0
+        rsi_min: 30
+        rsi_max: 78
+        max_five_day_volatility: 0.20
+
+volume_filter:
+  enabled: true
+  min_volume_ratio: 2.0
+
+capital_utilization_policy:
+  enabled: true
+  target_exposure: 0.9
+  min_cash_buffer: 50000
+  buy_lot_size: 100
+  max_position_value_rate: 0.5
+  buy_as_much_as_possible: true
+  allocation_strategy: relaxed_pending_target_exposure
+
+risk_margin:
+  max_daily_buy_amount: 900000
+  max_single_order_amount: 500000
+  stop_trading_if_daily_loss_rate_exceeds: -0.05
+  stop_trading_if_drawdown_exceeds: -0.15

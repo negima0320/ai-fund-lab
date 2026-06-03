@@ -135,6 +135,9 @@ def test_run_experiments_selects_v2_26_dynamic_exposure_profiles() -> None:
         "rookie_dealer_02_v2_45",
         "rookie_dealer_02_v2_46",
         "rookie_dealer_02_v2_47",
+        "rookie_dealer_02_v2_48",
+        "rookie_dealer_02_v2_49",
+        "rookie_dealer_02_v2_50",
     ]
 
 
@@ -151,6 +154,9 @@ def test_run_experiments_profiles_option_accepts_standard_screening_profiles() -
             "rookie_dealer_02_v2_45",
             "rookie_dealer_02_v2_46",
             "rookie_dealer_02_v2_47",
+            "rookie_dealer_02_v2_48",
+            "rookie_dealer_02_v2_49",
+            "rookie_dealer_02_v2_50",
         ],
     )
 
@@ -160,6 +166,25 @@ def test_run_experiments_profiles_option_accepts_standard_screening_profiles() -
         "rookie_dealer_02_v2_45",
         "rookie_dealer_02_v2_46",
         "rookie_dealer_02_v2_47",
+        "rookie_dealer_02_v2_48",
+        "rookie_dealer_02_v2_49",
+        "rookie_dealer_02_v2_50",
+    ]
+
+
+def test_run_experiments_profiles_option_accepts_comma_separated_standard_min_score_profiles() -> None:
+    registry = main_module.load_profile_registry()
+
+    profiles = main_module.select_experiment_profiles(
+        "rookie_dealer_02_v2_26",
+        registry,
+        ["rookie_dealer_02_v2_48,rookie_dealer_02_v2_49,rookie_dealer_02_v2_50"],
+    )
+
+    assert profiles == [
+        "rookie_dealer_02_v2_48",
+        "rookie_dealer_02_v2_49",
+        "rookie_dealer_02_v2_50",
     ]
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from profile_loader import load_profile
+from scoring import _apply_selection_rules, _selection_config
 
 
 def test_rookie_dealer_config_loads(config: dict) -> None:
@@ -331,6 +332,74 @@ def test_rookie_dealer_02_v2_43_to_47_standard_screening_profiles_load() -> None
     assert profile_46["screening"]["market_overrides"]["TSEStandard"]["require_ma5_above_ma25"] is False
     assert profile_47["screening"]["market_overrides"]["TSEStandard"]["rsi_max"] == 75
     assert load_profile("rookie_dealer_02_v2.47")["profile_id"] == "rookie_dealer_02_v2_47"
+
+
+def test_rookie_dealer_02_v2_48_to_50_standard_min_score_profiles_load() -> None:
+    expected = {
+        "rookie_dealer_02_v2_48": 35,
+        "rookie_dealer_02_v2_49": 30,
+        "rookie_dealer_02_v2_50": 25,
+    }
+
+    for profile_id, standard_min_score in expected.items():
+        profile = load_profile(profile_id)
+
+        assert profile["profile_id"] == profile_id
+        assert profile["market_filter"]["allowed_sections"] == ["TSEPrime", "TSEStandard"]
+        assert profile["selection"]["min_score"] == 45
+        assert profile["selection"]["market_min_score_overrides"] == {"TSEStandard": standard_min_score}
+        assert "TSEStandard" in profile["screening"]["market_overrides"]
+        assert profile["capital_utilization_policy"]["allocation_strategy"] == "relaxed_pending_target_exposure"
+
+    assert load_profile("rookie_dealer_02_v2.48")["profile_id"] == "rookie_dealer_02_v2_48"
+    assert load_profile("rookie_dealer_02_v2.49")["profile_id"] == "rookie_dealer_02_v2_49"
+    assert load_profile("rookie_dealer_02_v2.50")["profile_id"] == "rookie_dealer_02_v2_50"
+    assert load_profile("rookie_dealer_02_v2.50")["profile_id"] == "rookie_dealer_02_v2_50"
+
+
+def test_standard_market_min_score_override_selects_only_standard() -> None:
+    profile = load_profile("rookie_dealer_02_v2_48")
+    scoring_rows = [
+        {
+            "code": "2001",
+            "market_section": "TSEStandard",
+            "section": "TSEStandard",
+            "listing_market": "TSEStandard",
+            "total_score": 37,
+            "confidence": 0.8,
+            "selected": False,
+        },
+        {
+            "code": "1001",
+            "market_section": "TSEPrime",
+            "section": "TSEPrime",
+            "listing_market": "TSEPrime",
+            "total_score": 37,
+            "confidence": 0.8,
+            "selected": False,
+        },
+    ]
+
+    _apply_selection_rules(
+        scoring_rows,
+        _selection_config(profile),
+        {
+            "enabled": False,
+            "risk_off_buy_policy": "conservative",
+            "risk_off_max_buy_orders": 1,
+            "risk_off_min_score": 50,
+            "risk_off_disable_top_pick": True,
+            "allowed_sections": {"TSEPrime", "TSEStandard"},
+            "allow_unknown_market": False,
+        },
+        "neutral",
+    )
+
+    assert scoring_rows[0]["selected"] is True
+    assert scoring_rows[0]["effective_min_score"] == 35
+    assert scoring_rows[0]["market_min_score_override_applied"] is True
+    assert scoring_rows[1]["selected"] is False
+    assert scoring_rows[1]["effective_min_score"] == 45
 
 
 def test_rookie_dealer_02_v2_2_profile_relaxes_risk_off_filter() -> None:

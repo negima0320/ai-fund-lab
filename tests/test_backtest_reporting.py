@@ -1852,6 +1852,59 @@ def test_score_integrity_warns_for_invalid_below_threshold_selection(config_copy
     assert audit["warnings"] == ["selected candidate below min_score threshold"]
 
 
+def test_score_integrity_allows_standard_market_min_score_override(config_copy: dict, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    config_copy["profile_id"] = "rookie_dealer_02_v2_48"
+    config_copy.setdefault("dealer", {})["id"] = "rookie_dealer_02_v2_48"
+    config_copy.setdefault("selection", {})["min_score"] = 45
+    config_copy["selection"]["market_min_score_overrides"] = {"TSEStandard": 35}
+    config_copy.setdefault("market_filter", {})["allowed_sections"] = ["TSEPrime", "TSEStandard"]
+    config_version = main_module.config_version_from(config_copy)
+    backtest_dir = tmp_path / "logs" / "backtests" / main_module.profile_id_from(config_copy) / "2026-01-01_to_2026-03-06"
+    backtest_dir.mkdir(parents=True)
+    cache = main_module._score_cache_payload(config_copy, "2026-01-05")
+    row = {
+        "date": "2026-01-05",
+        "code": "2001",
+        "selected": True,
+        "total_score": 37,
+        "technical_score": 37,
+        "relative_strength_score": 0,
+        "investor_context_score": 0,
+        "market_context_score": 0,
+        "penalty_score": 0,
+        "score_components_total": 37,
+        "market_section": "TSEStandard",
+        "selection_reason": "市場別スコア基準35点を満たしたため採用",
+    }
+    main_module.write_json(
+        main_module.processed_profile_path(config_copy, "scored_candidates_2026-01-05.json"),
+        {
+            "date": "2026-01-05",
+            "profile_id": main_module.profile_id_from(config_copy),
+            "config_version": config_version,
+            **cache,
+            "scores": [row],
+            "selected": [row],
+        },
+    )
+
+    audit = main_module.build_score_integrity_audit(
+        config_copy,
+        [{"action": "BUY", "order_status": "FILLED", "signal_date": "2026-01-05", "entry_date": "2026-01-06", "code": "2001"}],
+        backtest_dir,
+        "2026-01-01",
+        "2026-03-06",
+        [{"date": "2026-01-05"}],
+    )
+
+    assert audit["score_integrity_status"] == "OK"
+    assert audit["selected_below_regular_min_score_count"] == 1
+    assert audit["market_min_score_override_selected_count"] == 1
+    assert audit["invalid_below_threshold_selected_count"] == 0
+    assert audit["warnings"] == []
+
+
 def test_execution_model_stats_are_rendered() -> None:
     model = {
         "signal_timing": "after_close",

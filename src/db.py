@@ -1169,6 +1169,24 @@ def save_scoring_results(config: dict[str, Any], root: Path, scoring_log: dict[s
                 for item in scores
             ],
         )
+        connection.executemany(
+            """
+            UPDATE scoring_results
+            SET section = ?, market_section = ?, listing_market = ?
+            WHERE date = ? AND profile_id = ? AND code = ?
+            """,
+            [
+                (
+                    item.get("section"),
+                    item.get("market_section"),
+                    item.get("listing_market"),
+                    target_date,
+                    profile_id,
+                    item.get("code"),
+                )
+                for item in scores
+            ],
+        )
 
 
 def save_ai_decision(config: dict[str, Any], root: Path, ai_decision_log: dict[str, Any]) -> None:

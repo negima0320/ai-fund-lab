@@ -7,7 +7,7 @@ from typing import Any
 
 from candlestick import detect_candlestick_signals
 from earnings_calendar import EARNINGS_FILTER_REJECTED_REASON, earnings_filter_result
-from market_sections import allowed_market_sections, market_section_counts, market_section_from_row
+from market_sections import allowed_market_sections, market_section_counts, market_section_from_row, normalize_market_section
 from market_regime import classify_market_regime
 
 
@@ -486,6 +486,9 @@ def _apply_selection_rules(
         item["conditional_selection_matched"] = conditional_result["matched"]
         item["conditional_selection_reason"] = conditional_result["reason"]
         section = market_section_from_row(item)
+        item_min_score = _effective_regular_min_score(item, selection_config, min_score)
+        item["effective_min_score"] = item_min_score
+        item["market_min_score_override_applied"] = item_min_score != min_score
         market_section_blocked = (
             section == "Unknown" and not allow_unknown_market
         ) or (section != "Unknown" and section not in allowed_sections)
@@ -506,9 +509,11 @@ def _apply_selection_rules(
         elif item.get("rsi_volume_hot_zone_excluded"):
             item["rejected_reason"] = "rsi_volume_hot_zone"
             item["reason"] = item["rejected_reason"]
-        elif _meets_regular_selection(item, {**selection_config, "min_score": min_score}) and selected_count < max_selected:
+        elif _meets_regular_selection(item, {**selection_config, "min_score": item_min_score}) and selected_count < max_selected:
             item["selected"] = True
             reason = "スコア基準を満たしたため採用"
+            if item.get("market_min_score_override_applied"):
+                reason = f"市場別スコア基準{item_min_score:.0f}点を満たしたため採用"
             if risk_off:
                 reason = f"{reason}（risk_offだが高スコアのため限定採用）"
             item["selection_reason"] = reason
@@ -527,8 +532,8 @@ def _apply_selection_rules(
             elif conditional_result["checked"] and not conditional_result["matched"]:
                 item["rejected_reason"] = f"conditional rejected: {conditional_result['reason']}"
             else:
-                item["rejected_reason"] = _real_rejected_reason(item, selected_count, {**selection_config, "min_score": min_score, "max_selected": max_selected})
-            if risk_off and (item["total_score"] < min_score or selected_count >= max_selected):
+                item["rejected_reason"] = _real_rejected_reason(item, selected_count, {**selection_config, "min_score": item_min_score, "max_selected": max_selected})
+            if risk_off and (item["total_score"] < item_min_score or selected_count >= max_selected):
                 item["rejected_reason"] = "risk_offのため買付抑制"
             item["reason"] = item["rejected_reason"]
 
@@ -580,6 +585,7 @@ def _selection_config(config: dict[str, Any]) -> dict[str, Any]:
     allow_if = conditional.get("allow_if", {}) if isinstance(conditional, dict) else {}
     return {
         "min_score": float(selection.get("min_score", 70)),
+        "market_min_score_overrides": _market_min_score_overrides(selection),
         "fallback_min_score": float(selection.get("fallback_min_score", 65)),
         "min_confidence": float(selection.get("min_confidence", config["scoring"].get("confidence_min_for_buy", 0.7))),
         "allow_top_pick_when_no_selection": bool(selection.get("allow_top_pick_when_no_selection", True)),
@@ -607,6 +613,40 @@ def _selection_config(config: dict[str, Any]) -> dict[str, Any]:
             "reason": str(investor_filter.get("reason", "investor_context_negative")) if isinstance(investor_filter, dict) else "investor_context_negative",
         },
     }
+
+
+def _market_min_score_overrides(selection: dict[str, Any]) -> dict[str, float]:
+    raw = selection.get("market_min_score_overrides") or selection.get("min_score_by_market_section") or {}
+    if not isinstance(raw, dict):
+        return {}
+    overrides: dict[str, float] = {}
+    for key, value in raw.items():
+        section = normalize_market_section(key)
+        if section == "Unknown":
+            continue
+        try:
+            overrides[section] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return overrides
+
+
+def _effective_regular_min_score(
+    item: dict[str, Any],
+    selection_config: dict[str, Any],
+    active_min_score: float,
+) -> float:
+    overrides = selection_config.get("market_min_score_overrides", {})
+    if not isinstance(overrides, dict) or not overrides:
+        return active_min_score
+    section = market_section_from_row(item)
+    override = overrides.get(section)
+    if override is None:
+        return active_min_score
+    base_min_score = float(selection_config.get("min_score", active_min_score) or active_min_score)
+    if active_min_score > base_min_score:
+        return max(float(override), active_min_score)
+    return float(override)
 
 
 def _market_filter_config(config: dict[str, Any]) -> dict[str, Any]:
