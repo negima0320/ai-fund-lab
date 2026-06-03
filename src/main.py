@@ -10469,12 +10469,15 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
     global BACKTEST_MODE_ACTIVE, BACKTEST_PROFILE_TIMINGS, BACKTEST_JSON_READ_AUDIT, BACKTEST_JSON_READ_PERIOD
     if provider_name != "jquants":
         raise SystemExit("backtest mode currently supports --provider jquants only.")
-    runtime_resolution = _runtime_date_resolution(start_date_text, end_date_text)
+    BACKTEST_MODE_ACTIVE = True
+    BACKTEST_PROFILE_TIMINGS = {}
+    setup_started_at = time.perf_counter()
+    runtime_resolution = _run_timed_backtest_phase("runtime_date_resolution", lambda: _runtime_date_resolution(start_date_text, end_date_text))
     requested_start_text = str(runtime_resolution.get("requested_start_date") or start_date_text)
     requested_end_text = str(runtime_resolution.get("requested_end_date") or end_date_text)
     requested_start_date = date.fromisoformat(requested_start_text)
     end_date = date.fromisoformat(end_date_text)
-    config = load_config(CONFIG_PATH)
+    config = _run_timed_backtest_phase("config_profile_load", lambda: load_config(CONFIG_PATH))
     parsed_start_date = date.fromisoformat(start_date_text)
     effective_start_date = max(parsed_start_date, jquants_earliest_supported_date(config, "prices") or parsed_start_date)
     if effective_start_date != requested_start_date:
@@ -10486,24 +10489,23 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
     start_date_text = start_date.isoformat()
     indicator_fetch_start_date = _indicator_fetch_start_date(start_date, config)
     range_key = f"{start_date_text}_to_{end_date_text}"
-    BACKTEST_MODE_ACTIVE = True
-    BACKTEST_PROFILE_TIMINGS = {}
     BACKTEST_JSON_READ_AUDIT = {"file_count": 0, "out_of_range_count": 0, "out_of_range_sample": []}
     BACKTEST_JSON_READ_PERIOD = (start_date_text, end_date_text)
-    _reset_jquants_api_session()
+    _run_timed_backtest_phase("provider_session_reset", _reset_jquants_api_session)
     total_started_at = time.perf_counter()
     profile_id = profile_id_from(config)
     backtest_dir = ROOT / "logs" / "backtests" / profile_id / range_key
     report_dir = ROOT / "reports" / "backtests" / profile_id / range_key
-    backtest_dir.mkdir(parents=True, exist_ok=True)
-    report_dir.mkdir(parents=True, exist_ok=True)
-    state = initial_live_paper_state(config)
+    _run_timed_backtest_phase("directory_setup", lambda: backtest_dir.mkdir(parents=True, exist_ok=True))
+    _run_timed_backtest_phase("directory_setup", lambda: report_dir.mkdir(parents=True, exist_ok=True))
+    state = _run_timed_backtest_phase("state_initialization", lambda: initial_live_paper_state(config))
     daily_summaries = []
     all_trades = []
     processed_dates = []
     skipped_days: list[dict[str, str]] = []
     trading_dates: list[date] = []
     price_history_dates: list[date] = []
+    _record_backtest_phase_time("backtest_setup_total", time.perf_counter() - setup_started_at)
 
     try:
         print("backtest date range:")
@@ -10544,7 +10546,7 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
         trading_dates = _run_daily_step(2, 3, "detect-trading-days", lambda: available_cached_price_dates(start_date, end_date))
         if not trading_dates:
             raise SystemExit("No cached trading days found for the backtest period. The period may be weekend, holiday, or unavailable.")
-        price_history_dates = available_cached_price_dates(indicator_fetch_start_date, end_date)
+        price_history_dates = _run_timed_backtest_phase("price_history_date_scan", lambda: available_cached_price_dates(indicator_fetch_start_date, end_date))
         price_history_days = len(price_history_dates)
 
         print(f"backtest trading_days: {len(trading_dates)}")
@@ -10561,19 +10563,24 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
         print(f"- same_day_execution: {execution_model['same_day_execution']}")
         print(f"backtest relative_strength: {'enabled' if _relative_strength_enabled_for_indicators(config) else 'disabled'}")
         print(f"backtest fast_analysis: {'enabled' if _fast_analysis_enabled(config) else 'disabled'}")
-        _preload_light_api_context(config, start_date, end_date, indicator_fetch_start_date=indicator_fetch_start_date)
+        _run_timed_backtest_phase("light_context_preload", lambda: _preload_light_api_context(config, start_date, end_date, indicator_fetch_start_date=indicator_fetch_start_date))
         for index, trading_date in enumerate(trading_dates, start=1):
+            day_started_at = time.perf_counter()
             target_date_text = trading_date.isoformat()
             global BACKTEST_DAY_LOG_PREFIX
             BACKTEST_DAY_LOG_PREFIX = f"[day {index}/{len(trading_dates)}] {target_date_text}"
             show_day_progress = _backtest_progress_due(index, len(trading_dates))
             if show_day_progress:
+                progress_started = time.perf_counter()
                 print(f"[day {index}/{len(trading_dates)}] {target_date_text} start")
+                _record_backtest_phase_time("progress_output_sec", time.perf_counter() - progress_started)
+            history_started = time.perf_counter()
             has_history, indicator_input_days, indicator_min_days = _has_minimum_indicator_history(indicator_fetch_start_date, trading_date, config)
             indicator_cache_exists = (
                 processed_profile_path(config, f"indicators_{target_date_text}.json").exists()
                 or (ROOT / "data" / "processed" / f"indicators_{target_date_text}.json").exists()
             )
+            _record_backtest_phase_time("indicator_history_check", time.perf_counter() - history_started)
             if not has_history and not indicator_cache_exists:
                 print(
                     f"[day {index}/{len(trading_dates)}] {target_date_text} warning: "
@@ -10674,6 +10681,7 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
                 return reflection_path, report_path, article_path
 
             if not generate_daily_report and not generate_article:
+                report_skip_started = time.perf_counter()
                 skip_reason = "summary_only=true" if SUMMARY_ONLY_ACTIVE else "backtest daily reporting disabled"
                 if not QUIET_ACTIVE:
                     print(f"[day {index}/{len(trading_dates)}] {target_date_text} reports/articles skipped: {skip_reason}")
@@ -10681,6 +10689,7 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
                 report_path = None
                 article_path = None
                 reflection_path = None
+                _record_backtest_phase_time("daily_report_skip_overhead", time.perf_counter() - report_skip_started)
             else:
                 reflection_path, report_path, article_path = _run_backtest_day_step(index, len(trading_dates), target_date_text, "reports/articles", run_reports_step, lambda: _backtest_report_metrics(report_context))
                 _record_backtest_report_skip(
@@ -10717,22 +10726,27 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
                 save_safety_events(config, ROOT, target_date_text, trade_result.get("safety_events", []))
 
             _run_backtest_day_step(index, len(trading_dates), target_date_text, "db-save", run_db_save_step, lambda: _backtest_db_save_metrics(trades, trade_result))
+            bookkeeping_started = time.perf_counter()
             portfolio_summary["selected_count"] = trade_result.get("selected_count", 0)
             daily_summaries.append(portfolio_summary)
             all_trades.extend(trades)
             processed_dates.append(target_date_text)
+            _record_backtest_phase_time("daily_bookkeeping_sec", time.perf_counter() - bookkeeping_started)
             if show_day_progress:
+                progress_started = time.perf_counter()
                 print(
                     f"[day {index}/{len(trading_dates)}] {target_date_text} done "
                     f"selected={trade_result['selected_count']} buy={sum(1 for trade in trades if trade.get('action') == 'BUY')} "
                     f"sell={sum(1 for trade in trades if trade.get('action') == 'SELL')} assets={portfolio_summary['total_assets']}"
                 )
+                _record_backtest_phase_time("progress_output_sec", time.perf_counter() - progress_started)
             if report_path and not QUIET_ACTIVE:
                 print(f"  report: {report_path.relative_to(ROOT)}")
             if article_path and not QUIET_ACTIVE:
                 print(f"  article: {article_path.relative_to(ROOT)}")
             if reflection_path and not QUIET_ACTIVE:
                 print(f"  reflections: {reflection_path.relative_to(ROOT)}")
+            _record_backtest_phase_time("daily_loop_total", time.perf_counter() - day_started_at)
 
         summary = _run_daily_step(
             3,
@@ -10924,9 +10938,12 @@ def _record_backtest_profile_timing(step_name: str, elapsed: float) -> None:
         return
     bucket = {
         "fetch-period-prices": "fetch_prices",
+        "detect-trading-days": "raw_price_loading",
         "calculate-indicators": "indicator",
+        "market-context": "market_context",
         "screen": "screening",
         "score": "scoring",
+        "ai-decision": "ai_decision",
         "trade": "trading",
         "db-save": "sqlite_access",
         "reports/articles": "report",
@@ -10936,9 +10953,12 @@ def _record_backtest_profile_timing(step_name: str, elapsed: float) -> None:
         return
     BACKTEST_PROFILE_TIMINGS[bucket] = BACKTEST_PROFILE_TIMINGS.get(bucket, 0.0) + elapsed
     phase_aliases = {
+        "detect-trading-days": ["trading_day_detection"],
         "calculate-indicators": ["per_day_pipeline_total", "backtest_day_iteration_total", "indicator_generation_total"],
+        "market-context": ["per_day_pipeline_total", "backtest_day_iteration_total", "market_context_total"],
         "screen": ["per_day_pipeline_total", "backtest_day_iteration_total", "candidate_generation_total"],
         "score": ["per_day_pipeline_total", "backtest_day_iteration_total", "scoring_total"],
+        "ai-decision": ["per_day_pipeline_total", "backtest_day_iteration_total", "ai_decision_total"],
         "trade": ["per_day_pipeline_total", "backtest_day_iteration_total"],
         "db-save": ["per_day_pipeline_total", "backtest_day_iteration_total", "db_read_write_total"],
         "reports/articles": ["per_day_pipeline_total", "backtest_day_iteration_total"],
@@ -10969,6 +10989,24 @@ def _run_timed_backtest_phase(phase: str, action: Any) -> Any:
 
 def _profile_phase_time_snapshot(profile_total_seconds: float) -> dict[str, Any]:
     phases = {
+        "runtime_date_resolution": round(float(BACKTEST_PROFILE_TIMINGS.get("runtime_date_resolution", 0.0)), 4),
+        "config_profile_load": round(float(BACKTEST_PROFILE_TIMINGS.get("config_profile_load", 0.0)), 4),
+        "provider_session_reset": round(float(BACKTEST_PROFILE_TIMINGS.get("provider_session_reset", 0.0)), 4),
+        "directory_setup": round(float(BACKTEST_PROFILE_TIMINGS.get("directory_setup", 0.0)), 4),
+        "state_initialization": round(float(BACKTEST_PROFILE_TIMINGS.get("state_initialization", 0.0)), 4),
+        "backtest_setup_total": round(float(BACKTEST_PROFILE_TIMINGS.get("backtest_setup_total", 0.0)), 4),
+        "raw_price_loading": round(float(BACKTEST_PROFILE_TIMINGS.get("raw_price_loading", 0.0)), 4),
+        "trading_day_detection": round(float(BACKTEST_PROFILE_TIMINGS.get("trading_day_detection", 0.0)), 4),
+        "price_history_date_scan": round(float(BACKTEST_PROFILE_TIMINGS.get("price_history_date_scan", 0.0)), 4),
+        "light_context_preload": round(float(BACKTEST_PROFILE_TIMINGS.get("light_context_preload", 0.0)), 4),
+        "indicator_history_check": round(float(BACKTEST_PROFILE_TIMINGS.get("indicator_history_check", 0.0)), 4),
+        "market_context_total": round(float(BACKTEST_PROFILE_TIMINGS.get("market_context_total", 0.0)), 4),
+        "market_context": round(float(BACKTEST_PROFILE_TIMINGS.get("market_context", 0.0)), 4),
+        "ai_decision_total": round(float(BACKTEST_PROFILE_TIMINGS.get("ai_decision_total", 0.0)), 4),
+        "ai_decision": round(float(BACKTEST_PROFILE_TIMINGS.get("ai_decision", 0.0)), 4),
+        "daily_report_skip_overhead": round(float(BACKTEST_PROFILE_TIMINGS.get("daily_report_skip_overhead", 0.0)), 4),
+        "daily_bookkeeping_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("daily_bookkeeping_sec", 0.0)), 4),
+        "progress_output_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("progress_output_sec", 0.0)), 4),
         "daily_loop_total": round(float(BACKTEST_PROFILE_TIMINGS.get("daily_loop_total", 0.0)), 4),
         "per_day_pipeline_total": round(float(BACKTEST_PROFILE_TIMINGS.get("per_day_pipeline_total", 0.0)), 4),
         "backtest_day_iteration_total": round(float(BACKTEST_PROFILE_TIMINGS.get("backtest_day_iteration_total", 0.0)), 4),
@@ -11042,6 +11080,20 @@ def _profile_phase_time_snapshot(profile_total_seconds: float) -> dict[str, Any]
         "sqlite_access",
         "json_write",
         "summary_generation",
+        "runtime_date_resolution",
+        "config_profile_load",
+        "provider_session_reset",
+        "directory_setup",
+        "state_initialization",
+        "raw_price_loading",
+        "price_history_date_scan",
+        "light_context_preload",
+        "indicator_history_check",
+        "market_context",
+        "ai_decision",
+        "daily_report_skip_overhead",
+        "daily_bookkeeping_sec",
+        "progress_output_sec",
     ]
     measured_sum = round(
         sum(float(phases.get(key, 0.0) or 0.0) for key in accounting_keys if key != "json_read")
@@ -11187,6 +11239,24 @@ def _aggregate_phase_elapsed(performance_report: dict[str, Any]) -> dict[str, fl
         "indicator_parse_or_transform_sec",
         "analysis_json_scan_sec",
         "misc",
+        "runtime_date_resolution",
+        "config_profile_load",
+        "provider_session_reset",
+        "directory_setup",
+        "state_initialization",
+        "backtest_setup_total",
+        "raw_price_loading",
+        "trading_day_detection",
+        "price_history_date_scan",
+        "light_context_preload",
+        "indicator_history_check",
+        "market_context_total",
+        "market_context",
+        "ai_decision_total",
+        "ai_decision",
+        "daily_report_skip_overhead",
+        "daily_bookkeeping_sec",
+        "progress_output_sec",
         "daily_loop_total",
         "per_day_pipeline_total",
         "candidate_generation_total",
