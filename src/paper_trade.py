@@ -560,6 +560,15 @@ def _affordable_fallback_enabled(config: dict[str, Any]) -> bool:
     return bool(_affordable_fallback_policy(config).get("enabled", False))
 
 
+def _affordable_fallback_replace_enabled(config: dict[str, Any]) -> bool:
+    policy = _affordable_fallback_policy(config)
+    return bool(policy.get("replace_unaffordable_selected", True))
+
+
+def _affordable_fallback_surplus_enabled(config: dict[str, Any]) -> bool:
+    return bool(_affordable_fallback_policy(config).get("surplus_after_selection", False))
+
+
 def _dynamic_exposure_regime(item: dict[str, Any]) -> str:
     existing = str(item.get("dynamic_exposure_regime") or item.get("classified_market_regime") or "")
     if existing:
@@ -671,6 +680,80 @@ def _find_affordable_fallback_candidate(
             continue
         regular_priority = 0 if score >= regular_min_score else 1
         candidates.append((regular_priority, -score, round_lot_amount, code, candidate))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+    return dict(candidates[0][4])
+
+
+def _find_surplus_affordable_fallback_candidate(
+    scored_candidates: list[dict[str, Any]],
+    config: dict[str, Any],
+    *,
+    allocation_limit: float,
+    cash: float,
+    pending_buy_amount: float,
+    held_codes: set[str],
+    pending_buy_codes: set[str],
+    same_day_regular_selected_codes: set[str],
+    diagnostics: dict[str, int] | None = None,
+) -> dict[str, Any] | None:
+    if not _affordable_fallback_enabled(config) or not _affordable_fallback_surplus_enabled(config):
+        return None
+    if allocation_limit <= 0:
+        return None
+    policy = _affordable_fallback_policy(config)
+    selection = config.get("selection", {})
+    regular_min_score = float(selection.get("min_score", 0) or 0)
+    configured_min_score = policy.get("min_total_score")
+    min_score = float(configured_min_score) if configured_min_score is not None else regular_min_score
+    max_rank_in_day = policy.get("max_rank_in_day")
+    max_rank_in_day = int(max_rank_in_day) if max_rank_in_day is not None else None
+    min_confidence = float(selection.get("min_confidence", config.get("scoring", {}).get("confidence_min_for_buy", 0.0)) or 0)
+    available_cash = _available_cash_after_buffer(cash, pending_buy_amount, config)
+    blocked_codes = set(held_codes) | set(pending_buy_codes) | set(same_day_regular_selected_codes)
+    candidates = []
+    for candidate in scored_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        code = str(candidate.get("code") or "")
+        if not code or code in blocked_codes:
+            continue
+        if candidate.get("selected"):
+            continue
+        if not market_section_allowed(candidate, config):
+            if diagnostics is not None:
+                diagnostics["market_not_allowed"] = diagnostics.get("market_not_allowed", 0) + 1
+            continue
+        if candidate.get("entry_price_available") is False:
+            if diagnostics is not None:
+                diagnostics["entry_price_missing"] = diagnostics.get("entry_price_missing", 0) + 1
+            continue
+        score = float(candidate.get("total_score") or candidate.get("score") or 0)
+        if score < min_score:
+            if diagnostics is not None:
+                diagnostics["score_below_min"] = diagnostics.get("score_below_min", 0) + 1
+            continue
+        confidence = float(candidate.get("confidence") or 0)
+        if confidence < min_confidence:
+            if diagnostics is not None:
+                diagnostics["confidence_below_min"] = diagnostics.get("confidence_below_min", 0) + 1
+            continue
+        rank_value = candidate.get("daily_score_rank") if candidate.get("daily_score_rank") is not None else candidate.get("rank")
+        rank = int(rank_value) if rank_value not in {None, ""} else None
+        if max_rank_in_day is not None and (rank is None or rank > max_rank_in_day):
+            if diagnostics is not None:
+                diagnostics["rank_out_of_range"] = diagnostics.get("rank_out_of_range", 0) + 1
+            continue
+        round_lot_amount = _candidate_round_lot_amount(candidate, config)
+        if round_lot_amount <= 0 or round_lot_amount > allocation_limit or round_lot_amount > available_cash:
+            if diagnostics is not None:
+                diagnostics["not_affordable"] = diagnostics.get("not_affordable", 0) + 1
+            continue
+        rank_sort = rank if rank is not None else 999999
+        candidates.append((rank_sort, -score, round_lot_amount, code, candidate))
+    if diagnostics is not None:
+        diagnostics["candidate_count"] = len(candidates)
     if not candidates:
         return None
     candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
@@ -1356,7 +1439,7 @@ def execute_real_data_paper_trade(
         if shares <= 0:
             fallback_item = None
             fallback_diagnostics: dict[str, int] = {}
-            if _is_affordable_fallback_skip_reason(skipped_reason):
+            if _is_affordable_fallback_skip_reason(skipped_reason) and _affordable_fallback_replace_enabled(config):
                 fallback_item = _find_affordable_fallback_candidate(
                     scored_candidates,
                     item,
@@ -1520,6 +1603,124 @@ def execute_real_data_paper_trade(
             continue
         held_codes.add(item["code"])
         pending_buy_codes.add(item["code"])
+        if next_day_execution:
+            pending_buy = _pending_order_from_trade(buy_log, trade_date, action="BUY")
+            future_pending.append(pending_buy)
+            trades.append(pending_buy)
+            buy_candidates.append(pending_buy)
+        else:
+            next_positions.append(position)
+            cash -= amount + buy_commission
+            filled = broker.place_buy_order(buy_log)
+            trades.append(filled)
+            buy_candidates.append(filled)
+
+    while _affordable_fallback_surplus_enabled(config) and len(next_positions) + len(pending_buy_codes) < max_positions:
+        pending_buy_amount = (
+            sum(float(order.get("estimated_amount") or order.get("amount") or 0) for order in buy_candidates)
+            if next_day_execution
+            else 0.0
+        )
+        allocation, allocation_reason = _available_buy_budget(
+            cash,
+            initial_cash,
+            state,
+            config,
+            pending_buy_amount=pending_buy_amount,
+            allocation_budget=None,
+            market_context={},
+        )
+        diagnostics: dict[str, int] = {}
+        fallback_item = _find_surplus_affordable_fallback_candidate(
+            scored_candidates,
+            config,
+            allocation_limit=allocation,
+            cash=cash,
+            pending_buy_amount=pending_buy_amount,
+            held_codes=held_codes,
+            pending_buy_codes=pending_buy_codes,
+            same_day_regular_selected_codes=same_day_regular_selected_codes,
+            diagnostics=diagnostics,
+        )
+        if not fallback_item:
+            break
+        fallback_item["selected"] = True
+        fallback_item["affordable_fallback_buy_selected"] = True
+        fallback_item["affordable_fallback_original_code"] = ""
+        fallback_item["affordable_fallback_original_name"] = ""
+        fallback_item["affordable_fallback_reason"] = "surplus_available_cash"
+        fallback_item["affordable_fallback_round_lot_amount"] = _candidate_round_lot_amount(fallback_item, config)
+        fallback_item["affordable_fallback_candidate_count"] = diagnostics.get("candidate_count", 0)
+        fallback_item["selection_source"] = "affordable_fallback_buy"
+        fallback_item["selection_reason"] = "affordable_fallback_buy: 余剰資金で買付可能な高順位候補を追加"
+        fallback_item["selected_reason"] = fallback_item["selection_reason"]
+        fallback_item["reason"] = fallback_item["selection_reason"]
+        dynamic_exposure_fields = _dynamic_exposure_log_fields(config, fallback_item)
+        fallback_item.update(dynamic_exposure_fields)
+        entry_price = _candidate_entry_price(fallback_item)
+        current_price = _candidate_market_price(fallback_item, entry_price)
+        shares, skipped_reason = _calculate_buy_shares(entry_price, allocation, config)
+        if shares <= 0:
+            break
+        amount = shares * entry_price
+        buy_commission = _calculate_commission(amount, config)
+        position = {
+            "code": fallback_item["code"],
+            "name": fallback_item["name"],
+            "sector_name": fallback_item.get("sector_name", ""),
+            "signal_date": fallback_item.get("signal_date") or fallback_item.get("date"),
+            "entry_date": trade_date,
+            "entry_price": entry_price,
+            "entry_price_source": fallback_item.get("entry_price_source"),
+            "signal_close_price": fallback_item.get("signal_close_price"),
+            "entry_open_price": fallback_item.get("entry_open_price"),
+            "entry_gap_rate": fallback_item.get("entry_gap_rate"),
+            "current_price": current_price,
+            "shares": shares,
+            "market_value": round(shares * current_price, 2),
+            "buy_commission": buy_commission,
+            "holding_days": 1,
+            "score": fallback_item["total_score"],
+            "reason": fallback_item.get("selection_reason") or fallback_item.get("selected_reason") or fallback_item["reason"],
+            **_technical_snapshot(fallback_item),
+            "unrealized_profit": round(shares * (current_price - entry_price), 2),
+            "unrealized_profit_rate": round((current_price - entry_price) / entry_price, 4) if entry_price else 0.0,
+        }
+        buy_log = {
+            "trade_id": f"{trade_date}_{fallback_item['code']}_BUY",
+            "action": "BUY",
+            "code": fallback_item["code"],
+            "name": fallback_item["name"],
+            "sector_name": fallback_item.get("sector_name", ""),
+            **_execution_timing_fields(fallback_item),
+            "entry_date": trade_date,
+            "entry_price": entry_price,
+            "shares": shares,
+            "amount": round(amount, 2),
+            "allocation_limit": round(allocation, 2),
+            "allocation_reason": allocation_reason,
+            "allocation_strategy": _allocation_strategy(config),
+            "buy_commission": buy_commission,
+            "score": fallback_item["total_score"],
+            "rank": fallback_item.get("rank"),
+            "daily_score_rank": fallback_item.get("daily_score_rank") or fallback_item.get("rank"),
+            "reason": fallback_item.get("selection_reason") or fallback_item.get("selected_reason") or fallback_item["reason"],
+            **_technical_snapshot(fallback_item),
+            **dynamic_exposure_fields,
+            "round_lot_size": _round_lot_size(config),
+            "use_round_lot": _use_round_lot(config),
+            "skipped_reason": "",
+            "dealer_comment": generate_buy_comment(fallback_item, config),
+        }
+        validation = can_trade(buy_log, _safety_portfolio(state, trades, buy_log), config)
+        if not validation["allowed"]:
+            event = safety_event(trade_date, buy_log, validation)
+            safety_events.append(event)
+            trades.append(_safety_rejected_order(buy_log, validation))
+            break
+        held_codes.add(fallback_item["code"])
+        pending_buy_codes.add(fallback_item["code"])
+        same_day_regular_selected_codes.add(str(fallback_item.get("code") or ""))
         if next_day_execution:
             pending_buy = _pending_order_from_trade(buy_log, trade_date, action="BUY")
             future_pending.append(pending_buy)

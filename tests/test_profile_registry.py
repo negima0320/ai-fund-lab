@@ -138,6 +138,7 @@ def test_run_experiments_selects_v2_26_dynamic_exposure_profiles() -> None:
         "rookie_dealer_02_v2_48",
         "rookie_dealer_02_v2_49",
         "rookie_dealer_02_v2_50",
+        "rookie_dealer_02_v2_51",
     ]
 
 
@@ -157,6 +158,7 @@ def test_run_experiments_profiles_option_accepts_standard_screening_profiles() -
             "rookie_dealer_02_v2_48",
             "rookie_dealer_02_v2_49",
             "rookie_dealer_02_v2_50",
+            "rookie_dealer_02_v2_51",
         ],
     )
 
@@ -169,6 +171,7 @@ def test_run_experiments_profiles_option_accepts_standard_screening_profiles() -
         "rookie_dealer_02_v2_48",
         "rookie_dealer_02_v2_49",
         "rookie_dealer_02_v2_50",
+        "rookie_dealer_02_v2_51",
     ]
 
 

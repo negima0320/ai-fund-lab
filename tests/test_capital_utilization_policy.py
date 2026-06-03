@@ -299,6 +299,35 @@ def test_affordable_fallback_buys_affordable_candidate_when_selected_is_unafford
     assert skipped[0]["affordable_fallback_replaced_by_code"] == "90020"
 
 
+def test_affordable_fallback_surplus_buys_unselected_high_rank_candidate(config_copy: dict) -> None:
+    _enable_policy(config_copy, max_position_value_rate=0.3, allocation_strategy="relaxed_pending_target_exposure")
+    config_copy["affordable_fallback_buy"] = {
+        "enabled": True,
+        "surplus_after_selection": True,
+        "replace_unaffordable_selected": False,
+        "min_total_score": 45,
+        "max_rank_in_day": 20,
+    }
+    state = initial_live_paper_state(config_copy)
+    regular = _candidate("90010", 3000)
+    regular["total_score"] = 60
+    regular["rank"] = 1
+    fallback = _candidate("90020", 2000)
+    fallback["selected"] = False
+    fallback["total_score"] = 50
+    fallback["rank"] = 2
+
+    new_state, _summary, trades = execute_real_data_paper_trade([regular, fallback], state, config_copy, "2026-01-06")
+
+    buys = [trade for trade in trades if trade.get("action") == "BUY"]
+    assert [trade["code"] for trade in buys] == ["90010", "90020"]
+    assert buys[1]["affordable_fallback_buy_selected"] is True
+    assert buys[1]["affordable_fallback_reason"] == "surplus_available_cash"
+    assert buys[1]["affordable_fallback_original_code"] == ""
+    assert buys[1]["rank"] == 2
+    assert new_state["cash"] < 1_000_000
+
+
 def test_affordable_fallback_does_not_relabel_same_day_regular_selected_candidate(config_copy: dict) -> None:
     _enable_policy(config_copy, max_position_value_rate=0.5, allocation_strategy="relaxed_pending_target_exposure")
     config_copy["affordable_fallback_buy"] = {"enabled": True}

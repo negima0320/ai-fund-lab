@@ -643,6 +643,24 @@ profiles:
       standard_dedicated_screening: true
       standard_market_min_score_override: true
 
+  rookie_dealer_02_v2_51:
+    role: experiment
+    description: v2.50ベース 余剰資金 affordable fallback 検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      market_section_expansion: true
+      standard_screening_relaxation: true
+      standard_dedicated_screening: true
+      affordable_fallback_buy: true
+
   rookie_dealer_03_growth:
     role: experiment
     description: 東証グロース市場のみを対象にする攻撃型検証

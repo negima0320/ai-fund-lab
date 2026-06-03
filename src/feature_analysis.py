@@ -5507,6 +5507,11 @@ def _market_specific_min_score_for_label(config: dict[str, Any] | None, market_l
     default = _number(selection.get("min_score"))
     if default is None:
         default = 45.0
+    quota = selection.get("standard_selection_quota")
+    if market_label == "Standard" and isinstance(quota, dict) and quota.get("enabled"):
+        quota_min = _number(quota.get("standard_min_score") or quota.get("min_score"))
+        if quota_min is not None:
+            return quota_min
     overrides = selection.get("market_min_score_overrides") or selection.get("min_score_by_market_section") or {}
     if not isinstance(overrides, dict):
         return default
@@ -5603,6 +5608,8 @@ def _standard_selection_exclusion_reason(
         return "market_not_allowed_for_selection"
     text = str(row.get("rejected_reason") or row.get("reason") or row.get("selection_reason") or "")
     lowered = text.lower()
+    if "outside_standard_quota" in lowered or "standard quota" in lowered or "standard専用選定枠" in text:
+        return "outside_standard_quota"
     if "selected_but_not_affordable" in lowered or "unaffordable" in lowered:
         return "selected_but_not_affordable"
     if "allocation" in lowered or "cash" in lowered or "affordable" in lowered or "資金" in text:
@@ -6466,7 +6473,8 @@ def _affordable_fallback_buy_audit(backtest_summary: dict[str, Any], config: dic
     buys = [
         item
         for item in raw_buys
-        if (
+        if str(item.get("affordable_fallback_reason") or "") == "surplus_available_cash"
+        or (
             str(item.get("entry_date") or item.get("date") or item.get("signal_date") or ""),
             str(item.get("code") or ""),
             str(item.get("affordable_fallback_original_code") or ""),
@@ -6475,6 +6483,13 @@ def _affordable_fallback_buy_audit(backtest_summary: dict[str, Any], config: dic
     ]
     label_only_buys = [item for item in raw_buys if item not in buys]
     no_candidate = [item for item in attempts if bool(item.get("affordable_fallback_no_candidate"))]
+    selected_but_not_affordable = [
+        item
+        for item in events
+        if isinstance(item, dict)
+        and str(item.get("action") or "").upper() == "SKIP_BUY"
+        and _capital_skip_reason(item.get("skipped_reason") or item.get("reason")) == "selected_but_not_affordable"
+    ]
     min_score = _number(((config or {}).get("selection", {}) or {}).get("min_score")) or 0.0
     round_lot_amounts = [_number(item.get("affordable_fallback_round_lot_amount")) for item in buys]
     buy_amounts = [_number(item.get("amount")) for item in buys]
@@ -6496,11 +6511,27 @@ def _affordable_fallback_buy_audit(backtest_summary: dict[str, Any], config: dic
                 "reason": item.get("affordable_fallback_reason"),
             }
         )
+    logged_candidate_count = sum(int(_number(item.get("affordable_fallback_candidate_count")) or 0) for item in buys)
+    candidate_count = logged_candidate_count if logged_candidate_count else len(attempts)
     return {
         "enabled": enabled,
+        "affordable_fallback_candidate_count": candidate_count,
+        "candidate_count": candidate_count,
         "fallback_attempt_count": len(attempts),
         "fallback_selected_count": len(buys),
         "fallback_buy_trade_count": len(buys),
+        "selected_count": len(buys),
+        "selected_by_market": _count_by_market(buys),
+        "fallback_selected_by_market": _count_by_market(buys),
+        "fallback_rejected_reason_counts": {
+            "no_affordable_candidate": len(no_candidate),
+            "score_below_min": score_below_min_count,
+            "rank_out_of_range": rank_out_of_range_count,
+        },
+        "selected_but_not_affordable_count": len(selected_but_not_affordable),
+        "selected_but_not_affordable_before_fallback_count": len(selected_but_not_affordable),
+        "selected_but_not_affordable_after_fallback_count": max(0, len(selected_but_not_affordable) - len(buys)),
+        "selected_but_not_affordable_replaced_count": len(buys),
         "fallback_label_only_count": len(label_only_buys),
         "fallback_score_below_min_count": score_below_min_count,
         "fallback_rank_out_of_range_count": rank_out_of_range_count,
@@ -6521,9 +6552,19 @@ def _affordable_fallback_buy_audit_lines(audit: dict[str, Any]) -> list[str]:
         return ["- status: unavailable"]
     keys = [
         "enabled",
+        "affordable_fallback_candidate_count",
+        "candidate_count",
         "fallback_attempt_count",
         "fallback_selected_count",
+        "selected_count",
         "fallback_buy_trade_count",
+        "selected_by_market",
+        "fallback_selected_by_market",
+        "fallback_rejected_reason_counts",
+        "selected_but_not_affordable_count",
+        "selected_but_not_affordable_before_fallback_count",
+        "selected_but_not_affordable_after_fallback_count",
+        "selected_but_not_affordable_replaced_count",
         "fallback_label_only_count",
         "fallback_score_below_min_count",
         "fallback_rank_out_of_range_count",
@@ -6536,7 +6577,10 @@ def _affordable_fallback_buy_audit_lines(audit: dict[str, Any]) -> list[str]:
         "exposure_before_average",
         "exposure_after_average",
     ]
-    lines = [f"- {key}: {audit.get(key) if isinstance(audit.get(key), bool) else _format_number(audit.get(key))}" for key in keys]
+    lines = [
+        f"- {key}: {json.dumps(audit.get(key), ensure_ascii=False, sort_keys=True) if isinstance(audit.get(key), dict) else audit.get(key) if isinstance(audit.get(key), bool) else _format_number(audit.get(key))}"
+        for key in keys
+    ]
     lines.extend(
         [
             "",

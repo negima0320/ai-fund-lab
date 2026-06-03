@@ -100,6 +100,7 @@ def test_affordable_fallback_buy_audit_outputs_counts_and_samples() -> None:
                     "action": "SKIP_BUY",
                     "signal_date": "2026-01-05",
                     "code": "1001",
+                    "skipped_reason": "selected_but_not_affordable",
                     "affordable_fallback_attempted": True,
                     "affordable_fallback_replaced_by_code": "1002",
                 },
@@ -108,6 +109,7 @@ def test_affordable_fallback_buy_audit_outputs_counts_and_samples() -> None:
                     "signal_date": "2026-01-05",
                     "code": "1002",
                     "name": "Fallback",
+                    "market_section": "TSEStandard",
                     "amount": 300000,
                     "score": 50,
                     "allocation_limit": 500000,
@@ -123,12 +125,54 @@ def test_affordable_fallback_buy_audit_outputs_counts_and_samples() -> None:
     lines = _affordable_fallback_buy_audit_lines(audit)
 
     assert audit["enabled"] is True
+    assert audit["affordable_fallback_candidate_count"] == 1
     assert audit["fallback_attempt_count"] == 1
     assert audit["fallback_buy_trade_count"] == 1
+    assert audit["fallback_selected_by_market"]["Standard"] == 1
+    assert audit["fallback_rejected_reason_counts"]["no_affordable_candidate"] == 0
+    assert audit["selected_but_not_affordable_count"] == 1
+    assert audit["selected_but_not_affordable_replaced_count"] == 1
+    assert audit["selected_but_not_affordable_after_fallback_count"] == 0
     assert audit["fallback_average_total_score"] == 50
     assert audit["fallback_total_buy_amount"] == 300000
     assert audit["fallback_samples"][0]["fallback_code"] == "1002"
     assert any("fallback_buy_trade_count" in line for line in lines)
+
+
+def test_affordable_fallback_buy_audit_counts_surplus_fallback_buy() -> None:
+    audit = _affordable_fallback_buy_audit(
+        {
+            "all_trades": [
+                {
+                    "action": "BUY",
+                    "signal_date": "2026-01-05",
+                    "code": "2001",
+                    "name": "Surplus",
+                    "market_section": "TSEStandard",
+                    "amount": 200000,
+                    "score": 50,
+                    "rank": 2,
+                    "allocation_limit": 300000,
+                    "affordable_fallback_buy_selected": True,
+                    "affordable_fallback_original_code": "",
+                    "affordable_fallback_round_lot_amount": 200000,
+                    "affordable_fallback_reason": "surplus_available_cash",
+                    "affordable_fallback_candidate_count": 1,
+                },
+            ]
+        },
+        {
+            "selection": {"min_score": 45},
+            "affordable_fallback_buy": {"enabled": True, "surplus_after_selection": True},
+        },
+    )
+
+    assert audit["candidate_count"] == 1
+    assert audit["selected_count"] == 1
+    assert audit["fallback_buy_trade_count"] == 1
+    assert audit["selected_by_market"]["Standard"] == 1
+    assert audit["fallback_label_only_count"] == 0
+    assert audit["fallback_samples"][0]["fallback_code"] == "2001"
 
 
 def test_affordable_fallback_buy_audit_does_not_count_label_only_buy() -> None:

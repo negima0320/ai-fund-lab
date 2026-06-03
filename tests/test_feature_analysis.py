@@ -354,28 +354,39 @@ def test_standard_selection_audit_reports_scored_but_not_selected_reason(config_
             {
                 "date": "2026-01-05",
                 "code": "2002",
+                "name": "Standard Outside Quota",
+                "market_section": "TSEStandard",
+                "total_score": 36,
+                "rank": 13,
+                "selected": False,
+                "rejected_reason": "outside_standard_quota",
+            },
+            {
+                "date": "2026-01-05",
+                "code": "2003",
                 "name": "Standard Below Min",
                 "market_section": "TSEStandard",
                 "total_score": 32,
-                "rank": 13,
+                "rank": 14,
                 "selected": False,
                 "rejected_reason": "通常基準35点には届かないため落選",
             },
         ],
         market_filter_audit={
-            "candidate_market_breakdown_before_filter": {"Standard": 2},
-            "candidate_market_breakdown_after_filter": {"Standard": 2},
-            "candidate_market_breakdown_after_screening": {"Standard": 2},
+            "candidate_market_breakdown_before_filter": {"Standard": 3},
+            "candidate_market_breakdown_after_filter": {"Standard": 3},
+            "candidate_market_breakdown_after_screening": {"Standard": 3},
         },
     )
 
     selection_audit = audit["standard_selection_audit"]
-    assert audit["standard_funnel_audit"]["above_min_score"] == 1
+    assert audit["standard_funnel_audit"]["above_min_score"] == 2
     assert audit["standard_funnel_audit"]["selected"] == 0
-    assert selection_audit["standard_above_min_score_count"] == 1
+    assert selection_audit["standard_above_min_score_count"] == 2
     assert selection_audit["standard_selected_count"] == 0
-    assert selection_audit["above_min_not_selected_count"] == 1
+    assert selection_audit["above_min_not_selected_count"] == 2
     assert selection_audit["selection_exclusion_reason_counts"]["outside_selection_rank"] == 1
+    assert selection_audit["selection_exclusion_reason_counts"]["outside_standard_quota"] == 1
     assert selection_audit["selection_exclusion_reason_counts"]["below_market_min_score"] == 1
     rendered = render_feature_analysis_markdown(
         {

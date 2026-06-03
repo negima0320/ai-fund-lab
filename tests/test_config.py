@@ -354,7 +354,24 @@ def test_rookie_dealer_02_v2_48_to_50_standard_min_score_profiles_load() -> None
     assert load_profile("rookie_dealer_02_v2.48")["profile_id"] == "rookie_dealer_02_v2_48"
     assert load_profile("rookie_dealer_02_v2.49")["profile_id"] == "rookie_dealer_02_v2_49"
     assert load_profile("rookie_dealer_02_v2.50")["profile_id"] == "rookie_dealer_02_v2_50"
-    assert load_profile("rookie_dealer_02_v2.50")["profile_id"] == "rookie_dealer_02_v2_50"
+
+
+def test_rookie_dealer_02_v2_51_affordable_fallback_profile_loads() -> None:
+    profile = load_profile("rookie_dealer_02_v2_51")
+
+    assert profile["profile_id"] == "rookie_dealer_02_v2_51"
+    assert profile["market_filter"]["allowed_sections"] == ["TSEPrime", "TSEStandard"]
+    assert profile["selection"]["min_score"] == 45
+    assert "market_min_score_overrides" not in profile["selection"]
+    assert "standard_selection_quota" not in profile["selection"]
+    assert profile["affordable_fallback_buy"] == {
+        "enabled": True,
+        "surplus_after_selection": True,
+        "replace_unaffordable_selected": False,
+        "min_total_score": 45,
+        "max_rank_in_day": 20,
+    }
+    assert load_profile("rookie_dealer_02_v2.51")["profile_id"] == "rookie_dealer_02_v2_51"
 
 
 def test_standard_market_min_score_override_selects_only_standard() -> None:
