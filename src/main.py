@@ -13,6 +13,7 @@ import shutil
 import sqlite3
 import sys
 import time
+import bisect
 from argparse import ArgumentParser, RawDescriptionHelpFormatter
 from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
@@ -10575,7 +10576,12 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
                 print(f"[day {index}/{len(trading_dates)}] {target_date_text} start")
                 _record_backtest_phase_time("progress_output_sec", time.perf_counter() - progress_started)
             history_started = time.perf_counter()
-            has_history, indicator_input_days, indicator_min_days = _has_minimum_indicator_history(indicator_fetch_start_date, trading_date, config)
+            has_history, indicator_input_days, indicator_min_days = _has_minimum_indicator_history(
+                indicator_fetch_start_date,
+                trading_date,
+                config,
+                price_history_dates=price_history_dates,
+            )
             indicator_cache_exists = (
                 processed_profile_path(config, f"indicators_{target_date_text}.json").exists()
                 or (ROOT / "data" / "processed" / f"indicators_{target_date_text}.json").exists()
@@ -11056,6 +11062,11 @@ def _profile_phase_time_snapshot(profile_total_seconds: float) -> dict[str, Any]
         "indicator_filter_by_date_or_code_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("indicator_filter_by_date_or_code_sec", 0.0)), 4),
         "indicator_copy_from_common_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("indicator_copy_from_common_sec", 0.0)), 4),
         "indicator_unused_or_unknown_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("indicator_unused_or_unknown_sec", 0.0)), 4),
+        "indicator_history_file_scan": round(float(BACKTEST_PROFILE_TIMINGS.get("indicator_history_file_scan", 0.0)), 4),
+        "indicator_history_json_load": round(float(BACKTEST_PROFILE_TIMINGS.get("indicator_history_json_load", 0.0)), 4),
+        "indicator_history_date_range_validation": round(float(BACKTEST_PROFILE_TIMINGS.get("indicator_history_date_range_validation", 0.0)), 4),
+        "indicator_history_field_validation": round(float(BACKTEST_PROFILE_TIMINGS.get("indicator_history_field_validation", 0.0)), 4),
+        "indicator_history_per_code_validation": round(float(BACKTEST_PROFILE_TIMINGS.get("indicator_history_per_code_validation", 0.0)), 4),
         "analysis_json_scan_sec": round(float(BACKTEST_PROFILE_TIMINGS.get("analysis_json_scan_sec", 0.0)), 4),
         "json_write": round(float(BACKTEST_PROFILE_TIMINGS.get("json_write", 0.0)), 4),
         "sqlite_access": round(float(BACKTEST_PROFILE_TIMINGS.get("sqlite_access", 0.0)), 4),
@@ -11288,6 +11299,11 @@ def _aggregate_phase_elapsed(performance_report: dict[str, Any]) -> dict[str, fl
         "indicator_filter_by_date_or_code_sec",
         "indicator_copy_from_common_sec",
         "indicator_unused_or_unknown_sec",
+        "indicator_history_file_scan",
+        "indicator_history_json_load",
+        "indicator_history_date_range_validation",
+        "indicator_history_field_validation",
+        "indicator_history_per_code_validation",
         "market_filter",
         "score_integrity_audit",
         "result_integrity_audit",
@@ -12020,17 +12036,35 @@ def _indicator_fetch_start_date(trade_start_date: date, config: dict[str, Any]) 
     return max(requested, earliest) if earliest else requested
 
 
-def _indicator_history_day_count(fetch_start_date: date, target_date: date) -> int:
-    return len(available_cached_price_dates(fetch_start_date, target_date))
+def _indicator_history_day_count(fetch_start_date: date, target_date: date, price_history_dates: list[date] | None = None) -> int:
+    if price_history_dates is not None:
+        started = time.perf_counter()
+        left = bisect.bisect_left(price_history_dates, fetch_start_date)
+        right = bisect.bisect_right(price_history_dates, target_date)
+        _record_backtest_phase_time("indicator_history_date_range_validation", time.perf_counter() - started)
+        return max(0, right - left)
+    started = time.perf_counter()
+    json_started = float(BACKTEST_PROFILE_TIMINGS.get("json_file_io_sec", 0.0) or 0.0)
+    dates = available_cached_price_dates(fetch_start_date, target_date)
+    elapsed = time.perf_counter() - started
+    json_delta = max(0.0, float(BACKTEST_PROFILE_TIMINGS.get("json_file_io_sec", 0.0) or 0.0) - json_started)
+    _record_backtest_phase_time("indicator_history_file_scan", max(0.0, elapsed - json_delta))
+    _record_backtest_phase_time("indicator_history_json_load", json_delta)
+    return len(dates)
 
 
 def _has_minimum_indicator_history(
     fetch_start_date: date,
     target_date: date,
     config: dict[str, Any],
+    *,
+    price_history_dates: list[date] | None = None,
 ) -> tuple[bool, int, int]:
-    input_days = _indicator_history_day_count(fetch_start_date, target_date)
+    input_days = _indicator_history_day_count(fetch_start_date, target_date, price_history_dates)
+    field_started = time.perf_counter()
     min_days = _backtest_indicator_min_history_days(config)
+    _record_backtest_phase_time("indicator_history_field_validation", time.perf_counter() - field_started)
+    _record_backtest_phase_time("indicator_history_per_code_validation", 0.0)
     return input_days >= min_days, input_days, min_days
 
 

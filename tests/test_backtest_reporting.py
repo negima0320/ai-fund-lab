@@ -5,6 +5,23 @@ from datetime import date
 import main as main_module
 
 
+def test_indicator_history_uses_precomputed_price_history_dates(monkeypatch, config_copy) -> None:
+    def fail_available_cached_price_dates(*_args, **_kwargs):
+        raise AssertionError("precomputed price_history_dates should avoid daily cache scans")
+
+    monkeypatch.setattr(main_module, "available_cached_price_dates", fail_available_cached_price_dates)
+    has_history, input_days, min_days = main_module._has_minimum_indicator_history(
+        date(2025, 7, 1),
+        date(2026, 1, 6),
+        config_copy,
+        price_history_dates=[date(2026, 1, 5), date(2026, 1, 6)],
+    )
+
+    assert input_days == 2
+    assert min_days == main_module._backtest_indicator_min_history_days(config_copy)
+    assert has_history == (input_days >= min_days)
+
+
 def _patch_minimal_backtest(monkeypatch, config: dict, tmp_path, trades: list[dict] | None = None) -> None:
     config["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
     portfolio = {"total_assets": 1_000_000, "safety_events": [], "date": "2026-01-02"}
