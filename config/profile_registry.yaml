@@ -833,6 +833,36 @@ profiles:
       relaxed_pending_target_exposure: true
       score_upper_filter: true
 
+  rookie_dealer_02_v2_69:
+    role: experiment
+    description: v2.26ベース risk_on高RS高スコアstrong_bullish_candle除外検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      overheat_risk_on_filter: true
+
+  breakout_rsi_54w_v1:
+    role: experiment
+    description: RSI>80・前日陽線・54週高値更新ブレイクアウト検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      breakout_rsi_54w: true
+
   rookie_dealer_03_growth:
     role: experiment
     description: 東証グロース市場のみを対象にする攻撃型検証

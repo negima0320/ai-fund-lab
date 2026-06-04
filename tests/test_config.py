@@ -469,6 +469,40 @@ def test_rookie_dealer_02_v2_68_score_upper_filter_profile_loads() -> None:
     assert load_profile("rookie_dealer_02_v2.68")["profile_id"] == "rookie_dealer_02_v2_68"
 
 
+def test_rookie_dealer_02_v2_69_overheat_risk_on_filter_profile_loads() -> None:
+    profile_69 = load_profile("rookie_dealer_02_v2_69")
+
+    assert profile_69["profile_id"] == "rookie_dealer_02_v2_69"
+    assert profile_69["trading"] == load_profile("rookie_dealer_02_v2_26")["trading"]
+    assert profile_69["scoring"] == load_profile("rookie_dealer_02_v2_26")["scoring"]
+    assert profile_69["capital_utilization_policy"] == load_profile("rookie_dealer_02_v2_26")["capital_utilization_policy"]
+    assert "score_upper_filter" not in profile_69
+    assert "conditional_hold_extension" not in profile_69
+    assert profile_69["overheat_risk_on_filter"]["enabled"] is True
+    assert profile_69["overheat_risk_on_filter"]["market_regime"] == "risk_on"
+    assert profile_69["overheat_risk_on_filter"]["min_relative_strength_score"] == 10
+    assert profile_69["overheat_risk_on_filter"]["min_entry_score"] == 58
+    assert profile_69["overheat_risk_on_filter"]["required_candlestick_signal"] == "strong_bullish_candle"
+    assert profile_69["overheat_risk_on_filter"]["rejected_reason"] == "overheat_risk_on_filter"
+    assert load_profile("rookie_dealer_02_v2.69")["profile_id"] == "rookie_dealer_02_v2_69"
+
+
+def test_breakout_rsi_54w_profile_loads() -> None:
+    profile = load_profile("breakout_rsi_54w_v1")
+
+    assert profile["profile_id"] == "breakout_rsi_54w_v1"
+    assert profile["trading"]["stop_loss_rate"] == -0.05
+    assert profile["trading"]["take_profit_rate"] == 0.10
+    assert profile["backtest"]["indicator_min_history_days"] == 270
+    assert profile["backtest"]["indicator_fetch_lookback_days"] == 420
+    assert profile["selection"]["reject_overheated_rsi"] is False
+    assert profile["selection"]["min_score"] == 0
+    assert profile["screening"]["strategy"] == "breakout_rsi_54w"
+    assert profile["screening"]["breakout_rsi_54w"]["min_rsi"] == 80
+    assert profile["screening"]["breakout_rsi_54w"]["lookback_business_days"] == 270
+    assert profile["capital_utilization_policy"] == load_profile("rookie_dealer_02_v2_26")["capital_utilization_policy"]
+
+
 def test_rookie_dealer_02_v2_40_affordable_fallback_quality_profile_loads() -> None:
     profile_40 = load_profile("rookie_dealer_02_v2_40")
 

@@ -1,0 +1,116 @@
+# AI Fund Lab profile YAML
+# 友人検証用: RSI>80、陽線、54週高値更新中のブレイクアウト検証profileです。
+# 秘密情報は書かず、APIキーや口座情報は .env に置きます。
+
+profile_id: breakout_rsi_54w_v1
+profile_name: Breakout RSI 54W v1
+description: RSI>80・前日陽線・54週高値更新ブレイクアウト検証
+disable_single_order_amount_limit: true
+
+character:
+  role: 検証用ルール
+  personality:
+    - ルールベース
+    - ブレイクアウト重視
+    - 損切り明確
+  catchphrases:
+    - RSI80超えと54週高値更新だけを検証します
+
+features:
+  market_context: true
+  sector_analysis: true
+  ai_decision: false
+  news: false
+  candlestick_analysis: true
+  relative_strength: true
+  openai_commentary: false
+
+scoring:
+  total_score_formula: technical_plus_relative_strength_market_penalty
+  use_relative_strength_score: true
+  relative_strength_score_weight: 10
+  relative_strength:
+    benchmark: topix
+    windows:
+      - 5
+      - 10
+      - 20
+    score_rules:
+      rs_5d_gt: 0.03
+      rs_5d_points: 3
+      rs_10d_gt: 0.05
+      rs_10d_points: 4
+      rs_20d_gt: 0.08
+      rs_20d_points: 3
+
+ai_decision:
+  enabled: false
+  provider: openai
+  fallback_to_rule_based: true
+  daily_call_limit: 3
+
+ai_commentary:
+  enabled: true
+  provider: rule_based
+  fallback_to_rule_based: true
+
+initial_capital: 1000000
+
+backtest:
+  indicator_mode: fast
+  indicator_min_history_days: 270
+  indicator_fetch_lookback_days: 420
+
+trading:
+  max_positions: 10
+  position_size_ratio: 0.20
+  stop_loss_rate: -0.05
+  take_profit_rate: 0.10
+  max_holding_days: 20
+  use_round_lot: true
+  round_lot_size: 100
+
+execution:
+  stop_loss_execution: intraday_stop
+
+selection:
+  min_score: 0
+  fallback_min_score: 0
+  min_confidence: 0.10
+  allow_top_pick_when_no_selection: false
+  top_pick_min_score: 0
+  max_selected: 10
+  reject_overheated_rsi: false
+
+market_filter:
+  risk_off_min_score: 0
+
+volume_filter:
+  enabled: false
+
+screening:
+  strategy: breakout_rsi_54w
+  breakout_rsi_54w:
+    min_rsi: 80
+    require_previous_bullish_candle: true
+    require_54w_high_breakout: true
+    lookback_business_days: 270
+
+trailing_stop:
+  enabled: false
+  note: 現行売買エンジンに汎用trailing stopは未実装のため、v1では損切り・利確・最大保有日数で検証します。
+
+capital_utilization_policy:
+  enabled: true
+  target_exposure: 0.9
+  min_cash_buffer: 50000
+  buy_lot_size: 100
+  max_position_value_rate: 0.5
+  buy_as_much_as_possible: true
+  allocation_strategy: relaxed_pending_target_exposure
+
+risk_margin:
+  max_daily_buy_amount: 900000
+  max_single_order_amount: 500000
+  stop_trading_if_daily_loss_rate_exceeds: -0.05
+  stop_trading_if_drawdown_exceeds: -0.15

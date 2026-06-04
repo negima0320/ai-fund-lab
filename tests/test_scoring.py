@@ -613,6 +613,66 @@ def test_score_upper_filter_applies_in_risk_off_too(config_copy: dict) -> None:
     assert scored[0]["rejected_reason"] == "score_upper_filter"
 
 
+def test_overheat_risk_on_filter_blocks_only_risk_on_high_rs_high_score_strong_bullish(config_copy: dict) -> None:
+    selection_config = _selection_config(
+        {
+            **config_copy,
+            "overheat_risk_on_filter": {
+                "enabled": True,
+                "market_regime": "risk_on",
+                "min_relative_strength_score": 10,
+                "min_entry_score": 58,
+                "required_candlestick_signal": "strong_bullish_candle",
+                "rejected_reason": "overheat_risk_on_filter",
+            },
+        }
+    )
+    market_filter = disabled_market_filter()
+    scored = [
+        scored_item("1001", total_score=58, volume_ratio=4.0, rsi=55, candlestick_signals=["strong_bullish_candle"]),
+        scored_item("1002", total_score=57.9, volume_ratio=4.0, rsi=55, candlestick_signals=["strong_bullish_candle"]),
+        scored_item("1003", total_score=58, volume_ratio=4.0, rsi=55, candlestick_signals=["bullish_candle"]),
+    ]
+    scored[0]["relative_strength_score"] = 10
+    scored[1]["relative_strength_score"] = 10
+    scored[2]["relative_strength_score"] = 10
+
+    summary = _apply_selection_rules(scored, selection_config, market_filter, "risk_on")
+
+    assert summary["overheat_risk_on_filter_rejected_count"] == 1
+    assert summary["overheat_risk_on_filter_rejected_codes"] == ["1001"]
+    assert scored[0]["selected"] is False
+    assert scored[0]["rejected_reason"] == "overheat_risk_on_filter"
+    assert scored[1]["selected"] is True
+    assert scored[2]["selected"] is True
+
+
+def test_overheat_risk_on_filter_does_not_apply_to_risk_off_or_neutral(config_copy: dict) -> None:
+    selection_config = _selection_config(
+        {
+            **config_copy,
+            "overheat_risk_on_filter": {
+                "enabled": True,
+                "market_regime": "risk_on",
+                "min_relative_strength_score": 10,
+                "min_entry_score": 58,
+                "required_candlestick_signal": "strong_bullish_candle",
+            },
+        }
+    )
+    market_filter = disabled_market_filter()
+
+    for regime in ["risk_off", "neutral"]:
+        scored = [scored_item("1001", total_score=58, volume_ratio=4.0, rsi=55, candlestick_signals=["strong_bullish_candle"])]
+        scored[0]["relative_strength_score"] = 10
+
+        summary = _apply_selection_rules(scored, selection_config, market_filter, regime)
+
+        assert summary["overheat_risk_on_filter_rejected_count"] == 0
+        assert scored[0]["selected"] is True
+        assert scored[0]["rejected_reason"] == ""
+
+
 def test_neutral_keeps_existing_top_pick_behavior(config_copy: dict) -> None:
     result = score_real_candidates(
         [

@@ -73,6 +73,7 @@ PROFILE_ALIASES = {
     "rookie_dealer_02_v2.66": "rookie_dealer_02_v2_66",
     "rookie_dealer_02_v2.67": "rookie_dealer_02_v2_67",
     "rookie_dealer_02_v2.68": "rookie_dealer_02_v2_68",
+    "rookie_dealer_02_v2.69": "rookie_dealer_02_v2_69",
 }
 
 

@@ -7162,6 +7162,8 @@ def _build_profile_diff_analysis_for_pair(
         "risk_off_rs_filter_rejected_codes": _risk_off_rs_filter_rejected_codes(target_filter_rows),
         "score_upper_filter_rejected_count": _score_upper_filter_rejected_count(target_filter_rows),
         "score_upper_filter_rejected_codes": _score_upper_filter_rejected_codes(target_filter_rows),
+        "overheat_risk_on_filter_rejected_count": _overheat_risk_on_filter_rejected_count(target_filter_rows),
+        "overheat_risk_on_filter_rejected_codes": _overheat_risk_on_filter_rejected_codes(target_filter_rows),
         "base_score_component_trade_analysis": build_score_component_trade_analysis(base_trade_rows),
         "target_score_component_trade_analysis": build_score_component_trade_analysis(target_trade_rows),
         "base_conditional_selected_count": _conditional_selected_count(base_rows),
@@ -7826,6 +7828,19 @@ def _score_upper_filter_rejected_codes(rows: list[dict[str, Any]]) -> list[str]:
     return sorted(set(codes))
 
 
+def _overheat_risk_on_filter_rejected_count(rows: list[dict[str, Any]]) -> int:
+    return sum(1 for row in rows if str(row.get("rejected_reason") or "") == "overheat_risk_on_filter")
+
+
+def _overheat_risk_on_filter_rejected_codes(rows: list[dict[str, Any]]) -> list[str]:
+    codes = [
+        str(row.get("code") or "")
+        for row in rows
+        if str(row.get("rejected_reason") or "") == "overheat_risk_on_filter" and row.get("code")
+    ]
+    return sorted(set(codes))
+
+
 def _conditional_selected_count(rows: list[dict[str, Any]]) -> int:
     return sum(
         1
@@ -7892,6 +7907,7 @@ def _effective_config_differences(base_config: dict[str, Any], target_config: di
             )
     root_keys = [
         "score_upper_filter",
+        "overheat_risk_on_filter",
         "conditional_hold_extension",
         "holding_revaluation",
         "holding_signal_revaluation",
@@ -8076,6 +8092,8 @@ def _profile_diff_analysis_lines(analysis: dict[str, Any]) -> list[str]:
         f"- risk_off_rs_filter_rejected_codes: {_compact_json(analysis.get('risk_off_rs_filter_rejected_codes') or [])}",
         f"- score_upper_filter_rejected_count: {analysis.get('score_upper_filter_rejected_count', 0)}",
         f"- score_upper_filter_rejected_codes: {_compact_json(analysis.get('score_upper_filter_rejected_codes') or [])}",
+        f"- overheat_risk_on_filter_rejected_count: {analysis.get('overheat_risk_on_filter_rejected_count', 0)}",
+        f"- overheat_risk_on_filter_rejected_codes: {_compact_json(analysis.get('overheat_risk_on_filter_rejected_codes') or [])}",
         f"- base conditional selected count: {analysis.get('base_conditional_selected_count')}",
         f"- target conditional selected count: {analysis.get('target_conditional_selected_count')}",
         f"- base conditional rejected count: {analysis.get('base_conditional_rejected_count')}",
@@ -9708,7 +9726,7 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
             print(f"{BACKTEST_DAY_LOG_PREFIX} indicators cache hit: {profile_output_path.relative_to(ROOT)}")
             return
 
-    lookback_days = 60 if indicator_mode == "full" else 35
+    lookback_days = _indicator_calculation_lookback_days(config, indicator_mode)
     fetch_dates = previous_business_dates(target_date, lookback_days)
     if BACKTEST_MODE_ACTIVE:
         price_rows = load_cached_price_history(fetch_dates, config)
@@ -9746,7 +9764,7 @@ def run_calculate_indicators(provider_name: str, target_date_text: str) -> None:
                 provider,
                 target_date,
                 prime_codes,
-                lookback_business_days=60,
+                lookback_business_days=lookback_days,
                 rate_limit_per_minute=_jquants_requests_per_minute(config),
                 fetch_dates=fetch_dates,
                 continue_on_error=True,
@@ -12657,6 +12675,10 @@ def _indicator_used_fields() -> set[str]:
         "low",
         "ma5",
         "ma25",
+        "high_54w",
+        "previous_54w_high",
+        "is_54w_high_breakout",
+        "high_54w_lookback_days",
         "market_section",
         "macd",
         "macd_hist",
@@ -12963,6 +12985,14 @@ def _backtest_indicator_mode(config: dict[str, Any]) -> str:
     return mode if mode in {"full", "fast", "minimal"} else "fast"
 
 
+def _indicator_calculation_lookback_days(config: dict[str, Any], indicator_mode: str) -> int:
+    default_days = 60 if indicator_mode == "full" else 35
+    screening = config.get("screening", {}) if isinstance(config.get("screening"), dict) else {}
+    breakout = screening.get("breakout_rsi_54w", {}) if isinstance(screening.get("breakout_rsi_54w"), dict) else {}
+    breakout_days = int(breakout.get("lookback_business_days") or 0) if breakout else 0
+    return max(default_days, breakout_days)
+
+
 def _normalize_entry_timing(value: Any) -> str:
     timing = str(value or "next_business_day_open").strip().lower().replace("-", "_")
     if timing in {"same_day_close", "next_business_day_open", "next_business_day_close"}:
@@ -13068,7 +13098,10 @@ def _backtest_indicator_fetch_lookback_days(config: dict[str, Any]) -> int:
 
 
 def _backtest_indicator_min_history_days(config: dict[str, Any]) -> int:
-    return max(1, int(config.get("backtest", {}).get("indicator_min_history_days", 60)))
+    screening = config.get("screening", {}) if isinstance(config.get("screening"), dict) else {}
+    breakout = screening.get("breakout_rsi_54w", {}) if isinstance(screening.get("breakout_rsi_54w"), dict) else {}
+    breakout_days = int(breakout.get("lookback_business_days") or 0) if breakout else 0
+    return max(1, int(config.get("backtest", {}).get("indicator_min_history_days", 60)), breakout_days)
 
 
 def _indicator_fetch_start_date(trade_start_date: date, config: dict[str, Any]) -> date:
@@ -13140,6 +13173,8 @@ def _indicator_cache_matches_current_scoring(
             return False
         if bool(payload.get("relative_strength_enabled")) != enable_relative_strength:
             return False
+        if _screening_requires_54w_breakout(config) and not _indicator_payload_has_54w_fields(payload):
+            return False
         if not enable_relative_strength:
             return True
 
@@ -13179,6 +13214,26 @@ def _relative_strength_indicator_rows_are_populated(indicators: list[dict[str, A
     return False
 
 
+def _screening_requires_54w_breakout(config: dict[str, Any]) -> bool:
+    screening = config.get("screening", {}) if isinstance(config.get("screening"), dict) else {}
+    breakout = screening.get("breakout_rsi_54w", {}) if isinstance(screening.get("breakout_rsi_54w"), dict) else {}
+    return str(screening.get("strategy") or "") == "breakout_rsi_54w" and bool(
+        breakout.get("require_54w_high_breakout", True)
+    )
+
+
+def _indicator_payload_has_54w_fields(payload: dict[str, Any]) -> bool:
+    indicators = payload.get("indicators", [])
+    if not isinstance(indicators, list) or not indicators:
+        return False
+    return any(
+        isinstance(item, dict)
+        and "previous_54w_high" in item
+        and "is_54w_high_breakout" in item
+        for item in indicators
+    )
+
+
 def _ensure_relative_strength_benchmark_cache(
     config: dict[str, Any],
     target_date: date,
@@ -13191,7 +13246,7 @@ def _ensure_relative_strength_benchmark_cache(
         return
     if _preloaded_topix_payload_for(target_date):
         return
-    lookback_days = 60 if indicator_mode == "full" else 35
+    lookback_days = _indicator_calculation_lookback_days(config, indicator_mode)
     fetch_dates = previous_business_dates(target_date, lookback_days)
     start_date = fetch_dates[0] if fetch_dates else target_date
     _load_topix_prices_for_period(start_date, target_date, config)
@@ -13411,6 +13466,7 @@ def _storage_save_mode(config: dict[str, Any]) -> str:
 RUNTIME_SCORE_FIELDS = {
     "code", "name", "sector_name", "section", "market_section", "listing_market",
     "date", "open", "high", "low", "close", "volume", "ma5", "ma25", "rsi",
+    "high_54w", "previous_54w_high", "is_54w_high_breakout", "high_54w_lookback_days",
     "volume_ratio", "turnover_value", "total_score", "technical_score",
     "confidence", "rank", "selected", "reason", "score_reason",
     "selection_reason", "selected_reason", "rejected_reason", "fallback",
@@ -13430,6 +13486,9 @@ RUNTIME_SCORE_FIELDS = {
     "risk_off_rs_filter_min_score", "risk_off_rs_filter_reason",
     "score_upper_filter_checked", "score_upper_filter_blocked",
     "score_upper_filter_threshold", "score_upper_filter_reason",
+    "overheat_risk_on_filter_checked", "overheat_risk_on_filter_blocked",
+    "overheat_risk_on_filter_reason", "overheat_risk_on_filter_min_relative_strength_score",
+    "overheat_risk_on_filter_min_entry_score",
     "source_provider", "config_version",
     "stock_return_5d", "stock_return_10d", "stock_return_20d",
     "benchmark_source", "benchmark_return_5d", "benchmark_return_10d", "benchmark_return_20d",

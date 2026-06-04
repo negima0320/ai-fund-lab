@@ -35,6 +35,9 @@ def screen_candidates(
         if callable(timer_callback) and elapsed > 0:
             timer_callback(phase, elapsed)
 
+    if _screening_strategy(config) == "breakout_rsi_54w":
+        return _screen_breakout_rsi_54w(indicators, target_count=target_count, config=config, timer_callback=timer_callback)
+
     strict_passed = []
     excluded_reasons: dict[str, int] = {}
     started = time.perf_counter()
@@ -96,6 +99,9 @@ def screening_market_rejection_audit(
     config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Summarize screening-stage drops without changing candidate selection."""
+    if _screening_strategy(config) == "breakout_rsi_54w":
+        return _breakout_rsi_54w_rejection_audit(indicators, candidates, target_count=target_count, config=config)
+
     candidate_codes = {str(item.get("code")) for item in candidates if isinstance(item, dict)}
     strict_passed = []
     fallback_passed = []
@@ -242,6 +248,132 @@ def _screening_market_overrides(config: dict[str, Any] | None) -> dict[str, Any]
     return overrides if isinstance(overrides, dict) else {}
 
 
+def _screening_strategy(config: dict[str, Any] | None) -> str:
+    if not isinstance(config, dict):
+        return ""
+    screening = config.get("screening", {})
+    if not isinstance(screening, dict):
+        return ""
+    return str(screening.get("strategy") or "").strip()
+
+
+def _breakout_rsi_54w_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    screening = config.get("screening", {}) if isinstance(config, dict) else {}
+    payload = screening.get("breakout_rsi_54w", {}) if isinstance(screening, dict) else {}
+    payload = payload if isinstance(payload, dict) else {}
+    return {
+        "min_rsi": float(payload.get("min_rsi", 80)),
+        "lookback_business_days": int(payload.get("lookback_business_days", 270)),
+        "require_previous_bullish_candle": bool(payload.get("require_previous_bullish_candle", True)),
+        "require_54w_high_breakout": bool(payload.get("require_54w_high_breakout", True)),
+    }
+
+
+def _screen_breakout_rsi_54w(
+    indicators: list[dict[str, Any]],
+    *,
+    target_count: int,
+    config: dict[str, Any] | None,
+    timer_callback: Any | None,
+) -> dict[str, Any]:
+    def record(phase: str, elapsed: float) -> None:
+        if callable(timer_callback) and elapsed > 0:
+            timer_callback(phase, elapsed)
+
+    conditions = _breakout_rsi_54w_config(config)
+    passed: list[dict[str, Any]] = []
+    excluded_reasons: dict[str, int] = {}
+    started = time.perf_counter()
+    for item in indicators:
+        reasons = _breakout_rsi_54w_exclude_reasons(item, conditions)
+        if not reasons:
+            passed.append(_candidate(item, fallback=False, pass_reason="breakout_rsi_54w条件を通過"))
+        else:
+            _count_reasons(excluded_reasons, reasons)
+    record("candidate_screening_rules", time.perf_counter() - started)
+
+    started = time.perf_counter()
+    candidates = _rank_breakout_candidates(passed)[:target_count]
+    record("candidate_ranking_sort", time.perf_counter() - started)
+    return {
+        "conditions": {
+            "strategy": "breakout_rsi_54w",
+            "breakout_rsi_54w": conditions,
+            "ranking": [
+                "RSIが高い",
+                "54週高値からの更新幅が大きい",
+                "売買代金が大きい",
+                "出来高前日比が高い",
+            ],
+        },
+        "strict_passed_count": len(passed),
+        "fallback_used": False,
+        "fallback_passed_count": 0,
+        "candidates": candidates,
+        "excluded_summary": excluded_reasons,
+    }
+
+
+def _breakout_rsi_54w_rejection_audit(
+    indicators: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    *,
+    target_count: int,
+    config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    candidate_codes = {str(item.get("code")) for item in candidates if isinstance(item, dict)}
+    reason_by_market: dict[str, dict[str, int]] = _empty_market_reason_counts()
+    date_by_market: dict[str, dict[str, int]] = _empty_market_reason_counts()
+    sample: list[dict[str, Any]] = []
+    conditions = _breakout_rsi_54w_config(config)
+    passed: list[dict[str, Any]] = []
+    for item in indicators:
+        if not isinstance(item, dict):
+            continue
+        reasons = _breakout_rsi_54w_exclude_reasons(item, conditions)
+        if not reasons:
+            passed.append(_candidate(item, fallback=False, pass_reason="breakout_rsi_54w条件を通過"))
+        if str(item.get("code")) in candidate_codes:
+            continue
+        market = _market_label(item)
+        date_text = str(item.get("date") or "")
+        reason_keys = [_screening_reason_key(reason) for reason in reasons] or ["unknown"]
+        for reason in reason_keys:
+            reason_by_market[market][reason] = int(reason_by_market[market].get(reason, 0) or 0) + 1
+        if date_text:
+            date_by_market[market][date_text] = int(date_by_market[market].get(date_text, 0) or 0) + 1
+        if len(sample) < 50 and reasons:
+            sample.append(
+                {
+                    "date": item.get("date"),
+                    "code": item.get("code"),
+                    "name": item.get("name"),
+                    "market_section": market_section_from_row(item),
+                    "filter_result": "market_filter_allowed_but_screening_excluded",
+                    "reject_reason": ";".join(reason_keys),
+                }
+            )
+
+    ranked_codes = {str(item.get("code")) for item in _rank_breakout_candidates(passed)[:target_count]}
+    ranking_drop_by_market = {market: 0 for market in _market_labels()}
+    for item in passed:
+        code = str(item.get("code"))
+        if code in candidate_codes or code in ranked_codes:
+            continue
+        market = _market_label(item)
+        ranking_drop_by_market[market] = int(ranking_drop_by_market.get(market, 0) or 0) + 1
+        reason_by_market[market]["ranking_drop"] = int(reason_by_market[market].get("ranking_drop", 0) or 0) + 1
+    return {
+        "input_count_by_market": market_section_counts(indicators),
+        "screening_candidate_count_by_market": market_section_counts(candidates),
+        "screening_excluded_reason_by_market": reason_by_market,
+        "screening_excluded_date_by_market": date_by_market,
+        "screening_ranking_drop_by_market": ranking_drop_by_market,
+        "representative_sample": sample,
+        "market_overrides": _screening_market_overrides(config),
+    }
+
+
 def _screening_reason_keys(reasons: list[str]) -> list[str]:
     keys = [_screening_reason_key(reason) for reason in reasons]
     return keys or ["unknown"]
@@ -255,6 +387,9 @@ def _screening_reason_key(reason: str) -> str:
         "5日移動平均が25日移動平均以下": "ma5_below_ma25",
         "RSI範囲外": "rsi_out_of_range",
         "直近5営業日の値動きが大きすぎる": "volatility_too_high",
+        "RSIがブレイクアウト条件未満": "rsi_breakout_low",
+        "前日陽線ではない": "previous_candle_not_bullish",
+        "54週高値更新ではない": "not_54w_high_breakout",
         "missing_required_price_or_indicator": "missing_required_price_or_indicator",
     }
     return mapping.get(str(reason), "unknown")
@@ -310,6 +445,10 @@ def _candidate(item: dict[str, Any], fallback: bool, pass_reason: str) -> dict[s
         "direct_turnover_value_source": item.get("direct_turnover_value_source"),
         "five_day_volatility": item["five_day_volatility"],
         "five_day_change_rate": item.get("five_day_change_rate"),
+        "high_54w": item.get("high_54w"),
+        "previous_54w_high": item.get("previous_54w_high"),
+        "is_54w_high_breakout": item.get("is_54w_high_breakout"),
+        "high_54w_lookback_days": item.get("high_54w_lookback_days"),
         "stock_return_5d": item.get("stock_return_5d"),
         "stock_return_10d": item.get("stock_return_10d"),
         "stock_return_20d": item.get("stock_return_20d"),
@@ -373,6 +512,37 @@ def _exclude_reasons(item: dict[str, Any], conditions: dict[str, Any]) -> list[s
     return reasons
 
 
+def _breakout_rsi_54w_exclude_reasons(item: dict[str, Any], conditions: dict[str, Any]) -> list[str]:
+    reasons = []
+    rsi = _optional_float(item.get("rsi"))
+    open_price = _optional_float(item.get("open"))
+    close = _optional_float(item.get("close"))
+    high = _optional_float(item.get("high"))
+    previous_high_54w = _optional_float(item.get("previous_54w_high"))
+    if rsi is None or open_price is None or close is None or high is None:
+        return ["missing_required_price_or_indicator"]
+    if rsi <= float(conditions["min_rsi"]):
+        reasons.append("RSIがブレイクアウト条件未満")
+    if bool(conditions["require_previous_bullish_candle"]) and close <= open_price:
+        reasons.append("前日陽線ではない")
+    if bool(conditions["require_54w_high_breakout"]):
+        breakout = bool(item.get("is_54w_high_breakout"))
+        if not breakout and previous_high_54w is not None:
+            breakout = high >= previous_high_54w or close >= previous_high_54w
+        if not breakout:
+            reasons.append("54週高値更新ではない")
+    return reasons
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _rank_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         candidates,
@@ -385,6 +555,29 @@ def _rank_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ),
         reverse=True,
     )
+
+
+def _rank_breakout_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        candidates,
+        key=lambda item: (
+            float(item.get("rsi") or 0),
+            _breakout_distance(item),
+            float(item.get("turnover_value") or 0),
+            float(item.get("volume_ratio") or 0),
+        ),
+        reverse=True,
+    )
+
+
+def _breakout_distance(item: dict[str, Any]) -> float:
+    previous_high = _optional_float(item.get("previous_54w_high"))
+    close = _optional_float(item.get("close"))
+    high = _optional_float(item.get("high"))
+    current = max(value for value in [close, high] if value is not None) if close is not None or high is not None else None
+    if previous_high is None or not previous_high or current is None:
+        return 0.0
+    return (current - previous_high) / previous_high
 
 
 def _count_reasons(summary: dict[str, int], reasons: list[str]) -> None:

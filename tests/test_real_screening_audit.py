@@ -120,3 +120,69 @@ def test_screen_candidates_can_relax_standard_ma_conditions_only() -> None:
     assert "2001" in codes
     assert audit["screening_candidate_count_by_market"]["Standard"] == 1
     assert audit["screening_excluded_reason_by_market"]["Prime"]["close_below_ma5"] == 1
+
+
+def test_breakout_rsi_54w_screening_requires_rsi_bullish_candle_and_high_breakout() -> None:
+    config = {
+        "screening": {
+            "strategy": "breakout_rsi_54w",
+            "breakout_rsi_54w": {
+                "min_rsi": 80,
+                "lookback_business_days": 270,
+                "require_previous_bullish_candle": True,
+                "require_54w_high_breakout": True,
+            },
+        }
+    }
+    indicators = [
+        _indicator(
+            "1001",
+            "TSEPrime",
+            open=100,
+            close=112,
+            high=115,
+            rsi=81,
+            previous_54w_high=114,
+            is_54w_high_breakout=True,
+        ),
+        _indicator(
+            "1002",
+            "TSEPrime",
+            open=100,
+            close=112,
+            high=115,
+            rsi=80,
+            previous_54w_high=114,
+            is_54w_high_breakout=True,
+        ),
+        _indicator(
+            "1003",
+            "TSEPrime",
+            open=112,
+            close=100,
+            high=116,
+            rsi=82,
+            previous_54w_high=114,
+            is_54w_high_breakout=True,
+        ),
+        _indicator(
+            "1004",
+            "TSEPrime",
+            open=100,
+            close=112,
+            high=113,
+            rsi=82,
+            previous_54w_high=114,
+            is_54w_high_breakout=False,
+        ),
+    ]
+
+    result = screen_candidates(indicators, target_count=50, config=config)
+    audit = screening_market_rejection_audit(indicators, result["candidates"], target_count=50, config=config)
+
+    assert [item["code"] for item in result["candidates"]] == ["1001"]
+    reasons = audit["screening_excluded_reason_by_market"]["Prime"]
+    assert reasons["rsi_breakout_low"] == 1
+    assert reasons["previous_candle_not_bullish"] == 1
+    assert reasons["not_54w_high_breakout"] == 1
+    assert result["conditions"]["strategy"] == "breakout_rsi_54w"

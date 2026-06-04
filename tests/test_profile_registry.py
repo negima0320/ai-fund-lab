@@ -32,6 +32,8 @@ def test_list_profiles_outputs_registry_rows(capsys) -> None:
     assert "rookie_dealer_02_v2_66 | experiment | light" in output
     assert "rookie_dealer_02_v2_67 | experiment | light" in output
     assert "rookie_dealer_02_v2_68 | experiment | light" in output
+    assert "rookie_dealer_02_v2_69 | experiment | light" in output
+    assert "breakout_rsi_54w_v1 | experiment | light" in output
 
 
 def test_profile_info_outputs_formula_and_compare_command(capsys) -> None:
@@ -137,6 +139,7 @@ def test_run_experiments_selects_v2_26_dynamic_exposure_profiles() -> None:
     profiles = main_module.select_experiment_profiles("rookie_dealer_02_v2_26", registry, None)
 
     assert profiles == [
+        "breakout_rsi_54w_v1",
         "rookie_dealer_02_v2_29",
         "rookie_dealer_02_v2_30",
         "rookie_dealer_02_v2_32",
@@ -171,6 +174,7 @@ def test_run_experiments_selects_v2_26_dynamic_exposure_profiles() -> None:
         "rookie_dealer_02_v2_66",
         "rookie_dealer_02_v2_67",
         "rookie_dealer_02_v2_68",
+        "rookie_dealer_02_v2_69",
     ]
 
 

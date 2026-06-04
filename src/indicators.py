@@ -102,6 +102,7 @@ def calculate_indicators(
             "previous_close": _round_optional(previous.get("close"), 2),
             "previous_ma5": _round_optional(previous.get("ma5"), 2),
             "previous_ma25": _round_optional(previous.get("ma25"), 2),
+            **_fifty_four_week_high_fields(history, lookback_days=270),
             "rsi": _round_optional(target.get("rsi"), 2),
             "macd": _round_optional(target.get("macd"), 4),
             "macd_signal": _round_optional(target.get("macd_signal"), 4),
@@ -139,6 +140,37 @@ def calculate_indicators(
 
     indicators.sort(key=lambda item: item["turnover_value"], reverse=True)
     return indicators, excluded_count
+
+
+def _fifty_four_week_high_fields(history: list[dict[str, Any]], lookback_days: int = 270) -> dict[str, Any]:
+    if not history:
+        return {
+            "high_54w": None,
+            "previous_54w_high": None,
+            "is_54w_high_breakout": False,
+            "high_54w_lookback_days": lookback_days,
+        }
+    target = history[-1]
+    previous_rows = history[:-1][-lookback_days:]
+    previous_highs = [_float_or_none(row.get("high")) for row in previous_rows]
+    previous_highs = [value for value in previous_highs if value is not None]
+    previous_high = max(previous_highs) if previous_highs else None
+    current_high = _float_or_none(target.get("high"))
+    current_close = _float_or_none(target.get("close"))
+    breakout = bool(
+        previous_high is not None
+        and (
+            (current_high is not None and current_high >= previous_high)
+            or (current_close is not None and current_close >= previous_high)
+        )
+    )
+    high_54w_candidates = [value for value in [previous_high, current_high, current_close] if value is not None]
+    return {
+        "high_54w": _round_optional(max(high_54w_candidates) if high_54w_candidates else None, 2),
+        "previous_54w_high": _round_optional(previous_high, 2),
+        "is_54w_high_breakout": breakout,
+        "high_54w_lookback_days": lookback_days,
+    }
 
 
 def _required_history_length(indicator_mode: str) -> int:

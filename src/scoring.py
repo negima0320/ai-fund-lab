@@ -316,6 +316,10 @@ def score_real_candidates(
                 "direct_turnover_value_source": candidate.get("direct_turnover_value_source"),
                 "five_day_volatility": candidate.get("five_day_volatility"),
                 "five_day_change_rate": candidate.get("five_day_change_rate"),
+                "high_54w": candidate.get("high_54w"),
+                "previous_54w_high": candidate.get("previous_54w_high"),
+                "is_54w_high_breakout": candidate.get("is_54w_high_breakout"),
+                "high_54w_lookback_days": candidate.get("high_54w_lookback_days"),
                 "stock_return_5d": candidate.get("stock_return_5d"),
                 "stock_return_10d": candidate.get("stock_return_10d"),
                 "stock_return_20d": candidate.get("stock_return_20d"),
@@ -497,6 +501,7 @@ def _apply_selection_rules(
     max_selected = selection_config["max_selected"]
     min_score = selection_config["min_score"]
     score_upper_filter = selection_config.get("score_upper_filter") or {}
+    overheat_risk_on_filter = selection_config.get("overheat_risk_on_filter") or {}
     if risk_off:
         max_selected = min(max_selected, market_filter["risk_off_max_buy_orders"])
         min_score = max(min_score, market_filter["risk_off_min_score"])
@@ -545,6 +550,16 @@ def _apply_selection_rules(
         item["score_upper_filter_blocked"] = score_upper_blocked
         item["score_upper_filter_threshold"] = score_upper_threshold
         item["score_upper_filter_reason"] = "score_upper_filter" if score_upper_blocked else ""
+        overheat_risk_on_blocked = _overheat_risk_on_filter_blocked(item, market_regime, overheat_risk_on_filter)
+        item["overheat_risk_on_filter_checked"] = bool(overheat_risk_on_filter.get("enabled"))
+        item["overheat_risk_on_filter_blocked"] = overheat_risk_on_blocked
+        item["overheat_risk_on_filter_reason"] = (
+            str(overheat_risk_on_filter.get("rejected_reason") or "overheat_risk_on_filter")
+            if overheat_risk_on_blocked
+            else ""
+        )
+        item["overheat_risk_on_filter_min_relative_strength_score"] = overheat_risk_on_filter.get("min_relative_strength_score")
+        item["overheat_risk_on_filter_min_entry_score"] = overheat_risk_on_filter.get("min_entry_score")
 
         if market_section_blocked:
             item["selected"] = False
@@ -553,6 +568,10 @@ def _apply_selection_rules(
         elif score_upper_blocked:
             item["selected"] = False
             item["rejected_reason"] = "score_upper_filter"
+            item["reason"] = item["rejected_reason"]
+        elif overheat_risk_on_blocked:
+            item["selected"] = False
+            item["rejected_reason"] = item["overheat_risk_on_filter_reason"]
             item["reason"] = item["rejected_reason"]
         elif risk_off_rs_blocked:
             item["selected"] = False
@@ -606,6 +625,7 @@ def _apply_selection_rules(
                 and not item.get("earnings_filter_blocked")
                 and not item.get("market_section_filter_blocked")
                 and not item.get("score_upper_filter_blocked")
+                and not item.get("overheat_risk_on_filter_blocked")
                 and not item.get("risk_off_rs_filter_blocked")
                 and not item.get("rsi_volume_hot_zone_excluded")
                 and _meets_top_pick_selection(item, selection_config)
@@ -637,6 +657,11 @@ def _apply_selection_rules(
         "score_upper_filter_rejected_codes": [
             item.get("code") for item in scored if item.get("score_upper_filter_blocked")
         ],
+        "overheat_risk_on_filter": overheat_risk_on_filter,
+        "overheat_risk_on_filter_rejected_count": sum(1 for item in scored if item.get("overheat_risk_on_filter_blocked")),
+        "overheat_risk_on_filter_rejected_codes": [
+            item.get("code") for item in scored if item.get("overheat_risk_on_filter_blocked")
+        ],
         "allowed_sections": sorted(allowed_sections),
         "allow_unknown_market": allow_unknown_market,
         "candidate_market_counts": market_section_counts(scored),
@@ -656,6 +681,7 @@ def _selection_config(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "min_score": float(selection.get("min_score", 70)),
         "score_upper_filter": _score_upper_filter_config(config),
+        "overheat_risk_on_filter": _overheat_risk_on_filter_config(config),
         "market_min_score_overrides": _market_min_score_overrides(selection),
         "fallback_min_score": float(selection.get("fallback_min_score", 65)),
         "min_confidence": float(selection.get("min_confidence", config["scoring"].get("confidence_min_for_buy", 0.7))),
@@ -695,6 +721,57 @@ def _score_upper_filter_config(config: dict[str, Any]) -> dict[str, Any]:
         "max_entry_score": _optional_float(payload.get("max_entry_score")),
         "rejected_reason": str(payload.get("rejected_reason") or "score_upper_filter"),
     }
+
+
+def _overheat_risk_on_filter_config(config: dict[str, Any]) -> dict[str, Any]:
+    payload = config.get("overheat_risk_on_filter", {})
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "enabled": bool(payload.get("enabled", False)),
+        "market_regime": str(payload.get("market_regime") or "risk_on"),
+        "min_relative_strength_score": _optional_float(payload.get("min_relative_strength_score", 10)),
+        "min_entry_score": _optional_float(payload.get("min_entry_score", 58)),
+        "required_candlestick_signal": str(payload.get("required_candlestick_signal") or "strong_bullish_candle"),
+        "rejected_reason": str(payload.get("rejected_reason") or "overheat_risk_on_filter"),
+    }
+
+
+def _overheat_risk_on_filter_blocked(item: dict[str, Any], market_regime: str, config: dict[str, Any]) -> bool:
+    if not bool(config.get("enabled")):
+        return False
+    if str(market_regime or "") != str(config.get("market_regime") or "risk_on"):
+        return False
+    total_score = _optional_float(item.get("total_score"))
+    min_entry_score = _optional_float(config.get("min_entry_score"))
+    if total_score is None or min_entry_score is None or total_score < min_entry_score:
+        return False
+    rs_score = _optional_float(item.get("relative_strength_score"))
+    min_rs_score = _optional_float(config.get("min_relative_strength_score"))
+    if rs_score is None or min_rs_score is None or rs_score < min_rs_score:
+        return False
+    required_signal = str(config.get("required_candlestick_signal") or "strong_bullish_candle")
+    return required_signal in _candlestick_signal_list(item.get("candlestick_signals"))
+
+
+def _candlestick_signal_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("[") and text.endswith("]"):
+            import json
+
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+        return [item.strip() for item in text.split(",") if item.strip()]
+    return []
 
 
 def _market_min_score_overrides(selection: dict[str, Any]) -> dict[str, float]:
