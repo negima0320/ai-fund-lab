@@ -3,4 +3,9 @@ jquants-api-client
 python-dotenv
 openai
 pytest
+pandas
+pyarrow
+lightgbm
+scikit-learn
+joblib
 pandas-ta; python_version >= "3.12"
