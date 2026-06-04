@@ -3,11 +3,11 @@
 ## 実行条件
 
 - 期間: 2026-01-05 〜 2026-03-06
-- profile: rookie_dealer_02_v2_65 新人ディーラー2号 v2.65
+- profile: rookie_dealer_02_v2_66 新人ディーラー2号 v2.66
 - provider: jquants
 - ChatGPT/OpenAI: disabled
 - broker: paper
-- config_version: cfg_7bd4441
+- config_version: cfg_f3a7400
 
 ## Backtest Date Range Audit
 
@@ -54,7 +54,7 @@
 ### Hardcoded Date Audit
 
 - target: 2026-03-06
-- match_count: 641
+- match_count: 655
 - warning: 2026-03-06 remains in config/src/docs/reports/README
 
 ### Processed Data Audit

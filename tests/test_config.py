@@ -429,6 +429,31 @@ def test_rookie_dealer_02_v2_65_score_upper_filter_profile_loads() -> None:
     assert load_profile("rookie_dealer_02_v2.65")["profile_id"] == "rookie_dealer_02_v2_65"
 
 
+def test_rookie_dealer_02_v2_66_score_upper_filter_profile_loads() -> None:
+    profile_66 = load_profile("rookie_dealer_02_v2_66")
+
+    assert profile_66["profile_id"] == "rookie_dealer_02_v2_66"
+    assert profile_66["trading"] == load_profile("rookie_dealer_02_v2_26")["trading"]
+    assert profile_66["scoring"] == load_profile("rookie_dealer_02_v2_26")["scoring"]
+    assert profile_66["capital_utilization_policy"] == load_profile("rookie_dealer_02_v2_26")["capital_utilization_policy"]
+    assert profile_66["score_upper_filter"]["enabled"] is True
+    assert profile_66["score_upper_filter"]["max_entry_score"] == 57
+    assert profile_66["score_upper_filter"]["rejected_reason"] == "score_upper_filter"
+    assert load_profile("rookie_dealer_02_v2.66")["profile_id"] == "rookie_dealer_02_v2_66"
+
+
+def test_rookie_dealer_02_v2_67_strong_bullish_candle_score_adjustment_profile_loads() -> None:
+    profile_67 = load_profile("rookie_dealer_02_v2_67")
+
+    assert profile_67["profile_id"] == "rookie_dealer_02_v2_67"
+    assert profile_67["trading"] == load_profile("rookie_dealer_02_v2_26")["trading"]
+    assert profile_67["capital_utilization_policy"] == load_profile("rookie_dealer_02_v2_26")["capital_utilization_policy"]
+    assert "score_upper_filter" not in profile_67
+    assert "conditional_hold_extension" not in profile_67
+    assert profile_67["scoring"]["candlestick_signal_score_overrides"]["strong_bullish_candle"] == 3
+    assert load_profile("rookie_dealer_02_v2.67")["profile_id"] == "rookie_dealer_02_v2_67"
+
+
 def test_rookie_dealer_02_v2_40_affordable_fallback_quality_profile_loads() -> None:
     profile_40 = load_profile("rookie_dealer_02_v2_40")
 

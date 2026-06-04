@@ -112,6 +112,24 @@ def test_scores_are_in_range(config_copy: dict) -> None:
     assert item["score_components"]["candlestick_score"] == item["candlestick_score"]
 
 
+def test_v2_67_halves_strong_bullish_candle_points() -> None:
+    base_profile = load_profile("rookie_dealer_02_v2_26")
+    adjusted_profile = load_profile("rookie_dealer_02_v2_67")
+    row = candidate("1001", volume_ratio=3.0, turnover_value=2_500_000_000, rsi=57.5, volatility=0.02)
+    row["candlestick_signals"] = ["strong_bullish_candle"]
+    row["candle_body_rate"] = 0.05
+    row["upper_shadow_rate"] = 0.01
+    row["lower_shadow_rate"] = 0.01
+    row["close_position_in_range"] = 0.9
+
+    base_item = score_real_candidates([dict(row)], "2026-03-06", base_profile, "test")["scores"][0]
+    adjusted_item = score_real_candidates([dict(row)], "2026-03-06", adjusted_profile, "test")["scores"][0]
+
+    assert base_item["candlestick_score"] == adjusted_item["candlestick_score"] + 2
+    assert base_item["total_score"] == adjusted_item["total_score"] + 2
+    assert adjusted_item["score_components"]["candlestick_score"] == adjusted_item["candlestick_score"]
+
+
 def test_v2_1_total_score_uses_only_evaluated_components() -> None:
     profile = load_profile("rookie_dealer_02_v2_1")
     result = score_real_candidates(

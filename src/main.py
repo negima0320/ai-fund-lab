@@ -7162,6 +7162,8 @@ def _build_profile_diff_analysis_for_pair(
         "risk_off_rs_filter_rejected_codes": _risk_off_rs_filter_rejected_codes(target_filter_rows),
         "score_upper_filter_rejected_count": _score_upper_filter_rejected_count(target_filter_rows),
         "score_upper_filter_rejected_codes": _score_upper_filter_rejected_codes(target_filter_rows),
+        "base_score_component_trade_analysis": build_score_component_trade_analysis(base_trade_rows),
+        "target_score_component_trade_analysis": build_score_component_trade_analysis(target_trade_rows),
         "base_conditional_selected_count": _conditional_selected_count(base_rows),
         "target_conditional_selected_count": _conditional_selected_count(target_rows),
         "base_conditional_rejected_count": _conditional_rejected_count(base_rows),
@@ -8114,6 +8116,16 @@ def _profile_diff_analysis_lines(analysis: dict[str, Any]) -> list[str]:
             f"- PF diff: {_format_optional_number(summary.get('profit_factor_diff'))}",
             f"- win_rate diff: {_format_optional_percent(summary.get('win_rate_diff'))}",
             f"- trade_count diff: {_format_optional_number(summary.get('trade_count_diff'))}",
+            "",
+            "### Score Component Trade Analysis",
+            "",
+            "#### Base",
+            "",
+            *_score_component_trade_analysis_lines(analysis.get("base_score_component_trade_analysis") or {}),
+            "",
+            "#### Target",
+            "",
+            *_score_component_trade_analysis_lines(analysis.get("target_score_component_trade_analysis") or {}),
             "",
             "### Entry Selection Diff",
             "",
@@ -14980,6 +14992,7 @@ def write_backtest_summary(
     stop_loss_count = sum(1 for trade in closed_trades if trade.get("exit_reason") == "損切り")
     max_holding_exit_count = sum(1 for trade in closed_trades if trade.get("exit_reason") == "最大保有期間到達")
     holding_signal_revaluation_audit = _holding_signal_revaluation_summary(closed_trades)
+    score_component_trade_analysis = build_score_component_trade_analysis(closed_trades)
     best_trade = max(closed_trades, key=lambda item: item.get("profit", 0), default=None)
     worst_trade = min(closed_trades, key=lambda item: item.get("profit", 0), default=None)
     daily_asset_curve = [
@@ -15076,6 +15089,11 @@ def write_backtest_summary(
         "stop_loss_count": stop_loss_count,
         "max_holding_exit_count": max_holding_exit_count,
         "holding_signal_revaluation_audit": holding_signal_revaluation_audit,
+        "score_component_trade_analysis": score_component_trade_analysis,
+        "entry_score_band_analysis": score_component_trade_analysis["entry_score_band_analysis"],
+        "candlestick_signal_analysis": score_component_trade_analysis["candlestick_signal_analysis"],
+        "high_score_signal_analysis": score_component_trade_analysis["high_score_signal_analysis"],
+        "score_component_analysis": score_component_trade_analysis["score_component_analysis"],
         "reselected_hold_count": holding_signal_revaluation_audit["reselected_hold_count"],
         "extended_holding_count": holding_signal_revaluation_audit["extended_holding_count"],
         "hold_extension_count": holding_signal_revaluation_audit["hold_extension_count"],
@@ -15327,6 +15345,182 @@ def _holding_signal_revaluation_summary(closed_trades: list[dict[str, Any]]) -> 
         "average_holding_days": round(sum(holding_days_values) / len(holding_days_values), 2) if holding_days_values else None,
         "profit_by_exit_reason": dict(sorted(profit_by_reason.items())),
     }
+
+
+ENTRY_SCORE_BANDS: list[tuple[str, float, float]] = [
+    ("40-44", 40, 44),
+    ("45-49", 45, 49),
+    ("50-54", 50, 54),
+    ("55-59", 55, 59),
+    ("60-64", 60, 64),
+]
+
+
+def build_score_component_trade_analysis(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    closed_trades = [trade for trade in trades if _is_closed_trade_for_score_analysis(trade)]
+    entry_band_buckets = {label: [] for label, _minimum, _maximum in ENTRY_SCORE_BANDS}
+    for trade in closed_trades:
+        band = _entry_score_band(_entry_score_value(trade))
+        if band:
+            entry_band_buckets[band].append(trade)
+    candlestick_buckets: dict[str, list[dict[str, Any]]] = {}
+    high_score_buckets: dict[str, list[dict[str, Any]]] = {}
+    for trade in closed_trades:
+        for signal in _trade_candlestick_signals(trade):
+            candlestick_buckets.setdefault(signal, []).append(trade)
+            score = _entry_score_value(trade)
+            if score is not None and score >= 56:
+                high_score_buckets.setdefault(signal, []).append(trade)
+    return {
+        "closed_trade_count": len(closed_trades),
+        "entry_score_band_analysis": [
+            {"score_band": label, **_trade_result_bucket_metrics(bucket)}
+            for label, bucket in entry_band_buckets.items()
+        ],
+        "candlestick_signal_analysis": _signal_bucket_analysis(candlestick_buckets),
+        "high_score_signal_analysis": _signal_bucket_analysis(high_score_buckets),
+        "score_component_analysis": _score_component_win_loss_average(closed_trades),
+    }
+
+
+def _is_closed_trade_for_score_analysis(trade: dict[str, Any]) -> bool:
+    return _score_analysis_profit_value(trade) is not None and (
+        str(trade.get("action") or "").upper() in {"SELL", "CLOSE", "EXIT", ""}
+        or trade.get("exit_date") is not None
+    )
+
+
+def _entry_score_value(trade: dict[str, Any]) -> float | None:
+    for key in ("entry_score", "score", "total_score"):
+        value = _safe_float(trade.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _entry_score_band(score: float | None) -> str | None:
+    if score is None:
+        return None
+    for label, minimum, maximum in ENTRY_SCORE_BANDS:
+        if minimum <= score <= maximum:
+            return label
+    return None
+
+
+def _score_analysis_profit_value(trade: dict[str, Any]) -> float | None:
+    gross_profit = _safe_float(trade.get("gross_profit"))
+    if gross_profit is not None:
+        return gross_profit
+    return _trade_profit_value(trade)
+
+
+def _score_analysis_profit_rate_value(trade: dict[str, Any]) -> float | None:
+    gross_profit_rate = _safe_float(trade.get("gross_profit_rate"))
+    if gross_profit_rate is not None:
+        return gross_profit_rate
+    return _trade_profit_rate_value(trade)
+
+
+def _trade_result_bucket_metrics(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    profits = [_score_analysis_profit_value(trade) for trade in trades]
+    profits = [value for value in profits if value is not None]
+    profit_rates = [_score_analysis_profit_rate_value(trade) for trade in trades]
+    profit_rates = [value for value in profit_rates if value is not None]
+    gross_profit = sum(value for value in profits if value > 0)
+    gross_loss = sum(value for value in profits if value < 0)
+    win_count = sum(1 for value in profits if value > 0)
+    loss_count = sum(1 for value in profits if value < 0)
+    count = len(profits)
+    return {
+        "count": count,
+        "win_count": win_count,
+        "loss_count": loss_count,
+        "win_rate": round(win_count / count, 4) if count else None,
+        "gross_profit_total": round(gross_profit, 2),
+        "gross_loss_total": round(gross_loss, 2),
+        "profit_factor": round(gross_profit / abs(gross_loss), 4) if gross_loss < 0 else None,
+        "net_profit": round(sum(profits), 2),
+        "average_profit_rate": round(sum(profit_rates) / len(profit_rates), 6) if profit_rates else None,
+    }
+
+
+def _signal_bucket_analysis(buckets: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    rows = [{"signal": signal, **_trade_result_bucket_metrics(items)} for signal, items in buckets.items()]
+    rows.sort(key=lambda item: (-int(item.get("count") or 0), str(item.get("signal") or "")))
+    return rows
+
+
+def _trade_candlestick_signals(trade: dict[str, Any]) -> list[str]:
+    value = trade.get("candlestick_signals")
+    if isinstance(value, list):
+        signals = [str(item) for item in value if str(item)]
+    elif isinstance(value, str):
+        text = value.strip()
+        signals: list[str] = []
+        if text:
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    signals = [str(item) for item in parsed if str(item)]
+            except json.JSONDecodeError:
+                signals = [item.strip() for item in re.split(r"[,|]", text) if item.strip()]
+    else:
+        signals = []
+    return signals or ["no_signal"]
+
+
+def _score_component_win_loss_average(closed_trades: list[dict[str, Any]]) -> dict[str, Any]:
+    groups = {
+        "win": [trade for trade in closed_trades if (_score_analysis_profit_value(trade) or 0) > 0],
+        "loss": [trade for trade in closed_trades if (_score_analysis_profit_value(trade) or 0) < 0],
+    }
+    fields = [
+        "entry_score",
+        "technical_score",
+        "ma_score",
+        "rsi_score",
+        "volume_score",
+        "candlestick_score",
+        "market_context_score",
+        "relative_strength_score",
+        "rsi",
+        "volume_ratio",
+    ]
+    return {
+        group_name: {
+            "count": len(items),
+            "averages": {
+                field: _average_float([_score_component_field_value(trade, field) for trade in items])
+                for field in fields
+            },
+        }
+        for group_name, items in groups.items()
+    }
+
+
+def _score_component_field_value(trade: dict[str, Any], field: str) -> float | None:
+    if field == "entry_score":
+        return _entry_score_value(trade)
+    value = _safe_float(trade.get(field))
+    if value is not None:
+        return value
+    components = trade.get("score_components")
+    if isinstance(components, str):
+        try:
+            parsed = json.loads(components)
+            components = parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            components = {}
+    if isinstance(components, dict):
+        return _safe_float(components.get(field))
+    return None
+
+
+def _average_float(values: list[float | None]) -> float | None:
+    filtered = [value for value in values if value is not None]
+    if not filtered:
+        return None
+    return round(sum(filtered) / len(filtered), 6)
 
 
 def _truthy_value(value: Any) -> bool:
@@ -15879,6 +16073,10 @@ def render_backtest_summary_markdown(summary: dict[str, Any], config: dict[str, 
         f"- selected_count合計: {summary.get('selected_count_total', 0)}",
         f"- 最大ドローダウン: {summary['max_drawdown']:.2%}",
         "",
+        "## Score Component Trade Analysis",
+        "",
+        *_score_component_trade_analysis_lines(summary.get("score_component_trade_analysis", {})),
+        "",
         "## ベスト取引",
         "",
         _format_trade_summary(summary["best_trade"]),
@@ -16048,6 +16246,97 @@ def _backtest_execution_model_lines(model: dict[str, Any]) -> list[str]:
         f"- signal_entry_next_day_count: {model.get('signal_entry_next_day_count', 0)}",
         f"- signal_entry_gap_average: {_format_optional_percent(model.get('signal_entry_gap_average'))}",
     ]
+
+
+def _score_component_trade_analysis_lines(analysis: dict[str, Any]) -> list[str]:
+    if not analysis:
+        return ["- score component trade analysis: unavailable"]
+    lines = [
+        f"- closed_trade_count: {analysis.get('closed_trade_count', 0)}",
+        "",
+        "### Entry Score Band Analysis",
+        "",
+        *_entry_score_band_analysis_lines(analysis.get("entry_score_band_analysis") or []),
+        "",
+        "### Candlestick Signal Analysis",
+        "",
+        *_signal_analysis_lines(analysis.get("candlestick_signal_analysis") or []),
+        "",
+        "### High Score Signal Analysis",
+        "",
+        *_signal_analysis_lines(analysis.get("high_score_signal_analysis") or []),
+        "",
+        "### Score Component Analysis",
+        "",
+        *_score_component_average_lines(analysis.get("score_component_analysis") or {}),
+    ]
+    return lines
+
+
+def _entry_score_band_analysis_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- entry score band analysis: unavailable"]
+    lines = [
+        "| score_band | count | wins | losses | win_rate | gross_profit | gross_loss | PF | net_profit | avg_profit_rate |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for item in items:
+        lines.append(
+            "| "
+            f"{item.get('score_band')} | {item.get('count')} | {item.get('win_count')} | {item.get('loss_count')} | "
+            f"{_format_optional_percent(item.get('win_rate'))} | {_format_optional_yen(item.get('gross_profit_total'))} | "
+            f"{_format_optional_yen(item.get('gross_loss_total'))} | {_format_optional_number(item.get('profit_factor'))} | "
+            f"{_format_optional_yen(item.get('net_profit'))} | {_format_optional_percent(item.get('average_profit_rate'))} |"
+        )
+    return lines
+
+
+def _signal_analysis_lines(items: list[dict[str, Any]]) -> list[str]:
+    if not items:
+        return ["- signal analysis: unavailable"]
+    lines = [
+        "| signal | count | wins | losses | win_rate | PF | net_profit | avg_profit_rate |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for item in items[:30]:
+        lines.append(
+            "| "
+            f"{item.get('signal')} | {item.get('count')} | {item.get('win_count')} | {item.get('loss_count')} | "
+            f"{_format_optional_percent(item.get('win_rate'))} | {_format_optional_number(item.get('profit_factor'))} | "
+            f"{_format_optional_yen(item.get('net_profit'))} | {_format_optional_percent(item.get('average_profit_rate'))} |"
+        )
+    return lines
+
+
+def _score_component_average_lines(analysis: dict[str, Any]) -> list[str]:
+    if not analysis:
+        return ["- score component analysis: unavailable"]
+    fields = [
+        "entry_score",
+        "technical_score",
+        "ma_score",
+        "rsi_score",
+        "volume_score",
+        "candlestick_score",
+        "market_context_score",
+        "relative_strength_score",
+        "rsi",
+        "volume_ratio",
+    ]
+    lines = [
+        "| result | count | " + " | ".join(fields) + " |",
+        "|---|---:|" + "|".join("---:" for _field in fields) + "|",
+    ]
+    for result in ("win", "loss"):
+        item = analysis.get(result) or {}
+        averages = item.get("averages") if isinstance(item.get("averages"), dict) else {}
+        lines.append(
+            "| "
+            f"{result} | {item.get('count', 0)} | "
+            + " | ".join(_format_optional_number(averages.get(field)) for field in fields)
+            + " |"
+        )
+    return lines
 
 
 def _market_coverage_lines(coverage: dict[str, Any]) -> list[str]:

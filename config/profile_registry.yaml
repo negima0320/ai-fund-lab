@@ -788,6 +788,36 @@ profiles:
       relaxed_pending_target_exposure: true
       score_upper_filter: true
 
+  rookie_dealer_02_v2_66:
+    role: experiment
+    description: v2.65ベース entry_score 58以上のみ除外する高スコア過熱検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      score_upper_filter: true
+
+  rookie_dealer_02_v2_67:
+    role: experiment
+    description: v2.26ベース strong_bullish_candle加点を半減する過熱掴み検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      candlestick_score_adjustment: true
+
   rookie_dealer_03_growth:
     role: experiment
     description: 東証グロース市場のみを対象にする攻撃型検証

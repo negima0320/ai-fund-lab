@@ -3,11 +3,11 @@
 ## 実行条件
 
 - 期間: 2025-03-07 〜 2026-03-06
-- profile: rookie_dealer_02_v2_64 新人ディーラー2号 v2.64
+- profile: rookie_dealer_02_v2_26 新人ディーラー2号 v2.26
 - provider: jquants
 - ChatGPT/OpenAI: disabled
 - broker: paper
-- config_version: cfg_fc92000
+- config_version: cfg_ae62f8a
 
 ## Backtest Date Range Audit
 
@@ -54,7 +54,7 @@
 ### Hardcoded Date Audit
 
 - target: 2026-03-06
-- match_count: 631
+- match_count: 661
 - warning: 2026-03-06 remains in config/src/docs/reports/README
 
 ### Processed Data Audit
@@ -81,19 +81,19 @@
 ## 結果サマリ
 
 - 初期資金: 1,000,000円
-- 最終資産: 1,106,627円
-- 税引前損益: 90,127円
-- 税引後損益: 71,818円
-- 税引後損益率: 7.18%
-- 勝率: 44.09%
-- profit factor: 1.14
-- 最大ドローダウン: -13.43%
-- 総取引数: 127
-- 利確回数: 15
-- 損切り回数: 51
-- 最大保有期間売却回数: 62
-- no trade日数: 85
-- selected_count合計: 470
+- 最終資産: 1,125,018円
+- 税引前損益: 108,518円
+- 税引後損益: 86,472円
+- 税引後損益率: 8.65%
+- 勝率: 41.43%
+- profit factor: 1.17
+- 最大ドローダウン: -11.78%
+- 総取引数: 140
+- 利確回数: 19
+- 損切り回数: 64
+- 最大保有期間売却回数: 58
+- no trade日数: 72
+- selected_count合計: 483
 
 ## 新人ディーラー1号コメント
 

@@ -129,6 +129,111 @@ def test_phase_accounting_uses_daily_loop_parent_without_candidate_overlap(monke
     assert snapshot["accounting_delta"] == 0.0
 
 
+def test_score_component_trade_analysis_summarizes_closed_trades() -> None:
+    trades = [
+        {
+            "action": "SELL",
+            "entry_score": 56,
+            "gross_profit": 12000,
+            "gross_profit_rate": 0.06,
+            "technical_score": 40,
+            "ma_score": 8,
+            "rsi_score": 6,
+            "volume_score": 9,
+            "candlestick_score": 12,
+            "market_context_score": 3,
+            "relative_strength_score": 7,
+            "rsi": 62,
+            "volume_ratio": 3.2,
+            "candlestick_signals": ["bullish_candle", "volume_confirmed_breakout"],
+        },
+        {
+            "action": "SELL",
+            "entry_score": 58,
+            "gross_profit": -8000,
+            "gross_profit_rate": -0.04,
+            "technical_score": 42,
+            "ma_score": 9,
+            "rsi_score": 7,
+            "volume_score": 10,
+            "candlestick_score": 13,
+            "market_context_score": 2,
+            "relative_strength_score": 5,
+            "rsi": 70,
+            "volume_ratio": 4.1,
+            "candlestick_signals": '["bullish_candle"]',
+        },
+        {
+            "action": "SELL",
+            "entry_score": 47,
+            "gross_profit": 3000,
+            "gross_profit_rate": 0.015,
+            "score_components": {"ma_score": 5, "candlestick_score": 4},
+            "candlestick_signals": [],
+        },
+    ]
+
+    analysis = main_module.build_score_component_trade_analysis(trades)
+
+    assert analysis["closed_trade_count"] == 3
+    band_55 = next(item for item in analysis["entry_score_band_analysis"] if item["score_band"] == "55-59")
+    assert band_55["count"] == 2
+    assert band_55["win_count"] == 1
+    assert band_55["loss_count"] == 1
+    assert band_55["net_profit"] == 4000
+    bullish = next(item for item in analysis["candlestick_signal_analysis"] if item["signal"] == "bullish_candle")
+    assert bullish["count"] == 2
+    high_score_bullish = next(item for item in analysis["high_score_signal_analysis"] if item["signal"] == "bullish_candle")
+    assert high_score_bullish["count"] == 2
+    assert analysis["score_component_analysis"]["win"]["averages"]["entry_score"] == 51.5
+    assert analysis["score_component_analysis"]["loss"]["averages"]["candlestick_score"] == 13
+
+
+def test_compare_profiles_markdown_includes_score_component_trade_analysis() -> None:
+    analysis = main_module.build_score_component_trade_analysis(
+        [
+            {
+                "action": "SELL",
+                "entry_score": 56,
+                "gross_profit": -1000,
+                "gross_profit_rate": -0.01,
+                "candlestick_signals": ["bullish_candle"],
+            }
+        ]
+    )
+    markdown = main_module.render_compare_profiles_markdown(
+        {
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-31",
+            "profiles": [
+                {
+                    "profile_id": "base",
+                    "profile_name": "Base",
+                },
+                {
+                    "profile_id": "target",
+                    "profile_name": "Target",
+                },
+            ],
+            "profile_diff_analyses": [
+                {
+                    "base_profile_id": "base",
+                    "target_profile_id": "target",
+                    "base_score_component_trade_analysis": analysis,
+                    "target_score_component_trade_analysis": analysis,
+                    "trade_outcome_diff": {},
+                    "summary_diff": {},
+                }
+            ],
+        }
+    )
+
+    assert "### Score Component Trade Analysis" in markdown
+    assert "#### Target" in markdown
+    assert "55-59" in markdown
+    assert "bullish_candle" in markdown
+
+
 def _patch_minimal_backtest(monkeypatch, config: dict, tmp_path, trades: list[dict] | None = None) -> None:
     config["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
     portfolio = {"total_assets": 1_000_000, "safety_events": [], "date": "2026-01-02"}

@@ -194,7 +194,7 @@ def score_real_candidates(
     for candidate in candidates:
         candidate_started = time.perf_counter()
         component_started = time.perf_counter()
-        technical_parts = _real_technical_score_parts(candidate)
+        technical_parts = _real_technical_score_parts(candidate, config)
         sector_adjustment = _sector_score_adjustment(candidate)
         technical = max(0, min(50, technical_parts["technical_score"] + sector_adjustment))
         technical_parts["technical_score"] = technical
@@ -1058,7 +1058,7 @@ def _rsi_volume_hot_zone_adjustment(rsi_value: Any, volume_ratio_value: Any, hot
     return result
 
 
-def _real_technical_score_parts(candidate: dict[str, Any]) -> dict[str, Any]:
+def _real_technical_score_parts(candidate: dict[str, Any], config: dict[str, Any] | None = None) -> dict[str, Any]:
     trend_score = 0.0
     volume_score = 0.0
     rsi_score = 0.0
@@ -1070,6 +1070,8 @@ def _real_technical_score_parts(candidate: dict[str, Any]) -> dict[str, Any]:
     ma5 = float(candidate["ma5"])
     ma25 = float(candidate["ma25"])
     signals = list(candidate.get("candlestick_signals") or detect_candlestick_signals(candidate))
+    candlestick_overrides = _candlestick_signal_score_overrides(config or {})
+    strong_bullish_candle_points = candlestick_overrides.get("strong_bullish_candle", 5.0)
 
     if close > ma5:
         trend_score += 5
@@ -1096,7 +1098,7 @@ def _real_technical_score_parts(candidate: dict[str, Any]) -> dict[str, Any]:
         if "bullish_candle" in signals:
             candlestick_score += 4
         if "strong_bullish_candle" in signals:
-            candlestick_score += 5
+            candlestick_score += strong_bullish_candle_points
         if "long_lower_shadow_support" in signals:
             candlestick_score += 3
         if "ma_reclaim" in signals:
@@ -1130,6 +1132,20 @@ def _real_technical_score_parts(candidate: dict[str, Any]) -> dict[str, Any]:
 
 def _real_technical_score(candidate: dict[str, Any]) -> int:
     return _real_technical_score_parts(candidate)["technical_score"]
+
+
+def _candlestick_signal_score_overrides(config: dict[str, Any]) -> dict[str, float]:
+    scoring = config.get("scoring") if isinstance(config.get("scoring"), dict) else {}
+    raw = scoring.get("candlestick_signal_score_overrides") if isinstance(scoring, dict) else {}
+    if not isinstance(raw, dict):
+        return {}
+    overrides: dict[str, float] = {}
+    for key, value in raw.items():
+        try:
+            overrides[str(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return overrides
 
 
 def _real_confidence(candidate: dict[str, Any], technical_score: int) -> float:
