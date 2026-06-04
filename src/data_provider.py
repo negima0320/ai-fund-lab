@@ -21,6 +21,17 @@ from investor_context import normalize_investor_type_records
 from jquants_plan import jquants_capabilities, jquants_has_capability, normalize_jquants_plan
 
 
+JQUANTS_ENDPOINTS: dict[str, dict[str, str]] = {
+    "listed_info": {"path": "/equities/master", "cache_dir": "listed_info", "filename": "YYYY-MM-DD.json"},
+    "prices": {"path": "/equities/bars/daily", "cache_dir": "prices", "filename": "YYYY-MM-DD.json"},
+    "financial_statements": {"path": "/fins/summary", "cache_dir": "financial_statements", "filename": "YYYY-MM-DD_to_YYYY-MM-DD.json"},
+    "earnings_calendar": {"path": "/equities/earnings-calendar", "cache_dir": "earnings_calendar", "filename": "YYYY-MM-DD(.json)|YYYY-MM-DD_to_YYYY-MM-DD.json"},
+    "trading_calendar": {"path": "/markets/calendar", "cache_dir": "trading_calendar", "filename": "YYYY-MM-DD_to_YYYY-MM-DD.json"},
+    "investor_types": {"path": "/equities/investor-types", "cache_dir": "investor_types", "filename": "YYYY-MM-DD_to_YYYY-MM-DD.json"},
+    "topix_prices": {"path": "/indices/bars/daily/topix", "cache_dir": "topix_prices", "filename": "YYYY-MM-DD_to_YYYY-MM-DD.json"},
+}
+
+
 SECTORS = [
     "情報・通信",
     "電気機器",
@@ -218,6 +229,18 @@ class JQuantsDataProvider(BaseDataProvider):
                 "to": end_date.isoformat(),
             },
         )
+
+    def get_trading_calendar(self, start_date: date, end_date: date) -> list[dict[str, Any]]:
+        return self._get_paginated_records(
+            "/markets/calendar",
+            {
+                "from": start_date.strftime("%Y%m%d"),
+                "to": end_date.strftime("%Y%m%d"),
+            },
+        )
+
+    def service(self, cache_root: Path) -> "JQuantsDataService":
+        return JQuantsDataService(self, cache_root)
 
     def get_topix_prices(self, start_date: date, end_date: Optional[date] = None) -> list[dict[str, Any]]:
         if not self.has_capability("topix_prices"):
@@ -666,6 +689,122 @@ class JQuantsDataProvider(BaseDataProvider):
             self.last_request_metadata = first_request_metadata
             self.last_request_metadata["records"] = len(records)
         return records
+
+
+class JQuantsDataService:
+    """Reusable J-Quants fetch/cache boundary for application and ML callers."""
+
+    def __init__(self, provider: JQuantsDataProvider, cache_root: Path) -> None:
+        self.provider = provider
+        self.cache_root = cache_root
+
+    def cache_path(self, endpoint: str, filename: str) -> Path:
+        spec = JQUANTS_ENDPOINTS[endpoint]
+        return self.cache_root / "jquants" / spec["cache_dir"] / filename
+
+    def fetch_listed_info_cached(self, target_date: date, force_refresh: bool = False) -> dict[str, Any]:
+        return self._fetch_cached(
+            endpoint="listed_info",
+            cache_path=self.cache_path("listed_info", f"{target_date.isoformat()}.json"),
+            start_date=target_date,
+            end_date=target_date,
+            fetcher=self.provider.get_listed_stocks,
+            force_refresh=force_refresh,
+        )
+
+    def fetch_daily_prices_cached(self, target_date: date, force_refresh: bool = False) -> dict[str, Any]:
+        return self._fetch_cached(
+            endpoint="prices",
+            cache_path=self.cache_path("prices", f"{target_date.isoformat()}.json"),
+            start_date=target_date,
+            end_date=target_date,
+            fetcher=lambda: self.provider.get_daily_prices(target_date),
+            force_refresh=force_refresh,
+        )
+
+    def fetch_trading_calendar_cached(self, start_date: date, end_date: date, force_refresh: bool = False) -> dict[str, Any]:
+        return self._fetch_cached(
+            endpoint="trading_calendar",
+            cache_path=self.cache_path("trading_calendar", f"{start_date.isoformat()}_to_{end_date.isoformat()}.json"),
+            start_date=start_date,
+            end_date=end_date,
+            fetcher=lambda: self.provider.get_trading_calendar(start_date, end_date),
+            force_refresh=force_refresh,
+        )
+
+    def fetch_topix_prices_cached(self, start_date: date, end_date: date, force_refresh: bool = False) -> dict[str, Any]:
+        return self.provider.fetch_topix_prices_cached(self.cache_root, start_date, end_date, force_refresh)
+
+    def fetch_investor_types_cached(self, start_date: date, end_date: date, force_refresh: bool = False) -> dict[str, Any]:
+        return self.provider.fetch_investor_types_cached(self.cache_root, start_date, end_date, force_refresh)
+
+    def fetch_earnings_calendar_cached(self, target_date: date, force_refresh: bool = False) -> dict[str, Any]:
+        return self.provider.fetch_earnings_calendar_cached(self.cache_root, target_date, force_refresh)
+
+    def fetch_earnings_calendar_period_cached(self, start_date: date, end_date: date, force_refresh: bool = False) -> dict[str, Any]:
+        return self.provider.fetch_earnings_calendar_period_cached(self.cache_root, start_date, end_date, force_refresh)
+
+    def fetch_financial_statements_cached(self, start_date: date, end_date: date, force_refresh: bool = False) -> dict[str, Any]:
+        return self.provider.fetch_financial_statements_cached(self.cache_root, start_date, end_date, force_refresh)
+
+    def _fetch_cached(
+        self,
+        endpoint: str,
+        cache_path: Path,
+        start_date: date,
+        end_date: date,
+        fetcher: Any,
+        force_refresh: bool,
+    ) -> dict[str, Any]:
+        if cache_path.exists() and not force_refresh:
+            records = _read_cached_json(cache_path).get("records", [])
+            if _records_usable(records):
+                _increment_fetch_stat(self.provider, "cache_hits")
+                return _cache_payload(records, cache_path, from_cache=True, available=True)
+        try:
+            _increment_fetch_stat(self.provider, "cache_misses")
+            records = fetcher()
+        except Exception as exc:
+            if cache_path.exists():
+                records = _read_cached_json(cache_path).get("records", [])
+                if _records_usable(records):
+                    _increment_fetch_stat(self.provider, "cache_hits")
+                    return _cache_payload(records, cache_path, from_cache=True, fallback_used=True, warning=str(exc), available=True)
+            error_fields = _api_error_payload_fields(exc)
+            return {
+                "records": [],
+                "cache_path": str(cache_path),
+                "from_cache": False,
+                "fallback_used": False,
+                "warning": f"{exc}; empty_cache" if cache_path.exists() else str(exc),
+                "available": False,
+                "saved": False,
+                "usable": False,
+                "reason": "empty_cache" if cache_path.exists() else error_fields.get("reason", "api_error"),
+                **error_fields,
+            }
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        if _records_usable(records):
+            _write_cache_records(cache_path, records)
+        else:
+            _record_empty_range(self.cache_root, endpoint, start_date, end_date, "empty_response")
+        available = _records_usable(records)
+        return {
+            "records": records,
+            "cache_path": str(cache_path),
+            "from_cache": False,
+            "fallback_used": False,
+            "warning": "" if available else "api_success_but_empty",
+            "available": available,
+            "saved": available,
+            "usable": available,
+            "api_status": "200",
+            "reason": "" if available else "empty_response",
+            "request_url": (getattr(self.provider, "last_request_metadata", {}) or {}).get("url", ""),
+            "request_params": (getattr(self.provider, "last_request_metadata", {}) or {}).get("params", {}),
+            "http_status": (getattr(self.provider, "last_request_metadata", {}) or {}).get("status_code", ""),
+            "response_body": (getattr(self.provider, "last_request_metadata", {}) or {}).get("response_body", ""),
+        }
 
 
 def _load_env(env_path: Optional[Path]) -> None:

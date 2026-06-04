@@ -1477,21 +1477,36 @@ def _fetch_jquants_smoke_payload(
     start_date: date,
     end_date: date,
 ) -> dict[str, Any]:
+    service = provider.service(ROOT / "data" / "cache") if hasattr(provider, "service") else None
     if endpoint == "listed_info":
+        if service is not None:
+            return service.fetch_listed_info_cached(end_date, force_refresh=True)
         records = provider.get_listed_stocks()
         return _jquants_smoke_cache_payload(endpoint, records, f"{end_date.isoformat()}.json", provider, end_date, end_date)
     if endpoint == "prices":
+        if service is not None:
+            return service.fetch_daily_prices_cached(end_date, force_refresh=True)
         records = provider.get_daily_prices(end_date)
         return _jquants_smoke_cache_payload(endpoint, records, f"{end_date.isoformat()}.json", provider, end_date, end_date)
     if endpoint == "topix_prices":
+        if service is not None:
+            return service.fetch_topix_prices_cached(start_date=start_date, end_date=end_date, force_refresh=True)
         return provider.fetch_topix_prices_cached(ROOT / "data" / "cache", start_date=start_date, end_date=end_date, force_refresh=True)
     if endpoint == "investor_types":
+        if service is not None:
+            return service.fetch_investor_types_cached(start_date=start_date, end_date=end_date, force_refresh=True)
         return provider.fetch_investor_types_cached(ROOT / "data" / "cache", start_date=start_date, end_date=end_date, force_refresh=True)
     if endpoint == "earnings_calendar":
+        if service is not None:
+            return service.fetch_earnings_calendar_cached(target_date=end_date, force_refresh=True)
         return provider.fetch_earnings_calendar_cached(ROOT / "data" / "cache", target_date=end_date, force_refresh=True)
     if endpoint == "financial_statements":
+        if service is not None:
+            return service.fetch_financial_statements_cached(start_date=start_date, end_date=end_date, force_refresh=True)
         return provider.fetch_financial_statements_cached(ROOT / "data" / "cache", start_date=start_date, end_date=end_date, force_refresh=True)
     if endpoint == "trading_calendar":
+        if service is not None:
+            return service.fetch_trading_calendar_cached(start_date=start_date, end_date=end_date, force_refresh=True)
         records = provider._get_paginated_records(
             "/markets/calendar",
             {"from": start_date.strftime("%Y%m%d"), "to": end_date.strftime("%Y%m%d")},

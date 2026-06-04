@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 
 import main as main_module
-from data_provider import JQuantsApiError, JQuantsDataProvider
+from data_provider import JQUANTS_ENDPOINTS, JQuantsApiError, JQuantsDataProvider
 from jquants_plan import jquants_capability_status
 
 
@@ -37,6 +37,33 @@ def test_financial_statements_api_success_creates_cache_file(monkeypatch, tmp_pa
     assert cached["from_cache"] is True
     assert cached["records"][0]["OperatingProfit"] == 1000
     assert (tmp_path / "jquants" / "financial_statements" / "2026-01-01_to_2026-03-06.json").exists()
+
+
+def test_jquants_data_service_caches_daily_prices(monkeypatch, tmp_path) -> None:
+    provider = _provider_without_init("light")
+    provider.last_request_metadata = {
+        "url": "https://api.jquants.com/v2/equities/bars/daily?date=20260306",
+        "params": {"date": "20260306"},
+        "status_code": 200,
+        "response_body": '{"data":[{}]}',
+    }
+    calls = {"count": 0}
+
+    def fake_fetch(_target_date):
+        calls["count"] += 1
+        return [{"Code": "1001", "Close": 1000}]
+
+    monkeypatch.setattr(provider, "get_daily_prices", fake_fetch)
+
+    payload = provider.service(tmp_path).fetch_daily_prices_cached(date(2026, 3, 6))
+    cached = provider.service(tmp_path).fetch_daily_prices_cached(date(2026, 3, 6))
+
+    assert JQUANTS_ENDPOINTS["prices"]["path"] == "/equities/bars/daily"
+    assert calls["count"] == 1
+    assert payload["saved"] is True
+    assert cached["from_cache"] is True
+    assert cached["records"][0]["Close"] == 1000
+    assert (tmp_path / "jquants" / "prices" / "2026-03-06.json").exists()
 
 
 def test_records_zero_cache_is_not_usable_or_cache_hit(monkeypatch, tmp_path) -> None:
