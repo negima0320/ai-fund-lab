@@ -881,6 +881,13 @@ def _round_lot_size(config: dict[str, Any]) -> int:
     return int(config.get("trading", {}).get("round_lot_size", 100))
 
 
+def _relative_strength_score_snapshot_value(item: dict[str, Any]) -> Any:
+    if "relative_strength_score" not in item:
+        return None
+    value = item.get("relative_strength_score")
+    return 0.0 if value is None else value
+
+
 def _technical_snapshot(item: dict[str, Any]) -> dict[str, Any]:
     selected_reason = item.get("selection_reason") or item.get("selected_reason") or item.get("reason", "")
     return {
@@ -929,7 +936,7 @@ def _technical_snapshot(item: dict[str, Any]) -> dict[str, Any]:
         "relative_strength_5d": item.get("relative_strength_5d"),
         "relative_strength_10d": item.get("relative_strength_10d"),
         "relative_strength_20d": item.get("relative_strength_20d"),
-        "relative_strength_score": item.get("relative_strength_score"),
+        "relative_strength_score": _relative_strength_score_snapshot_value(item),
         "investor_context_source": item.get("investor_context_source"),
         "investor_context_week": item.get("investor_context_week"),
         "overseas_net_buy": item.get("overseas_net_buy"),
@@ -1084,7 +1091,10 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "earnings_candidate_date",
         "earnings_days_until_earnings",
     ]
-    return {key: position.get(key) for key in keys if key in position}
+    snapshot = {key: position.get(key) for key in keys if key in position}
+    if "relative_strength_score" in snapshot and snapshot["relative_strength_score"] is None:
+        snapshot["relative_strength_score"] = 0.0
+    return snapshot
 
 
 def initial_live_paper_state(config: dict[str, Any]) -> dict[str, Any]:

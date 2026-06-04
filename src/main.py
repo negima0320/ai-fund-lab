@@ -13310,6 +13310,10 @@ RUNTIME_SCORE_FIELDS = {
     "dynamic_exposure_source_lag_days", "dynamic_exposure_source_fallback_used",
     "dynamic_exposure_same_day_context_used", "market_filter_applied", "market_filter_reason",
     "source_provider", "config_version",
+    "stock_return_5d", "stock_return_10d", "stock_return_20d",
+    "benchmark_source", "benchmark_return_5d", "benchmark_return_10d", "benchmark_return_20d",
+    "relative_strength_5d", "relative_strength_10d", "relative_strength_20d",
+    "relative_strength_score", "topix_records_loaded", "topix_api_calls",
 }
 
 ANALYSIS_SCORE_FIELDS = RUNTIME_SCORE_FIELDS | {
@@ -13355,6 +13359,10 @@ RUNTIME_TRADE_FIELDS = {
     "conditional_hold_extension_ma25_at_max_holding",
     "conditional_hold_extension_previous_ma25_at_max_holding",
     "conditional_hold_extension_relative_strength_score_at_max_holding",
+    "stock_return_5d", "stock_return_10d", "stock_return_20d",
+    "benchmark_source", "benchmark_return_5d", "benchmark_return_10d", "benchmark_return_20d",
+    "relative_strength_5d", "relative_strength_10d", "relative_strength_20d",
+    "relative_strength_score", "topix_records_loaded", "topix_api_calls",
     "config_version",
 }
 
@@ -16805,6 +16813,41 @@ def _score_payload_cache_issue(payload: dict[str, Any], config: dict[str, Any], 
     market_expansion_issue = _market_expansion_score_storage_issue(payload, config)
     if market_expansion_issue:
         return market_expansion_issue
+    relative_strength_issue = _relative_strength_score_storage_issue(payload, config)
+    if relative_strength_issue:
+        return relative_strength_issue
+    return ""
+
+
+def _relative_strength_score_storage_issue(payload: dict[str, Any], config: dict[str, Any]) -> str:
+    if not _relative_strength_enabled_for_indicators(config):
+        return ""
+    rows: list[dict[str, Any]] = []
+    for key in ("selected", "scores"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            rows.extend(item for item in value if isinstance(item, dict))
+    if not rows:
+        return ""
+    required_fields = [
+        "stock_return_5d",
+        "stock_return_10d",
+        "stock_return_20d",
+        "benchmark_source",
+        "benchmark_return_5d",
+        "benchmark_return_10d",
+        "benchmark_return_20d",
+        "relative_strength_5d",
+        "relative_strength_10d",
+        "relative_strength_20d",
+        "relative_strength_score",
+    ]
+    for row in rows:
+        missing = [field for field in required_fields if field not in row]
+        if missing:
+            return "relative_strength_fields_missing"
+        if row.get("relative_strength_score") is None:
+            return "relative_strength_score_missing"
     return ""
 
 

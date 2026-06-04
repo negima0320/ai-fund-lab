@@ -1833,6 +1833,48 @@ def test_scored_candidates_cache_missing_hash_is_stale(config_copy: dict) -> Non
     assert not main_module._scored_candidates_cache_valid(payload, config_copy, "2026-01-05")
 
 
+def test_relative_strength_enabled_score_cache_requires_rs_fields(monkeypatch) -> None:
+    config = main_module.load_profile("rookie_dealer_02_v2_26")
+    monkeypatch.setattr(main_module, "_candidate_universe_cache_payload", lambda *_args, **_kwargs: None)
+    cache = main_module._score_cache_payload(config, "2026-01-05")
+    base_payload = {
+        "date": "2026-01-05",
+        "profile_id": main_module.profile_id_from(config),
+        "config_version": main_module.config_version_from(config),
+        **cache,
+    }
+
+    stale_payload = {
+        **base_payload,
+        "scores": [{"code": "1001", "selected": True, "relative_strength_score": None}],
+        "selected": [{"code": "1001", "selected": True, "relative_strength_score": None}],
+    }
+    assert main_module._score_payload_cache_issue(stale_payload, config, "2026-01-05") == "relative_strength_fields_missing"
+
+    valid_payload = {
+        **base_payload,
+        "scores": [
+            {
+                "code": "1001",
+                "selected": True,
+                "stock_return_5d": None,
+                "stock_return_10d": None,
+                "stock_return_20d": None,
+                "benchmark_source": "unavailable",
+                "benchmark_return_5d": None,
+                "benchmark_return_10d": None,
+                "benchmark_return_20d": None,
+                "relative_strength_5d": None,
+                "relative_strength_10d": None,
+                "relative_strength_20d": None,
+                "relative_strength_score": 0,
+            }
+        ],
+        "selected": [],
+    }
+    assert main_module._score_payload_cache_issue(valid_payload, config, "2026-01-05") == ""
+
+
 def test_score_integrity_audit_ok_for_valid_score(config_copy: dict, tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(main_module, "ROOT", tmp_path)
     config_version = main_module.config_version_from(config_copy)

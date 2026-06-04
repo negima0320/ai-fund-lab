@@ -9,6 +9,7 @@ from benchmark_provider import build_relative_strength_benchmark
 from data_provider import JQuantsDataProvider
 from indicators import calculate_indicators
 from profile_loader import load_profile
+from paper_trade import _position_feature_snapshot, _technical_snapshot
 from real_screening import screen_candidates
 from scoring import score_real_candidates
 
@@ -560,6 +561,25 @@ def test_scoring_storage_keeps_relative_strength_log_fields() -> None:
         assert field in stored
     assert stored["benchmark_source"] == "topix"
     assert stored["score_components"]["relative_strength_score"] == 10
+
+
+def test_trade_snapshots_normalize_missing_relative_strength_score() -> None:
+    item = {
+        "code": "1001",
+        "relative_strength_score": None,
+        "relative_strength_5d": None,
+        "stock_return_5d": None,
+        "benchmark_return_5d": None,
+    }
+
+    technical = _technical_snapshot(item)
+    position = _position_feature_snapshot(item)
+
+    assert technical["relative_strength_score"] == 0.0
+    assert position["relative_strength_score"] == 0.0
+    assert technical["relative_strength_5d"] is None
+    assert technical["stock_return_5d"] is None
+    assert technical["benchmark_return_5d"] is None
 
 
 def test_fast_analysis_omits_rejected_candidate_storage() -> None:
