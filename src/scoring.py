@@ -496,9 +496,11 @@ def _apply_selection_rules(
     selected_count = 0
     max_selected = selection_config["max_selected"]
     min_score = selection_config["min_score"]
+    score_upper_filter = selection_config.get("score_upper_filter") or {}
     if risk_off:
         max_selected = min(max_selected, market_filter["risk_off_max_buy_orders"])
         min_score = max(min_score, market_filter["risk_off_min_score"])
+    risk_off_rs_min_score = market_filter.get("risk_off_relative_strength_min_score")
 
     for index, item in enumerate(scored, start=1):
         item["rank"] = index
@@ -526,10 +528,35 @@ def _apply_selection_rules(
         item["market_section_filter_checked"] = True
         item["market_section_filter_blocked"] = market_section_blocked
         item["market_section_filter_reason"] = "market_filter_excluded" if market_section_blocked else ""
+        risk_off_rs_blocked = False
+        if risk_off and risk_off_rs_min_score is not None:
+            rs_score = _optional_float(item.get("relative_strength_score"))
+            risk_off_rs_blocked = rs_score is None or rs_score < float(risk_off_rs_min_score)
+        item["risk_off_rs_filter_checked"] = bool(risk_off and risk_off_rs_min_score is not None)
+        item["risk_off_rs_filter_blocked"] = risk_off_rs_blocked
+        item["risk_off_rs_filter_min_score"] = risk_off_rs_min_score
+        item["risk_off_rs_filter_reason"] = "risk_off_rs_filter" if risk_off_rs_blocked else ""
+        score_upper_threshold = _optional_float(score_upper_filter.get("max_entry_score"))
+        score_upper_blocked = False
+        if bool(score_upper_filter.get("enabled")) and score_upper_threshold is not None:
+            total_score = _optional_float(item.get("total_score"))
+            score_upper_blocked = total_score is not None and total_score >= score_upper_threshold
+        item["score_upper_filter_checked"] = bool(score_upper_filter.get("enabled"))
+        item["score_upper_filter_blocked"] = score_upper_blocked
+        item["score_upper_filter_threshold"] = score_upper_threshold
+        item["score_upper_filter_reason"] = "score_upper_filter" if score_upper_blocked else ""
 
         if market_section_blocked:
             item["selected"] = False
             item["rejected_reason"] = "market_filter_excluded"
+            item["reason"] = item["rejected_reason"]
+        elif score_upper_blocked:
+            item["selected"] = False
+            item["rejected_reason"] = "score_upper_filter"
+            item["reason"] = item["rejected_reason"]
+        elif risk_off_rs_blocked:
+            item["selected"] = False
+            item["rejected_reason"] = "risk_off_rs_filter"
             item["reason"] = item["rejected_reason"]
         elif investor_filter_result["blocked"]:
             item["rejected_reason"] = investor_filter_result["reason"]
@@ -578,6 +605,8 @@ def _apply_selection_rules(
                 not item.get("investor_context_filter_blocked")
                 and not item.get("earnings_filter_blocked")
                 and not item.get("market_section_filter_blocked")
+                and not item.get("score_upper_filter_blocked")
+                and not item.get("risk_off_rs_filter_blocked")
                 and not item.get("rsi_volume_hot_zone_excluded")
                 and _meets_top_pick_selection(item, selection_config)
                 and not _is_conditional_low_score_candidate(item, selection_config)
@@ -598,6 +627,16 @@ def _apply_selection_rules(
         "risk_off_max_buy_orders": market_filter["risk_off_max_buy_orders"],
         "risk_off_min_score": market_filter["risk_off_min_score"],
         "risk_off_disable_top_pick": market_filter["risk_off_disable_top_pick"],
+        "risk_off_relative_strength_min_score": risk_off_rs_min_score,
+        "risk_off_rs_filter_rejected_count": sum(1 for item in scored if item.get("risk_off_rs_filter_blocked")),
+        "risk_off_rs_filter_rejected_codes": [
+            item.get("code") for item in scored if item.get("risk_off_rs_filter_blocked")
+        ],
+        "score_upper_filter": score_upper_filter,
+        "score_upper_filter_rejected_count": sum(1 for item in scored if item.get("score_upper_filter_blocked")),
+        "score_upper_filter_rejected_codes": [
+            item.get("code") for item in scored if item.get("score_upper_filter_blocked")
+        ],
         "allowed_sections": sorted(allowed_sections),
         "allow_unknown_market": allow_unknown_market,
         "candidate_market_counts": market_section_counts(scored),
@@ -616,6 +655,7 @@ def _selection_config(config: dict[str, Any]) -> dict[str, Any]:
     allow_if = conditional.get("allow_if", {}) if isinstance(conditional, dict) else {}
     return {
         "min_score": float(selection.get("min_score", 70)),
+        "score_upper_filter": _score_upper_filter_config(config),
         "market_min_score_overrides": _market_min_score_overrides(selection),
         "fallback_min_score": float(selection.get("fallback_min_score", 65)),
         "min_confidence": float(selection.get("min_confidence", config["scoring"].get("confidence_min_for_buy", 0.7))),
@@ -643,6 +683,17 @@ def _selection_config(config: dict[str, Any]) -> dict[str, Any]:
             "reject_below": float(investor_filter.get("reject_below", 0)) if isinstance(investor_filter, dict) else 0.0,
             "reason": str(investor_filter.get("reason", "investor_context_negative")) if isinstance(investor_filter, dict) else "investor_context_negative",
         },
+    }
+
+
+def _score_upper_filter_config(config: dict[str, Any]) -> dict[str, Any]:
+    payload = config.get("score_upper_filter", {})
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "enabled": bool(payload.get("enabled", False)),
+        "max_entry_score": _optional_float(payload.get("max_entry_score")),
+        "rejected_reason": str(payload.get("rejected_reason") or "score_upper_filter"),
     }
 
 
@@ -688,6 +739,7 @@ def _market_filter_config(config: dict[str, Any]) -> dict[str, Any]:
         "risk_off_max_buy_orders": int(market_filter.get("risk_off_max_buy_orders", 1)),
         "risk_off_min_score": float(market_filter.get("risk_off_min_score", 75)),
         "risk_off_disable_top_pick": bool(market_filter.get("risk_off_disable_top_pick", True)),
+        "risk_off_relative_strength_min_score": _optional_float(market_filter.get("risk_off_relative_strength_min_score")),
         "allowed_sections": allowed_market_sections(config),
         "allow_unknown_market": bool(market_filter.get("allow_unknown_market", False)),
     }

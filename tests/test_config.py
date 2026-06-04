@@ -403,6 +403,32 @@ def test_rookie_dealer_02_v2_63_risk_off_entry_filter_profile_loads() -> None:
     assert load_profile("rookie_dealer_02_v2.63")["profile_id"] == "rookie_dealer_02_v2_63"
 
 
+def test_rookie_dealer_02_v2_64_risk_off_relative_strength_filter_profile_loads() -> None:
+    profile_64 = load_profile("rookie_dealer_02_v2_64")
+
+    assert profile_64["profile_id"] == "rookie_dealer_02_v2_64"
+    assert profile_64["trading"] == load_profile("rookie_dealer_02_v2_26")["trading"]
+    assert profile_64["scoring"] == load_profile("rookie_dealer_02_v2_26")["scoring"]
+    assert profile_64["capital_utilization_policy"] == load_profile("rookie_dealer_02_v2_26")["capital_utilization_policy"]
+    assert profile_64["market_filter"]["risk_off_min_score"] == 50
+    assert profile_64["market_filter"]["risk_off_relative_strength_min_score"] == 10
+    assert profile_64["market_filter"]["risk_off_max_buy_orders"] == load_profile("rookie_dealer_02_v2_26")["market_filter"]["risk_off_max_buy_orders"]
+    assert load_profile("rookie_dealer_02_v2.64")["profile_id"] == "rookie_dealer_02_v2_64"
+
+
+def test_rookie_dealer_02_v2_65_score_upper_filter_profile_loads() -> None:
+    profile_65 = load_profile("rookie_dealer_02_v2_65")
+
+    assert profile_65["profile_id"] == "rookie_dealer_02_v2_65"
+    assert profile_65["trading"] == load_profile("rookie_dealer_02_v2_26")["trading"]
+    assert profile_65["scoring"] == load_profile("rookie_dealer_02_v2_26")["scoring"]
+    assert profile_65["capital_utilization_policy"] == load_profile("rookie_dealer_02_v2_26")["capital_utilization_policy"]
+    assert profile_65["score_upper_filter"]["enabled"] is True
+    assert profile_65["score_upper_filter"]["max_entry_score"] == 55
+    assert profile_65["score_upper_filter"]["rejected_reason"] == "score_upper_filter"
+    assert load_profile("rookie_dealer_02_v2.65")["profile_id"] == "rookie_dealer_02_v2_65"
+
+
 def test_rookie_dealer_02_v2_40_affordable_fallback_quality_profile_loads() -> None:
     profile_40 = load_profile("rookie_dealer_02_v2_40")
 

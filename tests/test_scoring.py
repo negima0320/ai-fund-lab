@@ -497,6 +497,104 @@ def test_risk_off_entry_filter_can_block_even_high_score_candidates(config_copy:
     assert all(item["rejected_reason"] == "risk_offのため買付抑制" for item in scored)
 
 
+def test_risk_off_relative_strength_filter_blocks_only_weak_rs(config_copy: dict) -> None:
+    scored = [
+        scored_item("1001", total_score=90, volume_ratio=4.0, rsi=55),
+        scored_item("1002", total_score=85, volume_ratio=3.0, rsi=50),
+    ]
+    scored[0]["relative_strength_score"] = 9
+    scored[1]["relative_strength_score"] = 10
+    market_filter = {
+        "enabled": True,
+        "risk_off_buy_policy": "conservative",
+        "risk_off_max_buy_orders": 1,
+        "risk_off_min_score": 50,
+        "risk_off_disable_top_pick": True,
+        "risk_off_relative_strength_min_score": 10,
+        "allowed_sections": ["TSEPrime"],
+        "allow_unknown_market": False,
+    }
+
+    summary = _apply_selection_rules(scored, _selection_config(config_copy), market_filter, "risk_off")
+
+    assert summary["risk_off_rs_filter_rejected_count"] == 1
+    assert summary["risk_off_rs_filter_rejected_codes"] == ["1001"]
+    assert scored[0]["selected"] is False
+    assert scored[0]["rejected_reason"] == "risk_off_rs_filter"
+    assert scored[1]["selected"] is True
+
+
+def test_risk_off_relative_strength_filter_does_not_affect_neutral(config_copy: dict) -> None:
+    scored = [scored_item("1001", total_score=90, volume_ratio=4.0, rsi=55)]
+    scored[0]["relative_strength_score"] = 0
+    market_filter = {
+        "enabled": True,
+        "risk_off_buy_policy": "conservative",
+        "risk_off_max_buy_orders": 1,
+        "risk_off_min_score": 50,
+        "risk_off_disable_top_pick": True,
+        "risk_off_relative_strength_min_score": 10,
+        "allowed_sections": ["TSEPrime"],
+        "allow_unknown_market": False,
+    }
+
+    summary = _apply_selection_rules(scored, _selection_config(config_copy), market_filter, "neutral")
+
+    assert summary["risk_off_rs_filter_rejected_count"] == 0
+    assert scored[0]["selected"] is True
+    assert not scored[0]["risk_off_rs_filter_checked"]
+
+
+def test_score_upper_filter_blocks_high_scores_across_regimes(config_copy: dict) -> None:
+    selection_config = _selection_config(
+        {
+            **config_copy,
+            "score_upper_filter": {"enabled": True, "max_entry_score": 55},
+        }
+    )
+    market_filter = disabled_market_filter()
+    scored = [
+        scored_item("1001", total_score=54.9, volume_ratio=4.0, rsi=55),
+        scored_item("1002", total_score=55.0, volume_ratio=4.0, rsi=55),
+        scored_item("1003", total_score=60.0, volume_ratio=4.0, rsi=55),
+    ]
+
+    summary = _apply_selection_rules(scored, selection_config, market_filter, "risk_on")
+
+    assert summary["score_upper_filter_rejected_count"] == 2
+    assert summary["score_upper_filter_rejected_codes"] == ["1002", "1003"]
+    assert scored[0]["selected"] is True
+    assert scored[1]["selected"] is False
+    assert scored[1]["rejected_reason"] == "score_upper_filter"
+    assert scored[2]["rejected_reason"] == "score_upper_filter"
+
+
+def test_score_upper_filter_applies_in_risk_off_too(config_copy: dict) -> None:
+    selection_config = _selection_config(
+        {
+            **config_copy,
+            "score_upper_filter": {"enabled": True, "max_entry_score": 55},
+        }
+    )
+    scored = [scored_item("1001", total_score=56.0, volume_ratio=4.0, rsi=55)]
+    market_filter = {
+        "enabled": True,
+        "risk_off_buy_policy": "conservative",
+        "risk_off_max_buy_orders": 1,
+        "risk_off_min_score": 50,
+        "risk_off_disable_top_pick": True,
+        "allowed_sections": ["TSEPrime"],
+        "allow_unknown_market": False,
+    }
+
+    summary = _apply_selection_rules(scored, selection_config, market_filter, "risk_off")
+
+    assert summary["applied"] is True
+    assert summary["score_upper_filter_rejected_count"] == 1
+    assert scored[0]["selected"] is False
+    assert scored[0]["rejected_reason"] == "score_upper_filter"
+
+
 def test_neutral_keeps_existing_top_pick_behavior(config_copy: dict) -> None:
     result = score_real_candidates(
         [

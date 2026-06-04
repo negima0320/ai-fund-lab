@@ -27,6 +27,8 @@ def test_list_profiles_outputs_registry_rows(capsys) -> None:
     assert "rookie_dealer_02_v2_62 | experiment | light" in output
     assert "not_recommended | 条件付き保有延長 + 延長後失速撤退ガード検証" in output
     assert "rookie_dealer_02_v2_63 | experiment | light" in output
+    assert "rookie_dealer_02_v2_64 | experiment | light" in output
+    assert "rookie_dealer_02_v2_65 | experiment | light" in output
 
 
 def test_profile_info_outputs_formula_and_compare_command(capsys) -> None:
@@ -161,6 +163,8 @@ def test_run_experiments_selects_v2_26_dynamic_exposure_profiles() -> None:
         "rookie_dealer_02_v2_61",
         "rookie_dealer_02_v2_62",
         "rookie_dealer_02_v2_63",
+        "rookie_dealer_02_v2_64",
+        "rookie_dealer_02_v2_65",
     ]
 
 

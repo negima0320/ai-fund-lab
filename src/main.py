@@ -5436,6 +5436,7 @@ def _experiment_scoring_signature(config: dict[str, Any]) -> str:
         "volume_filter": config.get("volume_filter", {}),
         "affordability_filter": config.get("affordability_filter", {}),
         "winner_loser_rule_adjustment": config.get("winner_loser_rule_adjustment", {}),
+        "score_upper_filter": config.get("score_upper_filter", {}),
         "dynamic_exposure": config.get("dynamic_exposure", {}),
         "screening": config.get("screening", {}),
         "market_filter": {
@@ -5445,6 +5446,7 @@ def _experiment_scoring_signature(config: dict[str, Any]) -> str:
             "risk_off_max_buy_orders": config.get("market_filter", {}).get("risk_off_max_buy_orders"),
             "risk_off_min_score": config.get("market_filter", {}).get("risk_off_min_score"),
             "risk_off_disable_top_pick": config.get("market_filter", {}).get("risk_off_disable_top_pick"),
+            "risk_off_relative_strength_min_score": config.get("market_filter", {}).get("risk_off_relative_strength_min_score"),
         },
         "earnings_filter": config.get("earnings_filter", {}),
         "investor_context_filter": config.get("investor_context_filter", {}),
@@ -7127,10 +7129,13 @@ def _build_profile_diff_analysis_for_pair(
     target_profile_id = profile_id_from(target_config)
     base_rows = _load_scoring_rows_for_profile(db_path, base_profile_id, start_date_text, end_date_text)
     target_rows = _load_scoring_rows_for_profile(db_path, target_profile_id, start_date_text, end_date_text)
+    target_rejected_rows = _load_rejected_scoring_rows_from_logs(target_profile_id, start_date_text, end_date_text)
     base_trade_rows = _load_trade_rows_for_profile(db_path, base_profile_id, start_date_text, end_date_text)
     target_trade_rows = _load_trade_rows_for_profile(db_path, target_profile_id, start_date_text, end_date_text)
     base_selected = _selected_key_map_with_execution_fallback(base_rows, base_trade_rows)
     target_selected = _selected_key_map_with_execution_fallback(target_rows, target_trade_rows)
+    target_rows_by_key = _scoring_row_key_map(target_rejected_rows + target_rows)
+    target_filter_rows = target_rows + target_rejected_rows
     newly_selected_keys = sorted(set(target_selected) - set(base_selected))
     removed_keys = sorted(set(base_selected) - set(target_selected))
     outcome_diff = _trade_outcome_diff(base_trade_rows, target_trade_rows)
@@ -7153,6 +7158,10 @@ def _build_profile_diff_analysis_for_pair(
         "target_risk_off_candidate_count": _risk_off_candidate_count(target_rows),
         "base_risk_off_rejected_count": _risk_off_rejected_count(base_rows),
         "target_risk_off_rejected_count": _risk_off_rejected_count(target_rows),
+        "risk_off_rs_filter_rejected_count": _risk_off_rs_filter_rejected_count(target_filter_rows),
+        "risk_off_rs_filter_rejected_codes": _risk_off_rs_filter_rejected_codes(target_filter_rows),
+        "score_upper_filter_rejected_count": _score_upper_filter_rejected_count(target_filter_rows),
+        "score_upper_filter_rejected_codes": _score_upper_filter_rejected_codes(target_filter_rows),
         "base_conditional_selected_count": _conditional_selected_count(base_rows),
         "target_conditional_selected_count": _conditional_selected_count(target_rows),
         "base_conditional_rejected_count": _conditional_rejected_count(base_rows),
@@ -7175,7 +7184,10 @@ def _build_profile_diff_analysis_for_pair(
         "removed_count": len(removed_keys),
         "selection_diff_count": selection_diff_count,
         "newly_selected": [_selection_diff_record(target_selected[key]) for key in newly_selected_keys],
-        "removed": [_selection_diff_record(base_selected[key]) for key in removed_keys],
+        "removed": [
+            _selection_diff_record(base_selected[key], target_row=target_rows_by_key.get(key))
+            for key in removed_keys
+        ],
         "trade_outcome_diff": outcome_diff,
         "outcome_diff_count": outcome_diff_count,
         "summary_diff": summary_diff,
@@ -7226,6 +7238,55 @@ def _load_scoring_rows_from_existing_outputs(profile_id: str, start_date_text: s
         if payload_rows:
             rows.extend(payload_rows)
     rows.sort(key=lambda item: (str(item.get("date") or ""), _safe_rank_sort_key(item.get("rank")), str(item.get("code") or "")))
+    return rows
+
+
+def _load_rejected_scoring_rows_from_logs(profile_id: str, start_date_text: str, end_date_text: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    roots = [
+        ROOT / "logs" / "backtests" / profile_id / f"{start_date_text}_to_{end_date_text}",
+        ROOT / "logs" / "scoring" / profile_id,
+    ]
+    seen_dates: set[str] = set()
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in sorted(root.glob("scoring_*.json")):
+            target_date = _date_from_scoring_output_name(path)
+            if not target_date or not (start_date_text <= target_date <= end_date_text):
+                continue
+            if target_date in seen_dates:
+                continue
+            payload_rows = _rejected_scoring_rows_from_payload_path(path, profile_id, target_date)
+            if payload_rows:
+                rows.extend(payload_rows)
+                seen_dates.add(target_date)
+    rows.sort(key=lambda item: (str(item.get("date") or ""), _safe_rank_sort_key(item.get("rank")), str(item.get("code") or "")))
+    return rows
+
+
+def _rejected_scoring_rows_from_payload_path(path: Path, profile_id: str, target_date: str) -> list[dict[str, Any]]:
+    try:
+        payload = read_json(path)
+    except Exception:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    rejected = payload.get("rejected", [])
+    if not isinstance(rejected, list):
+        return []
+    rows = []
+    for item in rejected:
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        row.setdefault("date", target_date)
+        row.setdefault("profile_id", payload.get("profile_id") or profile_id)
+        row.setdefault("profile_name", payload.get("profile_name") or profile_id)
+        row.setdefault("source_provider", payload.get("source_provider"))
+        row.setdefault("config_version", payload.get("config_version"))
+        row["_selection_diff_source"] = str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path)
+        rows.append(row)
     return rows
 
 
@@ -7394,6 +7455,14 @@ def _selected_key_map(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[
         (str(row.get("date")), str(row.get("code"))): row
         for row in rows
         if bool(row.get("selected"))
+    }
+
+
+def _scoring_row_key_map(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+    return {
+        (str(row.get("date")), str(row.get("code"))): row
+        for row in rows
+        if row.get("date") and row.get("code")
     }
 
 
@@ -7729,6 +7798,32 @@ def _risk_off_rejected_count(rows: list[dict[str, Any]]) -> int:
     )
 
 
+def _risk_off_rs_filter_rejected_count(rows: list[dict[str, Any]]) -> int:
+    return sum(1 for row in rows if str(row.get("rejected_reason") or "") == "risk_off_rs_filter")
+
+
+def _risk_off_rs_filter_rejected_codes(rows: list[dict[str, Any]]) -> list[str]:
+    codes = [
+        str(row.get("code") or "")
+        for row in rows
+        if str(row.get("rejected_reason") or "") == "risk_off_rs_filter" and row.get("code")
+    ]
+    return sorted(set(codes))
+
+
+def _score_upper_filter_rejected_count(rows: list[dict[str, Any]]) -> int:
+    return sum(1 for row in rows if str(row.get("rejected_reason") or "") == "score_upper_filter")
+
+
+def _score_upper_filter_rejected_codes(rows: list[dict[str, Any]]) -> list[str]:
+    codes = [
+        str(row.get("code") or "")
+        for row in rows
+        if str(row.get("rejected_reason") or "") == "score_upper_filter" and row.get("code")
+    ]
+    return sorted(set(codes))
+
+
 def _conditional_selected_count(rows: list[dict[str, Any]]) -> int:
     return sum(
         1
@@ -7745,7 +7840,8 @@ def _conditional_rejected_count(rows: list[dict[str, Any]]) -> int:
     )
 
 
-def _selection_diff_record(row: dict[str, Any]) -> dict[str, Any]:
+def _selection_diff_record(row: dict[str, Any], target_row: dict[str, Any] | None = None) -> dict[str, Any]:
+    target_row = target_row or {}
     return {
         "date": row.get("date"),
         "code": row.get("code"),
@@ -7754,6 +7850,8 @@ def _selection_diff_record(row: dict[str, Any]) -> dict[str, Any]:
         "total_score": row.get("total_score"),
         "market_regime": row.get("market_regime"),
         "rejected_reason": row.get("rejected_reason"),
+        "target_rejected_reason": target_row.get("rejected_reason"),
+        "target_reason": target_row.get("reason"),
         "reason": row.get("reason"),
         "selection_source": row.get("selection_source"),
         "affordable_fallback_original_code": row.get("affordable_fallback_original_code"),
@@ -7768,6 +7866,7 @@ def _effective_config_differences(base_config: dict[str, Any], target_config: di
         ("market_filter", "risk_off_max_buy_orders"),
         ("market_filter", "risk_off_min_score"),
         ("market_filter", "risk_off_disable_top_pick"),
+        ("market_filter", "risk_off_relative_strength_min_score"),
         ("selection", "min_score"),
         ("selection", "fallback_min_score"),
         ("selection", "top_pick_min_score"),
@@ -7790,6 +7889,7 @@ def _effective_config_differences(base_config: dict[str, Any], target_config: di
                 }
             )
     root_keys = [
+        "score_upper_filter",
         "conditional_hold_extension",
         "holding_revaluation",
         "holding_signal_revaluation",
@@ -7970,6 +8070,10 @@ def _profile_diff_analysis_lines(analysis: dict[str, Any]) -> list[str]:
         f"- target risk_off candidate count: {analysis.get('target_risk_off_candidate_count')}",
         f"- base risk_off rejected count: {analysis.get('base_risk_off_rejected_count')}",
         f"- target risk_off rejected count: {analysis.get('target_risk_off_rejected_count')}",
+        f"- risk_off_rs_filter_rejected_count: {analysis.get('risk_off_rs_filter_rejected_count', 0)}",
+        f"- risk_off_rs_filter_rejected_codes: {_compact_json(analysis.get('risk_off_rs_filter_rejected_codes') or [])}",
+        f"- score_upper_filter_rejected_count: {analysis.get('score_upper_filter_rejected_count', 0)}",
+        f"- score_upper_filter_rejected_codes: {_compact_json(analysis.get('score_upper_filter_rejected_codes') or [])}",
         f"- base conditional selected count: {analysis.get('base_conditional_selected_count')}",
         f"- target conditional selected count: {analysis.get('target_conditional_selected_count')}",
         f"- base conditional rejected count: {analysis.get('base_conditional_rejected_count')}",
@@ -8123,7 +8227,8 @@ def _selection_diff_lines(items: list[dict[str, Any]]) -> list[str]:
         (
             f"- {item.get('date')} {item.get('code')} {item.get('name')}: "
             f"rank {item.get('rank')}, score {_format_optional_number(item.get('total_score'))}, "
-            f"market {item.get('market_regime') or 'unknown'}"
+            f"market {item.get('market_regime') or 'unknown'}, "
+            f"reason {item.get('target_rejected_reason') or item.get('target_reason') or item.get('rejected_reason') or item.get('reason') or '-'}"
         )
         for item in items[:50]
     ]
@@ -13309,6 +13414,10 @@ RUNTIME_SCORE_FIELDS = {
     "dynamic_exposure_regime", "dynamic_exposure_source_date", "dynamic_exposure_source_date_mode",
     "dynamic_exposure_source_lag_days", "dynamic_exposure_source_fallback_used",
     "dynamic_exposure_same_day_context_used", "market_filter_applied", "market_filter_reason",
+    "risk_off_rs_filter_checked", "risk_off_rs_filter_blocked",
+    "risk_off_rs_filter_min_score", "risk_off_rs_filter_reason",
+    "score_upper_filter_checked", "score_upper_filter_blocked",
+    "score_upper_filter_threshold", "score_upper_filter_reason",
     "source_provider", "config_version",
     "stock_return_5d", "stock_return_10d", "stock_return_20d",
     "benchmark_source", "benchmark_return_5d", "benchmark_return_10d", "benchmark_return_20d",

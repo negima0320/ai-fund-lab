@@ -758,6 +758,36 @@ profiles:
       relaxed_pending_target_exposure: true
       risk_off_entry_filter: true
 
+  rookie_dealer_02_v2_64:
+    role: experiment
+    description: v2.26ベース risk_off局面でrelative_strength_score 10未満を除外する検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      risk_off_rs_filter: true
+
+  rookie_dealer_02_v2_65:
+    role: experiment
+    description: v2.26ベース entry_score 55以上を除外する過熱掴み検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      score_upper_filter: true
+
   rookie_dealer_03_growth:
     role: experiment
     description: 東証グロース市場のみを対象にする攻撃型検証
