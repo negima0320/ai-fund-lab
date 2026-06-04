@@ -454,6 +454,21 @@ def test_rookie_dealer_02_v2_67_strong_bullish_candle_score_adjustment_profile_l
     assert load_profile("rookie_dealer_02_v2.67")["profile_id"] == "rookie_dealer_02_v2_67"
 
 
+def test_rookie_dealer_02_v2_68_score_upper_filter_profile_loads() -> None:
+    profile_68 = load_profile("rookie_dealer_02_v2_68")
+
+    assert profile_68["profile_id"] == "rookie_dealer_02_v2_68"
+    assert profile_68["trading"] == load_profile("rookie_dealer_02_v2_65")["trading"]
+    assert profile_68["scoring"] == load_profile("rookie_dealer_02_v2_65")["scoring"]
+    assert profile_68["capital_utilization_policy"] == load_profile("rookie_dealer_02_v2_65")["capital_utilization_policy"]
+    assert "candlestick_signal_score_overrides" not in profile_68["scoring"]
+    assert "conditional_hold_extension" not in profile_68
+    assert profile_68["score_upper_filter"]["enabled"] is True
+    assert profile_68["score_upper_filter"]["max_entry_score"] == 57
+    assert profile_68["score_upper_filter"]["rejected_reason"] == "score_upper_filter"
+    assert load_profile("rookie_dealer_02_v2.68")["profile_id"] == "rookie_dealer_02_v2_68"
+
+
 def test_rookie_dealer_02_v2_40_affordable_fallback_quality_profile_loads() -> None:
     profile_40 = load_profile("rookie_dealer_02_v2_40")
 
