@@ -5875,6 +5875,15 @@ def build_experiment_batch_summary(
                 "conditional_hold_extension_profit_diff": row.get("conditional_hold_extension_profit_diff"),
                 "conditional_hold_extension_win_rate": row.get("conditional_hold_extension_win_rate"),
                 "conditional_hold_extension_profit_factor": row.get("conditional_hold_extension_profit_factor"),
+                "conditional_hold_extension_applied_count": diff.get("conditional_hold_extension_applied_count", 0),
+                "conditional_hold_extension_win_count": diff.get("conditional_hold_extension_win_count", 0),
+                "conditional_hold_extension_loss_count": diff.get("conditional_hold_extension_loss_count", 0),
+                "conditional_hold_extension_profit_diff_total": diff.get("conditional_hold_extension_profit_diff_total"),
+                "conditional_hold_extension_profit_diff_average": diff.get("conditional_hold_extension_profit_diff_average"),
+                "conditional_hold_extension_profit_diff_pf": diff.get("conditional_hold_extension_profit_diff_pf"),
+                "extension_exit_guard_count": diff.get("extension_exit_guard_count", 0),
+                "extension_exit_guard_profit_diff_total": diff.get("extension_exit_guard_profit_diff_total"),
+                "extension_exit_guard_reasons": diff.get("extension_exit_guard_reasons", {}),
                 "conditional_hold_extension_rejected_count": row.get("conditional_hold_extension_rejected_count"),
                 "conditional_hold_extension_rejected_reason_breakdown": row.get("conditional_hold_extension_rejected_reason_breakdown"),
                 "extension_decision_reason": row.get("extension_decision_reason"),
@@ -6481,8 +6490,8 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             "",
             "## Results",
             "",
-            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | signal_lost_exit_count | signal_lost_exit_avoided_count | hold_extension_count | hold_extension_profit_diff | conditional_hold_extension_count | conditional_hold_extension_profit_diff | conditional_hold_extension_profit_factor | monthly_win_rate | winning_months | losing_months | average_monthly_return | worst_month_return | best_month_return | max_consecutive_losing_months | newly_selected_count | removed_count | investor_filter_rejected_count | market_filter | market_candidate_count | market_scored_count | market_selected_count | market_buy_trade_count | market_sell_trade_count | market_profit_by_section | market_profit_factor_by_section | market_filter_excluded_count | market_trade_consistency_warning | result_integrity_status | integrity_error_count | integrity_warning_count | market_filter_violation_count | trade_without_selected_count | out_of_period_trade_count | stale_cache_read_count | score_integrity_status | total_score_mismatch_count | stale_score_cache_count | future_data_leak_count | signal_entry_date_violation_count | no_trade_fallback_selected_count | selected_below_regular_min_score_count | fallback_top_pick_selected_count | invalid_below_threshold_selected_count | selection_diff_count | outcome_diff_count | indicators_last_date | candidates_last_date | scored_candidates_last_date | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | earnings_calendar_records | earnings_filter_rejected_count | earnings_filter_status | practical_effect | effect_reason | verdict | verdict_reason |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | signal_lost_exit_count | signal_lost_exit_avoided_count | hold_extension_count | hold_extension_profit_diff | conditional_hold_extension_count | conditional_hold_extension_profit_diff | conditional_hold_extension_profit_factor | conditional_hold_extension_applied_count | conditional_hold_extension_win_count | conditional_hold_extension_loss_count | conditional_hold_extension_profit_diff_total | conditional_hold_extension_profit_diff_average | conditional_hold_extension_profit_diff_pf | monthly_win_rate | winning_months | losing_months | average_monthly_return | worst_month_return | best_month_return | max_consecutive_losing_months | newly_selected_count | removed_count | investor_filter_rejected_count | market_filter | market_candidate_count | market_scored_count | market_selected_count | market_buy_trade_count | market_sell_trade_count | market_profit_by_section | market_profit_factor_by_section | market_filter_excluded_count | market_trade_consistency_warning | result_integrity_status | integrity_error_count | integrity_warning_count | market_filter_violation_count | trade_without_selected_count | out_of_period_trade_count | stale_cache_read_count | score_integrity_status | total_score_mismatch_count | stale_score_cache_count | future_data_leak_count | signal_entry_date_violation_count | no_trade_fallback_selected_count | selected_below_regular_min_score_count | fallback_top_pick_selected_count | invalid_below_threshold_selected_count | selection_diff_count | outcome_diff_count | indicators_last_date | candidates_last_date | scored_candidates_last_date | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | earnings_calendar_records | earnings_filter_rejected_count | earnings_filter_status | practical_effect | effect_reason | verdict | verdict_reason |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for row in _experiment_summary_result_rows(summary):
@@ -6513,6 +6522,12 @@ def _experiment_summary_table_row(row: dict[str, Any]) -> str:
         f"{row.get('hold_extension_count', 0)} | {_format_optional_number(row.get('hold_extension_profit_diff'))} | "
         f"{row.get('conditional_hold_extension_count', 0)} | {_format_optional_number(row.get('conditional_hold_extension_profit_diff'))} | "
         f"{_format_optional_number(row.get('conditional_hold_extension_profit_factor'))} | "
+        f"{row.get('conditional_hold_extension_applied_count', 0)} | "
+        f"{row.get('conditional_hold_extension_win_count', 0)} | "
+        f"{row.get('conditional_hold_extension_loss_count', 0)} | "
+        f"{_format_optional_number(row.get('conditional_hold_extension_profit_diff_total'))} | "
+        f"{_format_optional_number(row.get('conditional_hold_extension_profit_diff_average'))} | "
+        f"{_format_optional_number(row.get('conditional_hold_extension_profit_diff_pf'))} | "
         f"{_format_optional_percent(row.get('monthly_win_rate'))} | "
         f"{row.get('winning_months') if row.get('winning_months') is not None else ''} | "
         f"{row.get('losing_months') if row.get('losing_months') is not None else ''} | "
@@ -6796,6 +6811,9 @@ def _profile_compare_row(config: dict[str, Any], db_path: Path, start_date_text:
         "conditional_hold_extension_rejected_reason_breakdown": holding_audit.get("conditional_hold_extension_rejected_reason_breakdown"),
         "conditional_hold_extension_rejected_samples": holding_audit.get("conditional_hold_extension_rejected_samples"),
         "extension_decision_reason": holding_audit.get("extension_decision_reason"),
+        "extension_exit_guard_count": holding_audit.get("extension_exit_guard_count"),
+        "extension_exit_guard_profit": holding_audit.get("extension_exit_guard_profit"),
+        "extension_exit_guard_reasons": holding_audit.get("extension_exit_guard_reasons"),
         "profit_by_exit_reason": holding_audit.get("profit_by_exit_reason"),
         "total_trades": pf_metrics["total_trades"],
         "closed_trade_count": pf_metrics["closed_trade_count"],
@@ -6849,6 +6867,9 @@ def _profile_compare_row_with_backtest_summary(
         "conditional_hold_extension_rejected_reason_breakdown",
         "conditional_hold_extension_rejected_samples",
         "extension_decision_reason",
+        "extension_exit_guard_count",
+        "extension_exit_guard_profit",
+        "extension_exit_guard_reasons",
         "average_holding_days",
         "profit_by_exit_reason",
     ]
@@ -7084,6 +7105,7 @@ def _build_profile_diff_analysis_for_pair(
     newly_selected_keys = sorted(set(target_selected) - set(base_selected))
     removed_keys = sorted(set(base_selected) - set(target_selected))
     outcome_diff = _trade_outcome_diff(base_trade_rows, target_trade_rows)
+    conditional_hold_extension_diff = _conditional_hold_extension_applied_diff(base_trade_rows, target_trade_rows)
     base_compare_row = _profile_compare_row(base_config, db_path, start_date_text, end_date_text)
     target_compare_row = _profile_compare_row(target_config, db_path, start_date_text, end_date_text)
     summary_diff = _summary_diff(base_compare_row, target_compare_row)
@@ -7111,6 +7133,7 @@ def _build_profile_diff_analysis_for_pair(
         "target_conditional_hold_extension_rejected_reason_breakdown": target_compare_row.get("conditional_hold_extension_rejected_reason_breakdown"),
         "target_conditional_hold_extension_rejected_samples": target_compare_row.get("conditional_hold_extension_rejected_samples"),
         "target_extension_decision_reason": target_compare_row.get("extension_decision_reason"),
+        **conditional_hold_extension_diff,
         "investor_filter_rejected_count": _investor_filter_rejected_count(target_rows),
         "market_filter": {
             "base_allowed_sections": sorted(allowed_market_sections(base_config)),
@@ -7289,6 +7312,11 @@ def _merge_backtest_summary_fallback_trade_rows(
             bool(event.get("affordable_fallback_buy_selected"))
             or bool(event.get("affordable_fallback_attempted"))
             or bool(event.get("affordable_fallback_no_candidate"))
+                or bool(event.get("conditional_hold_extension_applied"))
+                or bool(event.get("conditional_hold_extension_rejected"))
+                or bool(event.get("extension_exit_guard_triggered"))
+                or str(event.get("conditional_hold_extension_reason") or "").strip()
+                or str(event.get("holding_extension_reason") or "").strip()
         )
         and _trade_row_in_period(event, start_date_text, end_date_text)
     ]
@@ -7300,7 +7328,16 @@ def _merge_backtest_summary_fallback_trade_rows(
         row = {**event, "profile_id": event.get("profile_id") or profile_id}
         key = _trade_merge_key(row)
         if key in by_key:
-            by_key[key].update({name: value for name, value in row.items() if name.startswith("affordable_fallback_")})
+            by_key[key].update(
+                {
+                    name: value
+                    for name, value in row.items()
+                    if name.startswith("affordable_fallback_")
+                    or name.startswith("conditional_hold_extension_")
+                    or name.startswith("extension_")
+                    or name in {"holding_extended", "holding_extension_reason"}
+                }
+            )
             continue
         merged.append(row)
         by_key[key] = row
@@ -7384,6 +7421,98 @@ def _closed_trade_key_map(rows: list[dict[str, Any]]) -> dict[tuple[str, str], d
             suffix += 1
         result[(key[0], f"{key[1]}#{suffix}")] = row
     return result
+
+
+def _conditional_hold_extension_applied_diff(
+    base_rows: list[dict[str, Any]],
+    target_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    base_trades = _closed_trade_key_map(base_rows)
+    target_trades = _closed_trade_key_map(target_rows)
+    details: list[dict[str, Any]] = []
+    for key in sorted(target_trades):
+        target = target_trades[key]
+        if not _is_conditional_hold_extension_trade(target):
+            continue
+        base = base_trades.get(key, {})
+        detail = _conditional_hold_extension_applied_record(key, base, target)
+        details.append(detail)
+    diffs = [item["extension_profit_diff"] for item in details if item.get("extension_profit_diff") is not None]
+    guard_details = [item for item in details if _truthy_value(item.get("extension_exit_guard_triggered"))]
+    guard_diffs = [item["extension_profit_diff"] for item in guard_details if item.get("extension_profit_diff") is not None]
+    guard_reasons: dict[str, int] = {}
+    for item in guard_details:
+        for reason in str(item.get("extension_exit_guard_reason") or "unknown").split("+"):
+            reason = reason or "unknown"
+            guard_reasons[reason] = guard_reasons.get(reason, 0) + 1
+    positive_total = round(sum(value for value in diffs if value > 0), 2)
+    negative_total = round(sum(value for value in diffs if value < 0), 2)
+    profit_diff_pf = None
+    if negative_total < 0:
+        profit_diff_pf = round(positive_total / abs(negative_total), 4)
+    return {
+        "conditional_hold_extension_applied_count": len(details),
+        "conditional_hold_extension_win_count": sum(1 for value in diffs if value > 0),
+        "conditional_hold_extension_loss_count": sum(1 for value in diffs if value < 0),
+        "conditional_hold_extension_profit_diff_total": round(sum(diffs), 2) if diffs else 0.0,
+        "conditional_hold_extension_profit_diff_average": round(sum(diffs) / len(diffs), 2) if diffs else None,
+        "conditional_hold_extension_profit_diff_pf": profit_diff_pf,
+        "extension_exit_guard_count": len(guard_details),
+        "extension_exit_guard_profit_diff_total": round(sum(guard_diffs), 2) if guard_diffs else 0.0,
+        "extension_exit_guard_reasons": dict(sorted(guard_reasons.items())),
+        "conditional_hold_extension_applied_detail": details[:50],
+    }
+
+
+def _is_conditional_hold_extension_trade(row: dict[str, Any]) -> bool:
+    return bool(
+        _truthy_value(row.get("conditional_hold_extension_applied"))
+        or str(row.get("conditional_hold_extension_reason") or "").strip()
+        or str(row.get("holding_extension_reason") or "").strip()
+    )
+
+
+def _conditional_hold_extension_applied_record(
+    key: tuple[str, str],
+    base: dict[str, Any],
+    target: dict[str, Any],
+) -> dict[str, Any]:
+    base_profit = _trade_profit_value(base)
+    target_profit = _trade_profit_value(target)
+    profit_diff = round(target_profit - base_profit, 2) if base_profit is not None and target_profit is not None else None
+    target_profit_rate = _trade_profit_rate_value(target)
+    base_exit_date = base.get("exit_date")
+    target_exit_date = target.get("exit_date")
+    return {
+        "code": str(target.get("code") or base.get("code") or key[1]).split("#", 1)[0],
+        "name": target.get("name") or base.get("name"),
+        "entry_date": key[0],
+        "original_max_holding_exit_date": base_exit_date,
+        "actual_exit_date": target_exit_date,
+        "holding_days": target.get("holding_days"),
+        "exit_reason": target.get("exit_reason"),
+        "profit_rate_at_extension": target.get("conditional_hold_extension_trigger_profit_rate")
+        if target.get("conditional_hold_extension_trigger_profit_rate") is not None
+        else target.get("conditional_hold_extension_profit_rate_at_max_holding"),
+        "final_profit_rate": target_profit_rate,
+        "final_profit": target_profit,
+        "relative_strength_score": target.get("conditional_hold_extension_relative_strength_score_at_max_holding")
+        if target.get("conditional_hold_extension_relative_strength_score_at_max_holding") is not None
+        else target.get("relative_strength_score"),
+        "close": target.get("conditional_hold_extension_close_at_max_holding") or target.get("exit_price"),
+        "ma25": target.get("conditional_hold_extension_ma25_at_max_holding") or target.get("ma25"),
+        "previous_ma25": target.get("conditional_hold_extension_previous_ma25_at_max_holding") or target.get("previous_ma25"),
+        "extension_reason": target.get("conditional_hold_extension_reason") or target.get("holding_extension_reason"),
+        "extension_exit_guard_triggered": bool(_truthy_value(target.get("extension_exit_guard_triggered"))),
+        "extension_exit_guard_reason": target.get("extension_exit_guard_reason"),
+        "base_exit_date": base_exit_date,
+        "base_exit_reason": base.get("exit_reason"),
+        "base_profit": base_profit,
+        "target_exit_date": target_exit_date,
+        "target_exit_reason": target.get("exit_reason"),
+        "target_profit": target_profit,
+        "extension_profit_diff": profit_diff,
+    }
 
 
 def _trade_outcome_diff(base_rows: list[dict[str, Any]], target_rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -7498,6 +7627,9 @@ def _trade_outcome_diff_record(
         "target_conditional_hold_extension_applied": bool(target.get("conditional_hold_extension_applied")),
         "target_conditional_hold_extension_reason": target.get("conditional_hold_extension_reason") or target.get("holding_extension_reason"),
         "target_conditional_hold_extension_trigger_profit_rate": target.get("conditional_hold_extension_trigger_profit_rate"),
+        "target_extension_profit_rate": target.get("extension_profit_rate"),
+        "target_extension_exit_guard_triggered": bool(_truthy_value(target.get("extension_exit_guard_triggered"))),
+        "target_extension_exit_guard_reason": target.get("extension_exit_guard_reason"),
     }
 
 
@@ -7816,6 +7948,15 @@ def _profile_diff_analysis_lines(analysis: dict[str, Any]) -> list[str]:
         f"- target conditional hold extension count: {analysis.get('target_conditional_hold_extension_count')}",
         f"- target conditional hold extension rejected count: {analysis.get('target_conditional_hold_extension_rejected_count')}",
         f"- target conditional hold extension rejected reasons: {_compact_json(analysis.get('target_conditional_hold_extension_rejected_reason_breakdown') or {})}",
+        f"- conditional_hold_extension_applied_count: {analysis.get('conditional_hold_extension_applied_count', 0)}",
+        f"- conditional_hold_extension_win_count: {analysis.get('conditional_hold_extension_win_count', 0)}",
+        f"- conditional_hold_extension_loss_count: {analysis.get('conditional_hold_extension_loss_count', 0)}",
+        f"- conditional_hold_extension_profit_diff_total: {_format_optional_yen(analysis.get('conditional_hold_extension_profit_diff_total'))}",
+        f"- conditional_hold_extension_profit_diff_average: {_format_optional_yen(analysis.get('conditional_hold_extension_profit_diff_average'))}",
+        f"- conditional_hold_extension_profit_diff_pf: {_format_optional_number(analysis.get('conditional_hold_extension_profit_diff_pf'))}",
+        f"- extension_exit_guard_count: {analysis.get('extension_exit_guard_count', 0)}",
+        f"- extension_exit_guard_profit_diff_total: {_format_optional_yen(analysis.get('extension_exit_guard_profit_diff_total'))}",
+        f"- extension_exit_guard_reasons: {_compact_json(analysis.get('extension_exit_guard_reasons') or {})}",
         f"- target extension decision reasons: {_compact_json(analysis.get('target_extension_decision_reason') or {})}",
         f"- investor_filter_rejected_count: {analysis.get('investor_filter_rejected_count', 0)}",
         f"- market_filter: {_compact_json(analysis.get('market_filter', {}))}",
@@ -7855,14 +7996,10 @@ def _profile_diff_analysis_lines(analysis: dict[str, Any]) -> list[str]:
         ]
     )
     lines.extend(_trade_outcome_diff_lines(outcome.get("outcome_diffs", [])))
-    conditional_items = [
-        item
-        for item in outcome.get("outcome_diffs", [])
-        if item.get("target_conditional_hold_extension_applied")
-    ]
+    conditional_items = analysis.get("conditional_hold_extension_applied_detail") or []
     if conditional_items:
-        lines.extend(["", "## Conditional Hold Extension Detail", ""])
-        lines.extend(_conditional_hold_extension_detail_lines(conditional_items))
+        lines.extend(["", "## Conditional Hold Extension Applied Detail", ""])
+        lines.extend(_conditional_hold_extension_applied_detail_lines(conditional_items))
     rejected_samples = analysis.get("target_conditional_hold_extension_rejected_samples") or []
     if rejected_samples:
         lines.extend(["", "## Conditional Hold Extension Rejected Detail", ""])
@@ -7901,21 +8038,32 @@ def _trade_outcome_diff_lines(items: list[dict[str, Any]]) -> list[str]:
     ]
 
 
-def _conditional_hold_extension_detail_lines(items: list[dict[str, Any]]) -> list[str]:
+def _conditional_hold_extension_applied_detail_lines(items: list[dict[str, Any]]) -> list[str]:
     lines = [
-        "| code | name | entry_date | original_exit_date | extended_exit_date | original_profit | extended_profit | diff | reason |",
-        "|---|---|---|---|---|---:|---:|---:|---|",
+        "| code | name | entry_date | original_max_holding_exit_date | actual_exit_date | holding_days | exit_reason | profit_rate_at_extension | final_profit_rate | final_profit | relative_strength_score | close | ma25 | previous_ma25 | extension_reason | guard_triggered | guard_reason | base_exit_date | base_exit_reason | base_profit | target_exit_date | target_exit_reason | target_profit | extension_profit_diff |",
+        "|---|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|---|---:|---|---|---:|---:|",
     ]
     for item in items[:50]:
-        base_profit = _to_float(item.get("base_profit"))
-        target_profit = _to_float(item.get("target_profit"))
-        diff = round(target_profit - base_profit, 2) if base_profit is not None and target_profit is not None else None
         lines.append(
             "| "
-            f"{item.get('code')} | {item.get('name') or ''} | {item.get('entry_date')} | "
-            f"{item.get('base_exit_date') or ''} | {item.get('target_exit_date') or ''} | "
-            f"{_format_optional_yen(base_profit)} | {_format_optional_yen(target_profit)} | {_format_optional_yen(diff)} | "
-            f"{item.get('target_conditional_hold_extension_reason') or ''} |"
+            f"{item.get('code')} | {item.get('name') or ''} | {item.get('entry_date') or ''} | "
+            f"{item.get('original_max_holding_exit_date') or ''} | {item.get('actual_exit_date') or ''} | "
+            f"{_format_optional_number(item.get('holding_days'))} | {item.get('exit_reason') or ''} | "
+            f"{_format_optional_percent(item.get('profit_rate_at_extension'))} | "
+            f"{_format_optional_percent(item.get('final_profit_rate'))} | "
+            f"{_format_optional_yen(item.get('final_profit'))} | "
+            f"{_format_optional_number(item.get('relative_strength_score'))} | "
+            f"{_format_optional_number(item.get('close'))} | "
+            f"{_format_optional_number(item.get('ma25'))} | "
+            f"{_format_optional_number(item.get('previous_ma25'))} | "
+            f"{item.get('extension_reason') or ''} | "
+            f"{bool(_truthy_value(item.get('extension_exit_guard_triggered')))} | "
+            f"{item.get('extension_exit_guard_reason') or ''} | "
+            f"{item.get('base_exit_date') or ''} | {item.get('base_exit_reason') or ''} | "
+            f"{_format_optional_yen(item.get('base_profit'))} | "
+            f"{item.get('target_exit_date') or ''} | {item.get('target_exit_reason') or ''} | "
+            f"{_format_optional_yen(item.get('target_profit'))} | "
+            f"{_format_optional_yen(item.get('extension_profit_diff'))} |"
         )
     return lines
 
@@ -13171,6 +13319,7 @@ RUNTIME_TRADE_FIELDS = {
     "holding_extended", "conditional_hold_extension_applied",
     "conditional_hold_extension_count", "conditional_hold_extension_reason",
     "conditional_hold_extension_trigger_profit_rate",
+    "extension_profit_rate", "extension_exit_guard_triggered", "extension_exit_guard_reason",
     "conditional_hold_extension_rejected", "conditional_hold_extension_rejected_reason",
     "conditional_hold_extension_profit_rate_at_max_holding",
     "conditional_hold_extension_close_at_max_holding",
@@ -14798,6 +14947,9 @@ def write_backtest_summary(
         "conditional_hold_extension_rejected_reason_breakdown": holding_signal_revaluation_audit["conditional_hold_extension_rejected_reason_breakdown"],
         "conditional_hold_extension_rejected_samples": holding_signal_revaluation_audit["conditional_hold_extension_rejected_samples"],
         "extension_decision_reason": holding_signal_revaluation_audit["extension_decision_reason"],
+        "extension_exit_guard_count": holding_signal_revaluation_audit["extension_exit_guard_count"],
+        "extension_exit_guard_profit": holding_signal_revaluation_audit["extension_exit_guard_profit"],
+        "extension_exit_guard_reasons": holding_signal_revaluation_audit["extension_exit_guard_reasons"],
         "normal_exit_count": holding_signal_revaluation_audit["normal_exit_count"],
         "signal_lost_exit_count": holding_signal_revaluation_audit["signal_lost_exit_count"],
         "signal_lost_exit_avoided_count": holding_signal_revaluation_audit["signal_lost_exit_avoided_count"],
@@ -14898,6 +15050,9 @@ def _holding_signal_revaluation_summary(closed_trades: list[dict[str, Any]]) -> 
     conditional_rejected_count = 0
     conditional_rejected_reasons: dict[str, int] = {}
     conditional_rejected_samples: list[dict[str, Any]] = []
+    extension_exit_guard_count = 0
+    extension_exit_guard_profit_total = 0.0
+    extension_exit_guard_reasons: dict[str, int] = {}
     for trade in closed_trades:
         holding_days = _safe_float(trade.get("holding_days"))
         if holding_days is not None:
@@ -14941,6 +15096,13 @@ def _holding_signal_revaluation_summary(closed_trades: list[dict[str, Any]]) -> 
                 conditional_gross_loss += gross_profit
             reason = str(trade.get("conditional_hold_extension_reason") or trade.get("holding_extension_reason") or "conditional_profit_extension")
             conditional_reasons[reason] = conditional_reasons.get(reason, 0) + 1
+        if _truthy_value(trade.get("extension_exit_guard_triggered")):
+            extension_exit_guard_count += 1
+            extension_exit_guard_profit_total += float(trade.get("profit") or trade.get("net_profit") or 0)
+            reasons = str(trade.get("extension_exit_guard_reason") or "unknown").split("+")
+            for reason in reasons:
+                reason = reason or "unknown"
+                extension_exit_guard_reasons[reason] = extension_exit_guard_reasons.get(reason, 0) + 1
         if _truthy_value(trade.get("conditional_hold_extension_rejected")):
             conditional_rejected_count += 1
             reasons = str(trade.get("conditional_hold_extension_rejected_reason") or "unknown").split("+")
@@ -15008,6 +15170,9 @@ def _holding_signal_revaluation_summary(closed_trades: list[dict[str, Any]]) -> 
         "conditional_hold_extension_rejected_reason_breakdown": dict(sorted(conditional_rejected_reasons.items())),
         "conditional_hold_extension_rejected_samples": conditional_rejected_samples,
         "extension_decision_reason": dict(sorted(conditional_reasons.items())),
+        "extension_exit_guard_count": extension_exit_guard_count,
+        "extension_exit_guard_profit": round(extension_exit_guard_profit_total, 2),
+        "extension_exit_guard_reasons": dict(sorted(extension_exit_guard_reasons.items())),
         "normal_exit_count": normal_exit_count,
         "max_holding_days": max(holding_days_values) if holding_days_values else None,
         "signal_lost_exit_count": sum(1 for trade in closed_trades if trade.get("exit_reason") == "シグナル消失"),
@@ -20581,6 +20746,9 @@ def write_trades_csv(path: Path, trades: list[dict[str, Any]]) -> None:
         "conditional_hold_extension_count",
         "conditional_hold_extension_reason",
         "conditional_hold_extension_trigger_profit_rate",
+        "extension_profit_rate",
+        "extension_exit_guard_triggered",
+        "extension_exit_guard_reason",
         "conditional_hold_extension_rejected",
         "conditional_hold_extension_rejected_reason",
         "conditional_hold_extension_profit_rate_at_max_holding",

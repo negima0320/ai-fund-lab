@@ -700,6 +700,41 @@ profiles:
       trend_continuation_hold_extension: true
       ma25_uptrend_hold_extension: true
 
+  rookie_dealer_02_v2_61:
+    role: experiment
+    description: v2.60同条件 条件付き保有延長の差分レポート強化検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      conditional_hold_extension: true
+      trend_continuation_hold_extension: true
+      ma25_uptrend_hold_extension: true
+
+  rookie_dealer_02_v2_62:
+    role: experiment
+    description: 条件付き保有延長 + 延長後失速撤退ガード検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      conditional_hold_extension: true
+      trend_continuation_hold_extension: true
+      ma25_uptrend_hold_extension: true
+      extension_exit_guard: true
+
   rookie_dealer_03_growth:
     role: experiment
     description: 東証グロース市場のみを対象にする攻撃型検証

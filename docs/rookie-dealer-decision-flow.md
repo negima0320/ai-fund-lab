@@ -185,6 +185,8 @@ Affordable Fallback Buy Auditでは以下を確認します。
 
 - `rookie_dealer_02_v2_59`: v2.58と同じ条件付き保有延長設定。保有銘柄indicator補完修正後の検証用。
 - `rookie_dealer_02_v2_60`: v2.59をベースに、`min_relative_strength_score` / `minimum_relative_strength_score` を `60` から `5` に緩和した発動確認用。
+- `rookie_dealer_02_v2_61`: v2.60と同じ売買条件で、延長発動銘柄のbase比損益差分を `compare_profiles` に出すレポート強化用。
+- `rookie_dealer_02_v2_62`: v2.61と同じ条件付き保有延長に、延長後の利益率悪化を検知する `extension_exit_guard` を追加した検証用。
 
 `compare_profiles.md/json` と `backtest_summary.json` には以下が出ます。
 
@@ -195,6 +197,12 @@ Affordable Fallback Buy Auditでは以下を確認します。
 - `conditional_hold_extension_rejected_count`
 - `conditional_hold_extension_rejected_reason_breakdown`
 - `conditional_hold_extension_rejected_samples`
+- `extension_profit_rate`
+- `extension_exit_guard_triggered`
+- `extension_exit_guard_reason`
+- `extension_exit_guard_count`
+- `extension_exit_guard_profit_diff_total`
+- `extension_exit_guard_reasons`
 - `Conditional Hold Extension Rejected Detail`
 
 ## 9. Integrity

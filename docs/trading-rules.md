@@ -67,6 +67,7 @@ PaperBrokerの買付は以下を見ます。
 - `skip_ma5_condition`: MA5条件を使わない
 - `max_holding_days`: 延長後の最大保有日数
 - `max_extension_count`: 延長回数上限
+- `extension_exit_guard`: 延長後だけ有効な失速撤退ガード。`max_profit_pullback_points` 以上の利益率悪化、または `min_remaining_profit_rate` 未満への低下で指定 `exit_reason` による売却候補にします
 
 保有中銘柄が当日の候補リストにない場合でも、`indicators_YYYY-MM-DD.json` から `close`、`ma25`、`previous_ma25`、`relative_strength_score` などを補完して判定します。補完できない場合は `missing_indicator` として拒否理由に残します。
 
@@ -74,13 +75,22 @@ PaperBrokerの買付は以下を見ます。
 
 - `rookie_dealer_02_v2_59`: v2.58同条件で、保有銘柄indicator補完修正後の検証
 - `rookie_dealer_02_v2_60`: v2.59からrelative strength閾値だけを `60` から `5` に緩和
+- `rookie_dealer_02_v2_61`: v2.60と同条件で、延長発動銘柄のbase比損益差分レポートを強化
+- `rookie_dealer_02_v2_62`: v2.61と同条件に、延長後失速撤退ガードを追加
 
 関連出力:
 
 - `conditional_hold_extension_count`
 - `conditional_hold_extension_profit_diff`
+- `extension_profit_rate`
+- `extension_exit_guard_triggered`
+- `extension_exit_guard_reason`
+- `extension_exit_guard_count`
+- `extension_exit_guard_profit_diff_total`
+- `extension_exit_guard_reasons`
 - `conditional_hold_extension_rejected_reason_breakdown`
 - `Conditional Hold Extension Rejected Detail`
+- `Conditional Hold Extension Applied Detail`
 
 ## Integrity
 

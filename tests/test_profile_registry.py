@@ -138,6 +138,9 @@ def test_run_experiments_selects_v2_26_dynamic_exposure_profiles() -> None:
         "rookie_dealer_02_v2_57",
         "rookie_dealer_02_v2_58",
         "rookie_dealer_02_v2_59",
+        "rookie_dealer_02_v2_60",
+        "rookie_dealer_02_v2_61",
+        "rookie_dealer_02_v2_62",
     ]
 
 

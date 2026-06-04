@@ -359,6 +359,36 @@ def test_rookie_dealer_02_v2_59_indicator_enriched_hold_extension_profile_loads(
     assert load_profile("rookie_dealer_02_v2.59")["profile_id"] == "rookie_dealer_02_v2_59"
 
 
+def test_rookie_dealer_02_v2_61_report_enhanced_hold_extension_profile_loads() -> None:
+    profile_61 = load_profile("rookie_dealer_02_v2_61")
+
+    assert profile_61["profile_id"] == "rookie_dealer_02_v2_61"
+    assert profile_61["trading"]["max_holding_days"] == 5
+    assert profile_61["conditional_hold_extension"] == load_profile("rookie_dealer_02_v2_60")["conditional_hold_extension"]
+    assert profile_61["conditional_hold_extension"]["min_relative_strength_score"] == 5
+    assert profile_61["conditional_hold_extension"]["minimum_relative_strength_score"] == 5
+    assert "holding_revaluation" not in profile_61
+    assert load_profile("rookie_dealer_02_v2.61")["profile_id"] == "rookie_dealer_02_v2_61"
+
+
+def test_rookie_dealer_02_v2_62_extension_exit_guard_profile_loads() -> None:
+    profile_62 = load_profile("rookie_dealer_02_v2_62")
+
+    assert profile_62["profile_id"] == "rookie_dealer_02_v2_62"
+    assert profile_62["trading"]["max_holding_days"] == 5
+    conditional = profile_62["conditional_hold_extension"]
+    assert conditional["enabled"] is True
+    assert conditional["min_relative_strength_score"] == 5
+    assert conditional["minimum_relative_strength_score"] == 5
+    guard = conditional["extension_exit_guard"]
+    assert guard["enabled"] is True
+    assert guard["max_profit_pullback_points"] == 0.02
+    assert guard["min_remaining_profit_rate"] == 0.01
+    assert guard["exit_reason"] == "延長後失速撤退"
+    assert "holding_revaluation" not in profile_62
+    assert load_profile("rookie_dealer_02_v2.62")["profile_id"] == "rookie_dealer_02_v2_62"
+
+
 def test_rookie_dealer_02_v2_40_affordable_fallback_quality_profile_loads() -> None:
     profile_40 = load_profile("rookie_dealer_02_v2_40")
 

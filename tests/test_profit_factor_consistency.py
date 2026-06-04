@@ -1004,6 +1004,141 @@ def test_profile_diff_analysis_detects_trade_outcome_diff_without_entry_diff(tmp
     assert analysis["trade_outcome_diff"]["same_entry_different_profit_count"] == 1
 
 
+def test_profile_diff_analysis_reports_conditional_hold_extension_profit_diff(tmp_path, monkeypatch) -> None:
+    profile_26 = load_profile("rookie_dealer_02_v2_26")
+    profile_61 = load_profile("rookie_dealer_02_v2_61")
+    db_path = str(tmp_path / "ai_fund_lab.sqlite3")
+    profile_26["database"]["path"] = db_path
+    profile_61["database"]["path"] = db_path
+    monkeypatch.setattr(main, "ROOT", tmp_path)
+    initialize_database(profile_26, tmp_path)
+    for profile in [profile_26, profile_61]:
+        save_scoring_results(
+            profile,
+            tmp_path,
+            {
+                "date": "2026-03-06",
+                "scores": [
+                    {
+                        "code": "1001",
+                        "name": "Extension Target",
+                        "rank": 1,
+                        "total_score": 80,
+                        "selected": True,
+                    }
+                ],
+            },
+        )
+    save_trades(
+        profile_26,
+        tmp_path,
+        "2026-03-10",
+        [
+            {
+                "action": "SELL",
+                "status": "FILLED",
+                "code": "1001",
+                "name": "Extension Target",
+                "entry_date": "2026-03-06",
+                "exit_date": "2026-03-10",
+                "holding_days": 5,
+                "profit": 10000,
+                "profit_rate": 0.04,
+                "exit_reason": "最大保有期間到達",
+                "result": "WIN",
+            }
+        ],
+    )
+    save_trades(
+        profile_61,
+        tmp_path,
+        "2026-03-12",
+        [
+            {
+                "action": "SELL",
+                "status": "FILLED",
+                "code": "1001",
+                "name": "Extension Target",
+                "entry_date": "2026-03-06",
+                "exit_date": "2026-03-12",
+                "holding_days": 7,
+                "profit": 7000,
+                "profit_rate": 0.028,
+                "exit_reason": "最大保有期間到達",
+                "result": "WIN",
+            }
+        ],
+    )
+    summary_path = tmp_path / "logs" / "backtests" / "rookie_dealer_02_v2_61" / "2026-03-01_to_2026-03-31" / "backtest_summary.json"
+    main.write_json(
+        summary_path,
+        {
+            "all_trades": [
+                {
+                    "action": "SELL",
+                    "status": "FILLED",
+                    "code": "1001",
+                    "name": "Extension Target",
+                    "entry_date": "2026-03-06",
+                    "exit_date": "2026-03-12",
+                    "holding_days": 7,
+                    "profit": 7000,
+                    "profit_rate": 0.028,
+                    "exit_reason": "最大保有期間到達",
+                    "conditional_hold_extension_applied": True,
+                    "conditional_hold_extension_reason": "trend_continuation_profit>=0.0300_rs>=5.0_ma25_uptrend",
+                    "conditional_hold_extension_trigger_profit_rate": 0.035,
+                    "conditional_hold_extension_close_at_max_holding": 2420,
+                    "conditional_hold_extension_ma25_at_max_holding": 2170.74,
+                    "conditional_hold_extension_previous_ma25_at_max_holding": 2151.2,
+                    "conditional_hold_extension_relative_strength_score_at_max_holding": 7,
+                    "extension_profit_rate": 0.035,
+                    "extension_exit_guard_triggered": True,
+                    "extension_exit_guard_reason": "profit_pullback_exceeded",
+                }
+            ]
+        },
+    )
+
+    analysis = build_profile_diff_analysis(
+        [profile_26, profile_61],
+        get_database_path(profile_26, tmp_path),
+        "2026-03-01",
+        "2026-03-31",
+    )
+
+    assert analysis is not None
+    assert analysis["conditional_hold_extension_applied_count"] == 1
+    assert analysis["conditional_hold_extension_loss_count"] == 1
+    assert analysis["conditional_hold_extension_profit_diff_total"] == -3000
+    assert analysis["conditional_hold_extension_profit_diff_average"] == -3000
+    assert analysis["extension_exit_guard_count"] == 1
+    assert analysis["extension_exit_guard_profit_diff_total"] == -3000
+    assert analysis["extension_exit_guard_reasons"] == {"profit_pullback_exceeded": 1}
+    detail = analysis["conditional_hold_extension_applied_detail"][0]
+    assert detail["original_max_holding_exit_date"] == "2026-03-10"
+    assert detail["actual_exit_date"] == "2026-03-12"
+    assert detail["base_profit"] == 10000
+    assert detail["target_profit"] == 7000
+    assert detail["extension_profit_diff"] == -3000
+    assert detail["relative_strength_score"] == 7
+    assert detail["extension_exit_guard_triggered"] is True
+    assert detail["extension_exit_guard_reason"] == "profit_pullback_exceeded"
+
+    markdown = render_compare_profiles_markdown(
+        {
+            "start_date": "2026-03-01",
+            "end_date": "2026-03-31",
+            "profiles": [],
+            "profile_diff_analysis": analysis,
+        }
+    )
+    assert "## Conditional Hold Extension Applied Detail" in markdown
+    assert "extension_exit_guard_count: 1" in markdown
+    assert "Extension Target" in markdown
+    assert "-3,000" in markdown
+
+
 def test_profile_diff_analyses_include_all_targets(tmp_path) -> None:
     profile_21 = load_profile("rookie_dealer_02_v2_1")
     profile_22 = load_profile("rookie_dealer_02_v2_2")

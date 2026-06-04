@@ -135,6 +135,17 @@ def _enable_conditional_hold_extension(config: dict) -> dict:
     return config
 
 
+def _enable_extension_exit_guard(config: dict) -> dict:
+    config = _enable_conditional_hold_extension(config)
+    config["conditional_hold_extension"]["extension_exit_guard"] = {
+        "enabled": True,
+        "max_profit_pullback_points": 0.02,
+        "min_remaining_profit_rate": 0.01,
+        "exit_reason": "延長後失速撤退",
+    }
+    return config
+
+
 def _enable_trend_conditional_hold_extension(config: dict) -> dict:
     config = _enable_conditional_hold_extension(config)
     config["conditional_hold_extension"] = {
@@ -329,6 +340,57 @@ def test_conditional_hold_extension_keeps_take_profit_priority(config_copy: dict
     sell = next(trade for trade in trades if trade.get("action") == "SELL")
     assert sell["exit_reason"] == "利確"
     assert sell["conditional_hold_extension_applied"] is True
+
+
+def test_extension_exit_guard_sells_after_profit_pullback(config_copy: dict) -> None:
+    config = _enable_extension_exit_guard(config_copy)
+    state = _state_with_position(
+        holding_days=5,
+        extra_position={
+            "conditional_hold_extension_applied": True,
+            "conditional_hold_extension_count": 1,
+            "conditional_hold_extension_trigger_profit_rate": 0.05,
+            "extension_profit_rate": 0.05,
+        },
+    )
+
+    _new_state, _summary, trades = execute_real_data_paper_trade(
+        [_candidate(selected=False, close=1029.0)],
+        state,
+        config,
+        "2026-03-02",
+    )
+
+    sell = next(trade for trade in trades if trade.get("action") == "SELL")
+    assert sell["exit_reason"] == "延長後失速撤退"
+    assert sell["extension_profit_rate"] == 0.05
+    assert sell["extension_exit_guard_triggered"] is True
+    assert sell["extension_exit_guard_reason"] == "profit_pullback_exceeded"
+
+
+def test_extension_exit_guard_sells_when_remaining_profit_is_too_low(config_copy: dict) -> None:
+    config = _enable_extension_exit_guard(config_copy)
+    state = _state_with_position(
+        holding_days=5,
+        extra_position={
+            "conditional_hold_extension_applied": True,
+            "conditional_hold_extension_count": 1,
+            "conditional_hold_extension_trigger_profit_rate": 0.03,
+            "extension_profit_rate": 0.03,
+        },
+    )
+
+    _new_state, _summary, trades = execute_real_data_paper_trade(
+        [_candidate(selected=False, close=1005.0)],
+        state,
+        config,
+        "2026-03-02",
+    )
+
+    sell = next(trade for trade in trades if trade.get("action") == "SELL")
+    assert sell["exit_reason"] == "延長後失速撤退"
+    assert sell["extension_exit_guard_triggered"] is True
+    assert sell["extension_exit_guard_reason"] == "profit_pullback_exceeded+remaining_profit_below_min"
 
 
 def test_trend_conditional_hold_extension_requires_momentum_conditions(config_copy: dict) -> None:

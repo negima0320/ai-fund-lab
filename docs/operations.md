@@ -115,12 +115,16 @@ PYTHONPATH=. .venv/bin/python -m src.feature_analysis --profile rookie_dealer_02
 
 - `rookie_dealer_02_v2_59`: v2.58同条件で、保有銘柄indicator補完修正後の検証
 - `rookie_dealer_02_v2_60`: v2.59からrelative strength閾値だけを `60` から `5` に緩和
+- `rookie_dealer_02_v2_61`: v2.60と同条件で、延長発動銘柄のbase比損益差分レポートを強化
+- `rookie_dealer_02_v2_62`: v2.61と同条件に、延長後の利益失速を検知して撤退する `extension_exit_guard` を追加
 
 設定確認:
 
 ```bash
 .venv/bin/python src/main.py --mode validate-config --profile rookie_dealer_02_v2_60
 .venv/bin/python src/main.py --mode profile-info --profile rookie_dealer_02_v2_60
+.venv/bin/python src/main.py --mode validate-config --profile rookie_dealer_02_v2_61
+.venv/bin/python src/main.py --mode validate-config --profile rookie_dealer_02_v2_62
 ```
 
 短期比較を行う場合:
@@ -128,7 +132,7 @@ PYTHONPATH=. .venv/bin/python -m src.feature_analysis --profile rookie_dealer_02
 ```bash
 .venv/bin/python src/main.py --mode run-experiments \
   --base-profile rookie_dealer_02_v2_26 \
-  --profiles rookie_dealer_02_v2_26 rookie_dealer_02_v2_60 \
+  --profiles rookie_dealer_02_v2_26 rookie_dealer_02_v2_62 \
   --start-date YYYY-MM-DD \
   --end-date YYYY-MM-DD \
   --skip-price-fetch \
@@ -140,7 +144,13 @@ PYTHONPATH=. .venv/bin/python -m src.feature_analysis --profile rookie_dealer_02
 - `logs/backtests/<profile>/<START>_to_<END>/backtest_summary.json`
 - `reports/profile_comparisons/compare_<period>_...md/json`
 - `conditional_hold_extension_count`
+- `conditional_hold_extension_applied_count`
+- `conditional_hold_extension_profit_diff_total`
+- `extension_exit_guard_count`
+- `extension_exit_guard_profit_diff_total`
+- `extension_exit_guard_reasons`
 - `conditional_hold_extension_rejected_reason_breakdown`
+- `Conditional Hold Extension Applied Detail`
 - `Conditional Hold Extension Rejected Detail`
 
 ## Integrity and Capital Flow

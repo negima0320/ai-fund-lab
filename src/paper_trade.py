@@ -1069,6 +1069,9 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "conditional_hold_extension_count",
         "conditional_hold_extension_reason",
         "conditional_hold_extension_trigger_profit_rate",
+        "extension_profit_rate",
+        "extension_exit_guard_triggered",
+        "extension_exit_guard_reason",
         "conditional_hold_extension_rejected",
         "conditional_hold_extension_rejected_reason",
         "market_filter_reason",
@@ -1966,6 +1969,9 @@ def _holding_signal_revaluation(
             "conditional_hold_extension_count": 0,
             "conditional_hold_extension_reason": "",
             "conditional_hold_extension_trigger_profit_rate": None,
+            "extension_profit_rate": None,
+            "extension_exit_guard_triggered": False,
+            "extension_exit_guard_reason": "",
             "conditional_hold_extension_rejected": False,
             "conditional_hold_extension_rejected_reason": "",
         }
@@ -2012,6 +2018,9 @@ def _holding_signal_revaluation(
     conditional_count = int(position.get("conditional_hold_extension_count") or 0)
     conditional_reason = str(position.get("conditional_hold_extension_reason") or "")
     conditional_trigger_profit_rate = _optional_float(position.get("conditional_hold_extension_trigger_profit_rate"))
+    extension_profit_rate = _optional_float(position.get("extension_profit_rate"))
+    if extension_profit_rate is None:
+        extension_profit_rate = conditional_trigger_profit_rate
     conditional_rejected = False
     conditional_rejected_reason = ""
     conditional_profit_rate_at_max_holding = None
@@ -2054,6 +2063,7 @@ def _holding_signal_revaluation(
                 conditional_count += 1
                 conditional_reason = decision_reason or f"unrealized_profit_rate>={min_profit_rate:.4f}"
                 conditional_trigger_profit_rate = unrealized_profit_rate
+                extension_profit_rate = unrealized_profit_rate
             if conditional_applied:
                 extension_eligible = True
                 extension_reason = conditional_reason or "conditional_profit_extension"
@@ -2080,6 +2090,9 @@ def _holding_signal_revaluation(
         "conditional_hold_extension_count": conditional_count,
         "conditional_hold_extension_reason": conditional_reason,
         "conditional_hold_extension_trigger_profit_rate": conditional_trigger_profit_rate,
+        "extension_profit_rate": extension_profit_rate,
+        "extension_exit_guard_triggered": False,
+        "extension_exit_guard_reason": "",
         "conditional_hold_extension_rejected": conditional_rejected,
         "conditional_hold_extension_rejected_reason": conditional_rejected_reason,
         "conditional_hold_extension_profit_rate_at_max_holding": conditional_profit_rate_at_max_holding,
@@ -2205,9 +2218,16 @@ def _apply_holding_revaluation_exit_plan(
     current_price: float,
     holding_days: int,
 ) -> dict[str, Any]:
-    if not _holding_signal_revaluation_enabled(config):
+    if not _holding_revaluation_enabled(config):
         return exit_plan
     cfg = _holding_revaluation_config(config)
+    if exit_plan.get("exit_reason") in {"損切り", "利確"}:
+        return exit_plan
+    guard_plan = _extension_exit_guard_plan(exit_plan, holding_signal, config, current_price)
+    if guard_plan is not None:
+        return guard_plan
+    if not _holding_signal_revaluation_enabled(config):
+        return exit_plan
     if bool(cfg.get("stop_loss_always_priority", True)) and exit_plan.get("exit_reason") == "損切り":
         return exit_plan
     if holding_days < 2:
@@ -2247,6 +2267,55 @@ def _apply_holding_revaluation_exit_plan(
         }
     )
     return updated
+
+
+def _extension_exit_guard_plan(
+    exit_plan: dict[str, Any],
+    holding_signal: dict[str, Any],
+    config: dict[str, Any],
+    current_price: float,
+) -> dict[str, Any] | None:
+    conditional_cfg = _conditional_hold_extension_config(config)
+    guard_cfg = conditional_cfg.get("extension_exit_guard") or {}
+    if not isinstance(guard_cfg, dict) or not _bool_config(guard_cfg.get("enabled"), False):
+        return None
+    if not _truthy_holding_value(holding_signal.get("conditional_hold_extension_applied")):
+        return None
+    extension_profit_rate = _optional_float(holding_signal.get("extension_profit_rate"))
+    if extension_profit_rate is None:
+        extension_profit_rate = _optional_float(holding_signal.get("conditional_hold_extension_trigger_profit_rate"))
+    current_profit_rate = _optional_float(holding_signal.get("holding_unrealized_profit_rate"))
+    if extension_profit_rate is None or current_profit_rate is None:
+        return None
+    reasons: list[str] = []
+    max_pullback = _optional_float(guard_cfg.get("max_profit_pullback_points"))
+    if max_pullback is not None and extension_profit_rate - current_profit_rate >= max_pullback:
+        reasons.append("profit_pullback_exceeded")
+    min_remaining_profit_rate = _optional_float(guard_cfg.get("min_remaining_profit_rate"))
+    if min_remaining_profit_rate is not None and current_profit_rate < min_remaining_profit_rate:
+        reasons.append("remaining_profit_below_min")
+    if not reasons:
+        return None
+    reason_text = "+".join(reasons)
+    holding_signal["extension_exit_guard_triggered"] = True
+    holding_signal["extension_exit_guard_reason"] = reason_text
+    holding_signal["extension_profit_rate"] = extension_profit_rate
+    updated = dict(exit_plan)
+    updated.update(
+        {
+            "exit_reason": str(guard_cfg.get("exit_reason") or "延長後失速撤退"),
+            "exit_price": current_price,
+            "intended_exit_price": current_price,
+            "execute_now": False,
+        }
+    )
+    return updated
+
+
+def _truthy_holding_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
 
 
 def _stop_loss_trade_fields(exit_plan: dict[str, Any], actual_exit_price: float) -> dict[str, Any]:
