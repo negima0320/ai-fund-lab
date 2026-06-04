@@ -74,12 +74,13 @@ profile本体は `config/profiles/<profile_id>.yaml`、実験メタデータは 
 - `role: baseline`: 比較基準。例: `rookie_dealer_02_v2_1`
 - `role: experiment`: `compare_to` で指定したbaseに対する実験候補
 - `role: deprecated`: 保管用。通常の一括実験対象から外します
+- `recommendation_status`: 検証上の扱い。例: `current_baseline` / `not_recommended`
 - `required_plan`: `free` / `light` の推奨J-Quants plan
 - `features`: データ取得・特徴量生成の有効化
 - `enabled_features`: `list-profiles` / `profile-info` / experiment summaryに表示される識別用機能名
 - `profile_id` / `profile_name` / `config_version`: DB、logs、reports、scored candidatesに保存されます
 
-未指定時のprofile loader defaultは `rookie_dealer_01` ですが、現在の実験系の中心baselineは `rookie_dealer_02_v2_1`、資金利用率改善系の暫定baseは `rookie_dealer_02_v2_26` です。
+未指定時のprofile loader defaultは `rookie_dealer_01` ですが、現在の実験系の中心baselineは `rookie_dealer_02_v2_1`、資金利用率改善後の本命検証baseは `rookie_dealer_02_v2_26` です。`rookie_dealer_02_v2_60`〜`v2_62` の conditional hold extension 系は検証上 `not_recommended` として残しています。
 
 ## スコア計算の要点
 

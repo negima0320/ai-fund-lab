@@ -188,6 +188,8 @@ Affordable Fallback Buy Auditでは以下を確認します。
 - `rookie_dealer_02_v2_61`: v2.60と同じ売買条件で、延長発動銘柄のbase比損益差分を `compare_profiles` に出すレポート強化用。
 - `rookie_dealer_02_v2_62`: v2.61と同じ条件付き保有延長に、延長後の利益率悪化を検知する `extension_exit_guard` を追加した検証用。
 
+検証上の判断として、conditional hold extension 系 (`v2_60`〜`v2_62`) は本採用しません。`v2_26` を現時点の本命検証baseとして維持し、次の改善は entry selection / score calibration に寄せます。profile定義と実装は削除せず、将来の比較・再検証用に残します。
+
 `compare_profiles.md/json` と `backtest_summary.json` には以下が出ます。
 
 - `conditional_hold_extension_count`

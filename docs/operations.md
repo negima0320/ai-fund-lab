@@ -108,6 +108,8 @@ PYTHONPATH=. .venv/bin/python -m src.feature_analysis --profile rookie_dealer_02
 | `practical_effect` | 差分が実質的に出たか |
 | `verdict` | `candidate` / `needs_review` / `rejected` / `no_practical_effect` |
 | `verdict_reason` | 判定理由 |
+| `recommendation_status` | registryまたは自動判定に基づく検証上の扱い。`not_recommended` は本採用候補ではないことを示します |
+| `recommendation_note` | 採否メモ。投資助言ではなく研究・検証上の記録です |
 
 ## Conditional Hold Extension Checks
 
@@ -117,6 +119,8 @@ PYTHONPATH=. .venv/bin/python -m src.feature_analysis --profile rookie_dealer_02
 - `rookie_dealer_02_v2_60`: v2.59からrelative strength閾値だけを `60` から `5` に緩和
 - `rookie_dealer_02_v2_61`: v2.60と同条件で、延長発動銘柄のbase比損益差分レポートを強化
 - `rookie_dealer_02_v2_62`: v2.61と同条件に、延長後の利益失速を検知して撤退する `extension_exit_guard` を追加
+
+現時点の検証判断では、`rookie_dealer_02_v2_60`〜`rookie_dealer_02_v2_62` は `rookie_dealer_02_v2_26` 比でnet profit改善が確認できず、延長発動回数も少ないため `not_recommended` として扱います。延長ロジックは将来検証用に残しますが、次の改善テーマは entry selection / score calibration です。
 
 設定確認:
 

@@ -473,6 +473,30 @@ def test_risk_off_disables_top_pick(config_copy: dict) -> None:
     assert all(item["rejected_reason"] == "risk_offのため買付抑制" for item in result["scores"])
 
 
+def test_risk_off_entry_filter_can_block_even_high_score_candidates(config_copy: dict) -> None:
+    scored = [
+        scored_item("1001", total_score=90, volume_ratio=4.0, rsi=55),
+        scored_item("1002", total_score=85, volume_ratio=3.0, rsi=50),
+    ]
+    market_filter = {
+        "enabled": True,
+        "risk_off_buy_policy": "conservative",
+        "risk_off_max_buy_orders": 0,
+        "risk_off_min_score": 50,
+        "risk_off_disable_top_pick": True,
+        "allowed_sections": ["TSEPrime"],
+        "allow_unknown_market": False,
+    }
+
+    summary = _apply_selection_rules(scored, _selection_config(config_copy), market_filter, "risk_off")
+
+    assert summary["applied"] is True
+    assert summary["risk_off_max_buy_orders"] == 0
+    assert sum(summary["selected_market_counts"].values()) == 0
+    assert all(item["selected"] is False for item in scored)
+    assert all(item["rejected_reason"] == "risk_offのため買付抑制" for item in scored)
+
+
 def test_neutral_keeps_existing_top_pick_behavior(config_copy: dict) -> None:
     result = score_real_candidates(
         [

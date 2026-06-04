@@ -1,10 +1,10 @@
 # AI Fund Lab profile YAML
-# v2.61 と同じ条件付き保有延長に、延長後の失速撤退ガードを追加するprofileです。
+# rookie_dealer_02_v2_26 をベースに、risk_off局面の新規エントリーを止める検証profileです。
 # 秘密情報は書かず、APIキーや口座情報は .env に置きます。
 
-profile_id: rookie_dealer_02_v2_62
-profile_name: 新人ディーラー2号 v2.62
-description: 条件付き保有延長 + 延長後失速撤退ガード検証
+profile_id: rookie_dealer_02_v2_63
+profile_name: 新人ディーラー2号 v2.63
+description: v2.26ベース risk_off局面の新規エントリー抑制検証
 disable_single_order_amount_limit: true
 
 character:
@@ -19,7 +19,7 @@ character:
   catchphrases:
     - 過熱した銘柄は追いません
     - 出来高2倍以上を確認します
-    - 市場平均に勝つ銘柄を優先します
+    - risk_off局面では新規買付を見送ります
 
 features:
   market_context: true
@@ -70,25 +70,6 @@ trading:
   use_round_lot: true
   round_lot_size: 100
 
-conditional_hold_extension:
-  enabled: true
-  require_trend_continuation: true
-  skip_ma5_condition: true
-  require_ma25_uptrend: true
-  min_unrealized_profit_rate: 0.03
-  minimum_profit_for_extension: 0.03
-  min_relative_strength_score: 5
-  minimum_relative_strength_score: 5
-  profit_reject_reason: profit_below_threshold
-  relative_strength_reject_reason: relative_strength_below_threshold
-  max_holding_days: 7
-  max_extension_count: 1
-  extension_exit_guard:
-    enabled: true
-    max_profit_pullback_points: 0.02
-    min_remaining_profit_rate: 0.01
-    exit_reason: 延長後失速撤退
-
 execution:
   stop_loss_execution: intraday_stop
 
@@ -104,6 +85,8 @@ selection:
 
 market_filter:
   risk_off_min_score: 50
+  risk_off_max_buy_orders: 0
+  risk_off_disable_top_pick: true
 
 volume_filter:
   enabled: true

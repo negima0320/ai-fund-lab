@@ -49,6 +49,8 @@ def list_profiles(registry: dict[str, Any] | None = None, include_deprecated: bo
                 "enabled_features": enabled_features,
                 "compare_to": item.get("compare_to"),
                 "description": item.get("description", ""),
+                "recommendation_status": item.get("recommendation_status", ""),
+                "recommendation_note": item.get("recommendation_note", ""),
             }
         )
     return sorted(rows, key=lambda row: row["profile_id"])
@@ -78,6 +80,8 @@ def get_profile_info(profile_id: str, registry: dict[str, Any] | None = None) ->
         "profile_id": profile_id,
         "role": item.get("role", ""),
         "description": item.get("description", ""),
+        "recommendation_status": item.get("recommendation_status", ""),
+        "recommendation_note": item.get("recommendation_note", ""),
         "required_plan": item.get("required_plan", ""),
         "compare_to": compare_to,
         "enabled_features": enabled_features,

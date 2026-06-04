@@ -78,6 +78,8 @@ PaperBrokerの買付は以下を見ます。
 - `rookie_dealer_02_v2_61`: v2.60と同条件で、延長発動銘柄のbase比損益差分レポートを強化
 - `rookie_dealer_02_v2_62`: v2.61と同条件に、延長後失速撤退ガードを追加
 
+検証結果では `rookie_dealer_02_v2_60`〜`rookie_dealer_02_v2_62` は `rookie_dealer_02_v2_26` に対するnet profit改善が確認できず、保有延長による資金拘束と悪化リスクが残りました。実験profileとして残しますが、registry上は `not_recommended` として扱い、本採用候補にはしません。
+
 関連出力:
 
 - `conditional_hold_extension_count`

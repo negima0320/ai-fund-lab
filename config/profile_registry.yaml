@@ -231,6 +231,8 @@ profiles:
   rookie_dealer_02_v2_26:
     role: experiment
     description: pending_buy_amount控除を緩和 allocation_limit 検証
+    recommendation_status: current_baseline
+    recommendation_note: 現時点の本命baseline。次の改善テーマはentry selection / score calibration
     required_plan: light
     compare_to: rookie_dealer_02_v2_19
     features:
@@ -686,6 +688,8 @@ profiles:
   rookie_dealer_02_v2_60:
     role: experiment
     description: v2.59ベース 条件付き保有延長 relative_strength 閾値5検証
+    recommendation_status: not_recommended
+    recommendation_note: v2.26比でnet profitが悪化し、延長発動回数も少ないため本採用しない
     required_plan: light
     compare_to: rookie_dealer_02_v2_26
     features:
@@ -703,6 +707,8 @@ profiles:
   rookie_dealer_02_v2_61:
     role: experiment
     description: v2.60同条件 条件付き保有延長の差分レポート強化検証
+    recommendation_status: not_recommended
+    recommendation_note: 1年検証でv2.26より悪化し、延長差分PFも低いため本採用しない
     required_plan: light
     compare_to: rookie_dealer_02_v2_26
     features:
@@ -720,6 +726,8 @@ profiles:
   rookie_dealer_02_v2_62:
     role: experiment
     description: 条件付き保有延長 + 延長後失速撤退ガード検証
+    recommendation_status: not_recommended
+    recommendation_note: extension_exit_guard追加後も短期検証でv2.26比改善が確認できないため本採用しない
     required_plan: light
     compare_to: rookie_dealer_02_v2_26
     features:
@@ -734,6 +742,21 @@ profiles:
       trend_continuation_hold_extension: true
       ma25_uptrend_hold_extension: true
       extension_exit_guard: true
+
+  rookie_dealer_02_v2_63:
+    role: experiment
+    description: v2.26ベース risk_off局面の新規エントリー抑制検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_26
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      risk_off_entry_filter: true
 
   rookie_dealer_03_growth:
     role: experiment

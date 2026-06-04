@@ -385,8 +385,22 @@ def test_rookie_dealer_02_v2_62_extension_exit_guard_profile_loads() -> None:
     assert guard["max_profit_pullback_points"] == 0.02
     assert guard["min_remaining_profit_rate"] == 0.01
     assert guard["exit_reason"] == "延長後失速撤退"
+    assert profile_62["capital_utilization_policy"] == load_profile("rookie_dealer_02_v2_61")["capital_utilization_policy"]
+    assert profile_62["risk_margin"] == load_profile("rookie_dealer_02_v2_61")["risk_margin"]
     assert "holding_revaluation" not in profile_62
     assert load_profile("rookie_dealer_02_v2.62")["profile_id"] == "rookie_dealer_02_v2_62"
+
+
+def test_rookie_dealer_02_v2_63_risk_off_entry_filter_profile_loads() -> None:
+    profile_63 = load_profile("rookie_dealer_02_v2_63")
+
+    assert profile_63["profile_id"] == "rookie_dealer_02_v2_63"
+    assert profile_63["trading"] == load_profile("rookie_dealer_02_v2_26")["trading"]
+    assert profile_63["scoring"] == load_profile("rookie_dealer_02_v2_26")["scoring"]
+    assert profile_63["capital_utilization_policy"] == load_profile("rookie_dealer_02_v2_26")["capital_utilization_policy"]
+    assert profile_63["market_filter"]["risk_off_max_buy_orders"] == 0
+    assert profile_63["market_filter"]["risk_off_disable_top_pick"] is True
+    assert load_profile("rookie_dealer_02_v2.63")["profile_id"] == "rookie_dealer_02_v2_63"
 
 
 def test_rookie_dealer_02_v2_40_affordable_fallback_quality_profile_loads() -> None:

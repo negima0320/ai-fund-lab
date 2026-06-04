@@ -4732,11 +4732,12 @@ def registry_experiment_profile_ids(base_profile_id: str, registry: dict[str, An
 
 def run_list_profiles() -> None:
     rows = build_profile_registry_rows(load_profile_registry())
-    print("profile_id | role | required_plan | enabled_features | compare_to | description")
+    print("profile_id | role | required_plan | enabled_features | compare_to | recommendation_status | description")
     for row in rows:
         print(
             f"{row['profile_id']} | {row['role']} | {row['required_plan']} | "
-            f"{row['enabled_features'] or '-'} | {row['compare_to'] or '-'} | {row['description']}"
+            f"{row['enabled_features'] or '-'} | {row['compare_to'] or '-'} | "
+            f"{row.get('recommendation_status') or '-'} | {row['description']}"
         )
 
 
@@ -4757,6 +4758,8 @@ def run_profile_info(profile_id: str) -> None:
     print(f"required_plan: {info['required_plan']}")
     print(f"compare_to: {info['compare_to'] or '-'}")
     print(f"description: {info['description']}")
+    print(f"recommendation_status: {info.get('recommendation_status') or '-'}")
+    print(f"recommendation_note: {info.get('recommendation_note') or '-'}")
     print(f"enabled features: {', '.join(info['enabled_features']) or 'none'}")
     print(f"profile yaml path: {info['profile_yaml_path']}")
     print(f"score formula: {info['score_formula']}")
@@ -5852,12 +5855,15 @@ def build_experiment_batch_summary(
         outcome_diff_count = int(diff.get("outcome_diff_count") or 0)
         practical_effect = diff.get("practical_effect") or _profile_practical_effect(selection_diff_count, outcome_diff_count)
         judgement = _experiment_judgement(base_row, row, diff)
+        recommendation = _experiment_recommendation(registry_item, judgement)
         market_trade_consistency_warning = _market_trade_consistency_warning(row_market_coverage, row.get("total_trades"))
         experiment_rows.append(
             {
                 "profile_id": profile_id,
                 "role": registry_item.get("role", ""),
                 "description": registry_item.get("description", ""),
+                "recommendation_status": recommendation["status"],
+                "recommendation_note": recommendation["note"],
                 "required_plan": registry_item.get("required_plan", ""),
                 "enabled_features": _enabled_registry_features(registry_item),
                 "final_assets": row.get("final_assets"),
@@ -5969,6 +5975,8 @@ def build_experiment_batch_summary(
                 "profile_id": skipped["profile_id"],
                 "role": item.get("role", "experiment"),
                 "description": item.get("description", ""),
+                "recommendation_status": item.get("recommendation_status", ""),
+                "recommendation_note": item.get("recommendation_note", ""),
                 "required_plan": item.get("required_plan", skipped.get("required_plan", "")),
                 "enabled_features": _enabled_registry_features(item),
                 "status": "skipped",
@@ -6012,6 +6020,8 @@ def build_experiment_batch_summary(
             "profile_id": base_profile_id,
             "role": "baseline",
             "description": profiles.get(base_profile_id, {}).get("description", ""),
+            "recommendation_status": profiles.get(base_profile_id, {}).get("recommendation_status", "baseline"),
+            "recommendation_note": profiles.get(base_profile_id, {}).get("recommendation_note", ""),
             "required_plan": profiles.get(base_profile_id, {}).get("required_plan", ""),
             "enabled_features": _enabled_registry_features(profiles.get(base_profile_id, {})),
             **base_row,
@@ -6188,6 +6198,21 @@ def _experiment_judgement(base_row: dict[str, Any], row: dict[str, Any], diff: d
     if profit_ok:
         return {"judgement": "needs_review", "reasons": reasons}
     return {"judgement": "rejected", "reasons": reasons}
+
+
+def _experiment_recommendation(registry_item: dict[str, Any], judgement: dict[str, Any]) -> dict[str, str]:
+    explicit_status = str(registry_item.get("recommendation_status") or "").strip()
+    explicit_note = str(registry_item.get("recommendation_note") or "").strip()
+    if explicit_status:
+        return {"status": explicit_status, "note": explicit_note}
+    judgement_name = str(judgement.get("judgement") or "")
+    if judgement_name == "candidate":
+        return {"status": "candidate", "note": "meets_candidate_criteria"}
+    if judgement_name == "rejected":
+        return {"status": "not_recommended", "note": "; ".join(judgement.get("reasons") or [])}
+    if judgement_name == "no_practical_effect":
+        return {"status": "no_practical_effect", "note": "; ".join(judgement.get("reasons") or [])}
+    return {"status": "needs_review", "note": "; ".join(judgement.get("reasons") or [])}
 
 
 def write_experiment_batch_outputs(
@@ -6490,8 +6515,8 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             "",
             "## Results",
             "",
-            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | signal_lost_exit_count | signal_lost_exit_avoided_count | hold_extension_count | hold_extension_profit_diff | conditional_hold_extension_count | conditional_hold_extension_profit_diff | conditional_hold_extension_profit_factor | conditional_hold_extension_applied_count | conditional_hold_extension_win_count | conditional_hold_extension_loss_count | conditional_hold_extension_profit_diff_total | conditional_hold_extension_profit_diff_average | conditional_hold_extension_profit_diff_pf | monthly_win_rate | winning_months | losing_months | average_monthly_return | worst_month_return | best_month_return | max_consecutive_losing_months | newly_selected_count | removed_count | investor_filter_rejected_count | market_filter | market_candidate_count | market_scored_count | market_selected_count | market_buy_trade_count | market_sell_trade_count | market_profit_by_section | market_profit_factor_by_section | market_filter_excluded_count | market_trade_consistency_warning | result_integrity_status | integrity_error_count | integrity_warning_count | market_filter_violation_count | trade_without_selected_count | out_of_period_trade_count | stale_cache_read_count | score_integrity_status | total_score_mismatch_count | stale_score_cache_count | future_data_leak_count | signal_entry_date_violation_count | no_trade_fallback_selected_count | selected_below_regular_min_score_count | fallback_top_pick_selected_count | invalid_below_threshold_selected_count | selection_diff_count | outcome_diff_count | indicators_last_date | candidates_last_date | scored_candidates_last_date | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | earnings_calendar_records | earnings_filter_rejected_count | earnings_filter_status | practical_effect | effect_reason | verdict | verdict_reason |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| profile_id | role | description | recommendation_status | recommendation_note | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | signal_lost_exit_count | signal_lost_exit_avoided_count | hold_extension_count | hold_extension_profit_diff | conditional_hold_extension_count | conditional_hold_extension_profit_diff | conditional_hold_extension_profit_factor | conditional_hold_extension_applied_count | conditional_hold_extension_win_count | conditional_hold_extension_loss_count | conditional_hold_extension_profit_diff_total | conditional_hold_extension_profit_diff_average | conditional_hold_extension_profit_diff_pf | monthly_win_rate | winning_months | losing_months | average_monthly_return | worst_month_return | best_month_return | max_consecutive_losing_months | newly_selected_count | removed_count | investor_filter_rejected_count | market_filter | market_candidate_count | market_scored_count | market_selected_count | market_buy_trade_count | market_sell_trade_count | market_profit_by_section | market_profit_factor_by_section | market_filter_excluded_count | market_trade_consistency_warning | result_integrity_status | integrity_error_count | integrity_warning_count | market_filter_violation_count | trade_without_selected_count | out_of_period_trade_count | stale_cache_read_count | score_integrity_status | total_score_mismatch_count | stale_score_cache_count | future_data_leak_count | signal_entry_date_violation_count | no_trade_fallback_selected_count | selected_below_regular_min_score_count | fallback_top_pick_selected_count | invalid_below_threshold_selected_count | selection_diff_count | outcome_diff_count | indicators_last_date | candidates_last_date | scored_candidates_last_date | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | earnings_calendar_records | earnings_filter_rejected_count | earnings_filter_status | practical_effect | effect_reason | verdict | verdict_reason |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for row in _experiment_summary_result_rows(summary):
@@ -6513,7 +6538,9 @@ def _experiment_summary_result_rows(summary: dict[str, Any]) -> list[dict[str, A
 def _experiment_summary_table_row(row: dict[str, Any]) -> str:
     enabled = ", ".join(row.get("enabled_features") or []) or "-"
     return (
-        f"| {row.get('profile_id')} | {row.get('role', '')} | {row.get('description', '')} | {row.get('required_plan', '')} | {enabled} | "
+        f"| {row.get('profile_id')} | {row.get('role', '')} | {row.get('description', '')} | "
+        f"{row.get('recommendation_status') or '-'} | {row.get('recommendation_note') or '-'} | "
+        f"{row.get('required_plan', '')} | {enabled} | "
         f"{_format_optional_number(row.get('final_assets'))} | {_format_optional_number(row.get('net_cumulative_profit'))} | "
         f"{_format_optional_percent(row.get('win_rate'))} | {_format_optional_number(row.get('profit_factor'))} | "
         f"{_format_optional_percent(row.get('expectancy'))} | {_format_optional_percent(row.get('max_drawdown'))} | "
@@ -6561,7 +6588,7 @@ def _experiment_summary_table_row(row: dict[str, Any]) -> str:
 
 
 def _compact_json(value: Any) -> str:
-    if not value:
+    if value is None:
         return "{}"
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -6572,6 +6599,8 @@ def render_experiment_profile_markdown(row: dict[str, Any]) -> str:
             "",
             f"- role: {row.get('role', '')}",
             f"- description: {row.get('description', '')}",
+            f"- recommendation_status: {row.get('recommendation_status') or '-'}",
+            f"- recommendation_note: {row.get('recommendation_note') or '-'}",
             f"- required_plan: {row.get('required_plan', '')}",
             f"- enabled_features: {', '.join(row.get('enabled_features') or []) or '-'}",
             f"- status: {row.get('status', 'completed')}",

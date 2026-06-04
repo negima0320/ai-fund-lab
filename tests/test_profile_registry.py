@@ -21,9 +21,12 @@ def test_list_profiles_outputs_registry_rows(capsys) -> None:
     main_module.run_list_profiles()
 
     output = capsys.readouterr().out
-    assert "profile_id | role | required_plan | enabled_features | compare_to | description" in output
+    assert "profile_id | role | required_plan | enabled_features | compare_to | recommendation_status | description" in output
     assert "rookie_dealer_02_v2_1 | baseline | free" in output
     assert "rookie_dealer_02_v2_6 | experiment | light | relative_strength | rookie_dealer_02_v2_1" in output
+    assert "rookie_dealer_02_v2_62 | experiment | light" in output
+    assert "not_recommended | 条件付き保有延長 + 延長後失速撤退ガード検証" in output
+    assert "rookie_dealer_02_v2_63 | experiment | light" in output
 
 
 def test_profile_info_outputs_formula_and_compare_command(capsys) -> None:
@@ -38,6 +41,22 @@ def test_profile_info_outputs_formula_and_compare_command(capsys) -> None:
     assert "topix_prices" in output
     assert "recommended backtest command:" in output
     assert "recommended compare command:" in output
+
+
+def test_profile_info_outputs_recommendation_metadata(capsys) -> None:
+    main_module.run_profile_info("rookie_dealer_02_v2_62")
+
+    output = capsys.readouterr().out
+    assert "recommendation_status: not_recommended" in output
+    assert "recommendation_note:" in output
+    assert "本採用しない" in output
+
+
+def test_compact_json_keeps_falsey_scalar_values() -> None:
+    assert main_module._compact_json(0) == "0"
+    assert main_module._compact_json(False) == "false"
+    assert main_module._compact_json("") == '""'
+    assert main_module._compact_json(None) == "{}"
 
 
 def test_profile_info_unknown_profile_errors() -> None:
@@ -141,6 +160,7 @@ def test_run_experiments_selects_v2_26_dynamic_exposure_profiles() -> None:
         "rookie_dealer_02_v2_60",
         "rookie_dealer_02_v2_61",
         "rookie_dealer_02_v2_62",
+        "rookie_dealer_02_v2_63",
     ]
 
 
@@ -751,6 +771,26 @@ def test_experiment_verdict_not_no_practical_effect_when_metrics_change_with_out
 
     assert result["judgement"] != "no_practical_effect"
     assert "execution_or_exit_effect" in result["reasons"]
+
+
+def test_experiment_recommendation_marks_rejected_as_not_recommended() -> None:
+    judgement = {"judgement": "rejected", "reasons": ["net_cumulative_profit_below_base"]}
+
+    result = main_module._experiment_recommendation({}, judgement)
+
+    assert result["status"] == "not_recommended"
+    assert result["note"] == "net_cumulative_profit_below_base"
+
+
+def test_experiment_recommendation_prefers_registry_metadata() -> None:
+    judgement = {"judgement": "candidate", "reasons": ["meets_candidate_criteria"]}
+
+    result = main_module._experiment_recommendation(
+        {"recommendation_status": "not_recommended", "recommendation_note": "本採用しない"},
+        judgement,
+    )
+
+    assert result == {"status": "not_recommended", "note": "本採用しない"}
 
 
 def test_experiment_summary_row_includes_feature_activation() -> None:
