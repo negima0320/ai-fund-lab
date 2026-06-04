@@ -1,9 +1,9 @@
 # AI Fund Lab profile YAML
-# rookie_dealer_02_v2_26 をベースに、strong_bearのみ新規買いを止めるprofileです。
+# rookie_dealer_02_v2_26 をベースに、signal_lost_exit を2営業日連続条件へ緩和するprofileです。
 
-profile_id: rookie_dealer_02_v2_36
-profile_name: 新人ディーラー2号 v2.36
-description: v2.26ベース strong_bear停止 + その他積極運用 検証
+profile_id: rookie_dealer_02_v2_52
+profile_name: 新人ディーラー2号 v2.52
+description: signal_lost_exitを2営業日連続条件に緩和
 disable_single_order_amount_limit: true
 
 character:
@@ -12,13 +12,13 @@ character:
     - 教科書通り
     - データ重視
     - 損切り最優先
-    - 過熱銘柄を追わない
-    - 出来高確認を重視
+    - 市場平均に勝つ銘柄を優先
+    - シグナル消失を急ぎすぎない
     - リスク管理重視
   catchphrases:
-    - 過熱した銘柄は追いません
-    - 出来高2倍以上を確認します
-    - 市場平均に勝つ銘柄を優先します
+    - 1日だけのシグナル消失では慌てません
+    - 損切りは従来通り優先します
+    - 連続して弱い銘柄だけ見直します
 
 features:
   market_context: true
@@ -89,14 +89,13 @@ volume_filter:
   enabled: true
   min_volume_ratio: 2.0
 
-dynamic_exposure:
+holding_revaluation:
   enabled: true
-  target_exposure_by_regime:
-    strong_bull: 0.95
-    bull: 0.90
-    range: 0.90
-    bear: 0.90
-    strong_bear: 0.0
+  hold_reselection_enabled: false
+  early_exit_on_signal_lost: true
+  signal_lost_exit_min_consecutive_days: 2
+  signal_lost_exit_unrealized_loss_rate_threshold: -0.02
+  stop_loss_always_priority: true
 
 capital_utilization_policy:
   enabled: true

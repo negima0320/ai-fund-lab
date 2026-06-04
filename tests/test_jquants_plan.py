@@ -137,12 +137,10 @@ def test_free_light_profile_compatibility_matrix() -> None:
     expectations = {
         ("free", "rookie_dealer_02_v2_1"): ([], []),
         ("free", "rookie_dealer_02_v2_6"): (["topix_prices"], ["topix_prices"]),
-        ("free", "rookie_dealer_02_v2_8"): (["investor_types"], ["investor_types"]),
         ("free", "rookie_dealer_02_v2_9"): ([], []),
         ("free", "rookie_dealer_02_v2_10"): ([], []),
         ("light", "rookie_dealer_02_v2_1"): ([], []),
         ("light", "rookie_dealer_02_v2_6"): ([], []),
-        ("light", "rookie_dealer_02_v2_8"): ([], []),
         ("light", "rookie_dealer_02_v2_9"): ([], []),
         ("light", "rookie_dealer_02_v2_10"): ([], []),
     }
@@ -158,10 +156,8 @@ def test_all_matrix_profiles_load() -> None:
     for profile_id in [
         "rookie_dealer_02_v2_1",
         "rookie_dealer_02_v2_6",
-        "rookie_dealer_02_v2_8",
         "rookie_dealer_02_v2_9",
         "rookie_dealer_02_v2_10",
-        "rookie_dealer_02_v2_11",
     ]:
         assert load_profile(profile_id)["profile_id"] == profile_id
 
@@ -178,15 +174,3 @@ def test_preflight_warns_but_allows_free_v2_6_fallback() -> None:
     assert any(message.startswith("fallback applied: topix_prices ->") for message in messages)
     assert "can_run_backtest: true" in messages
 
-
-def test_preflight_warns_but_allows_free_v2_8_disabled_context() -> None:
-    results: list[dict] = []
-    config = load_profile("rookie_dealer_02_v2_8")
-    config["jquants"]["plan"] = "free"
-
-    main_module._check_jquants_plan_capabilities(results, config)
-
-    messages = [item["message"] for item in results]
-    assert "missing capabilities: investor_types" in messages
-    assert any(message.startswith("fallback applied: investor_types ->") for message in messages)
-    assert "can_run_backtest: true" in messages

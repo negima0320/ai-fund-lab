@@ -1,9 +1,9 @@
 # AI Fund Lab profile YAML
-# rookie_dealer_02_v2_26 をベースに、strong_bullのみtarget_exposureを引き上げるprofileです。
+# rookie_dealer_02_v2_52 をベースに、含み益中のsignal_lost早期売却を抑制するprofileです。
 
-profile_id: rookie_dealer_02_v2_33
-profile_name: 新人ディーラー2号 v2.33
-description: v2.26ベース strong_bullのみ target_exposure 0.95 検証
+profile_id: rookie_dealer_02_v2_53
+profile_name: 新人ディーラー2号 v2.53
+description: v2.52 + 含み益中はsignal_lost売却を抑制
 disable_single_order_amount_limit: true
 
 character:
@@ -12,13 +12,13 @@ character:
     - 教科書通り
     - データ重視
     - 損切り最優先
-    - 過熱銘柄を追わない
-    - 出来高確認を重視
+    - 利益中の銘柄を急いで売らない
+    - 市場平均に勝つ銘柄を優先
     - リスク管理重視
   catchphrases:
-    - 過熱した銘柄は追いません
-    - 出来高2倍以上を確認します
-    - 市場平均に勝つ銘柄を優先します
+    - 利益が乗っている間は少し待ちます
+    - シグナル消失は連続性を見ます
+    - 損切りは従来通り優先します
 
 features:
   market_context: true
@@ -89,10 +89,14 @@ volume_filter:
   enabled: true
   min_volume_ratio: 2.0
 
-dynamic_exposure:
+holding_revaluation:
   enabled: true
-  target_exposure_by_regime:
-    strong_bull: 0.95
+  hold_reselection_enabled: false
+  early_exit_on_signal_lost: true
+  signal_lost_exit_min_consecutive_days: 2
+  signal_lost_exit_unrealized_loss_rate_threshold: -0.02
+  suppress_signal_lost_exit_when_unrealized_profit: true
+  stop_loss_always_priority: true
 
 capital_utilization_policy:
   enabled: true

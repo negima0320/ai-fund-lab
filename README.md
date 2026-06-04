@@ -37,11 +37,11 @@ CLI全体は次で確認できます。
 ```bash
 # profile一覧と詳細
 .venv/bin/python src/main.py --mode list-profiles
-.venv/bin/python src/main.py --mode profile-info --profile rookie_dealer_02_v2_51
+.venv/bin/python src/main.py --mode profile-info --profile rookie_dealer_02_v2_38
 
 # 設定検証
 .venv/bin/python src/main.py --mode validate-config
-.venv/bin/python src/main.py --mode validate-config --profile rookie_dealer_02_v2_51 --strict
+.venv/bin/python src/main.py --mode validate-config --profile rookie_dealer_02_v2_38 --strict
 
 # 単体backtest
 .venv/bin/python src/main.py --mode backtest --profile rookie_dealer_02_v2_26 --start-date YYYY-MM-DD --end-date YYYY-MM-DD --skip-price-fetch --fast-analysis --strict-integrity
@@ -49,7 +49,7 @@ CLI全体は次で確認できます。
 # 実験比較
 .venv/bin/python src/main.py --mode run-experiments \
   --base-profile rookie_dealer_02_v2_26 \
-  --profiles rookie_dealer_02_v2_26 rookie_dealer_02_v2_51 \
+  --profiles rookie_dealer_02_v2_26 rookie_dealer_02_v2_38 \
   --start-date YYYY-MM-DD \
   --end-date YYYY-MM-DD \
   --skip-price-fetch \
@@ -58,8 +58,11 @@ CLI全体は次で確認できます。
   --strict-integrity
 
 # 既存成果物からfeature_analysisだけ再生成
-.venv/bin/python src/feature_analysis.py --profile rookie_dealer_02_v2_51
-PYTHONPATH=. .venv/bin/python -m src.feature_analysis --profile rookie_dealer_02_v2_51
+.venv/bin/python src/feature_analysis.py --profile rookie_dealer_02_v2_38
+PYTHONPATH=. .venv/bin/python -m src.feature_analysis --profile rookie_dealer_02_v2_38
+
+# 不要profile成果物の削除候補確認
+.venv/bin/python src/main.py --mode cleanup-retired-profiles --verbose
 ```
 
 重い5年backtestや `run-experiments` は、キャッシュと空き容量を確認してから手動で実行してください。
@@ -105,6 +108,8 @@ total_score =
 買付はPaperBroker上で、現金、保有数、100株単位、`allocation_limit`、`target_exposure`、`min_cash_buffer`、`max_position_value_rate` を見て行われます。`affordable_fallback_buy` が有効なprofileでは、通常選定後に余剰現金で買える高順位候補を追加選定できます。fallback由来の取引は `selection_source` / `affordable_fallback_buy_selected` で通常選定と区別され、integrity auditでは選定済みとして扱います。
 
 市場区分は `market_filter.allowed_sections` で制御します。`allow_unknown_market: false` の場合、Unknown / None / 空文字の市場区分は除外です。Standard/Growthを使う実験では、Candidate Universe Audit、Screening Audit、Standard Funnel Audit、Trade Market Auditでどの段階まで到達したかを確認します。
+
+売却は損切り、利確、最大保有期間、market/risk exitが基本です。`conditional_hold_extension` が有効なprofileでは、最大保有期間到達時だけ含み益、relative strength、MA25上昇などを確認して保有延長を検証できます。詳細は [docs/trading-rules.md](docs/trading-rules.md) と [docs/rookie-dealer-decision-flow.md](docs/rookie-dealer-decision-flow.md) を参照してください。
 
 ## 主要出力
 

@@ -1,9 +1,10 @@
 # AI Fund Lab profile YAML
-# rookie_dealer_02_v2_37 をベースに、fallback候補の最低スコアを制限するprofileです。
+# rookie_dealer_02_v2_26 をベースに、保有中銘柄の再選定による
+# 最大保有期間延長だけを分離検証する profile です。
 
 profile_id: rookie_dealer_02_v2_39
 profile_name: 新人ディーラー2号 v2.39
-description: v2.37 + affordable fallback min_total_score 55 検証
+description: 保有銘柄の再選定による保有延長のみ検証
 disable_single_order_amount_limit: true
 
 character:
@@ -12,13 +13,13 @@ character:
     - 教科書通り
     - データ重視
     - 損切り最優先
-    - 過熱銘柄を追わない
-    - 出来高確認を重視
+    - 市場平均に勝つ銘柄を優先
+    - 保有シグナルの継続を確認
     - リスク管理重視
   catchphrases:
-    - 過熱した銘柄は追いません
-    - 出来高2倍以上を確認します
-    - 市場平均に勝つ銘柄を優先します
+    - 買いシグナルが続く銘柄は少し粘ります
+    - 利確と損切りは従来通り優先します
+    - 早期売却は今回は使いません
 
 features:
   market_context: true
@@ -89,9 +90,12 @@ volume_filter:
   enabled: true
   min_volume_ratio: 2.0
 
-affordable_fallback_buy:
+holding_revaluation:
   enabled: true
-  min_total_score: 55
+  hold_reselection_enabled: true
+  hold_extension_max_days: 10
+  early_exit_on_signal_lost: false
+  stop_loss_always_priority: true
 
 capital_utilization_policy:
   enabled: true

@@ -1490,7 +1490,11 @@ def test_investor_context_debug_shows_top_candidates_and_effect(config_copy: dic
 
 
 def test_investor_context_filter_analysis_reports_rejections(tmp_path) -> None:
-    config = load_profile("rookie_dealer_02_v2_11")
+    config = load_profile("rookie_dealer_02_v2_1")
+    config["profile_id"] = "test_investor_context_filter"
+    config.setdefault("features", {})["investor_context"] = True
+    config.setdefault("scoring", {})["use_investor_context_score"] = False
+    config["investor_context_filter"] = {"enabled": True, "threshold": -1, "reason": "investor_context_negative"}
     config["database"]["path"] = str(tmp_path / "ai_fund_lab.sqlite3")
     initialize_database(config, tmp_path)
     save_scoring_results(

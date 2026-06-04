@@ -1,9 +1,9 @@
 # AI Fund Lab profile YAML
-# rookie_dealer_02_v2_26 をベースに、買付不能selectedの代替候補を買うprofileです。
+# rookie_dealer_02_v2_53 をベースに、再選定時だけ条件付きで最大保有日数を延長するprofileです。
 
-profile_id: rookie_dealer_02_v2_37
-profile_name: 新人ディーラー2号 v2.37
-description: v2.26ベース affordable fallback buy 検証
+profile_id: rookie_dealer_02_v2_54
+profile_name: 新人ディーラー2号 v2.54
+description: v2.53 + 再選定時のみ条件付き最大保有延長
 disable_single_order_amount_limit: true
 
 character:
@@ -12,13 +12,13 @@ character:
     - 教科書通り
     - データ重視
     - 損切り最優先
-    - 過熱銘柄を追わない
-    - 出来高確認を重視
+    - 利益中の銘柄を伸ばす
+    - 再選定の質を確認する
     - リスク管理重視
   catchphrases:
-    - 過熱した銘柄は追いません
-    - 出来高2倍以上を確認します
-    - 市場平均に勝つ銘柄を優先します
+    - 再選定された強い銘柄だけ少し伸ばします
+    - 利確と損切りは従来通り優先します
+    - 無条件には延長しません
 
 features:
   market_context: true
@@ -89,8 +89,20 @@ volume_filter:
   enabled: true
   min_volume_ratio: 2.0
 
-affordable_fallback_buy:
+holding_revaluation:
   enabled: true
+  hold_reselection_enabled: true
+  hold_extension_max_days: 10
+  hold_extension_max_count: 1
+  hold_extension_require_confirmation: true
+  hold_extension_min_unrealized_profit_rate: 0.0
+  hold_extension_max_score_drop: 3
+  hold_extension_max_rank: 10
+  early_exit_on_signal_lost: true
+  signal_lost_exit_min_consecutive_days: 2
+  signal_lost_exit_unrealized_loss_rate_threshold: -0.02
+  suppress_signal_lost_exit_when_unrealized_profit: true
+  stop_loss_always_priority: true
 
 capital_utilization_policy:
   enabled: true

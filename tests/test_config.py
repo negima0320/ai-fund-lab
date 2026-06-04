@@ -213,7 +213,6 @@ def test_rookie_dealer_02_v2_v26_capital_relaxation_profiles_load() -> None:
     expected = {
         "rookie_dealer_02_v2_29": (0.6, 0.9),
         "rookie_dealer_02_v2_30": (0.7, 0.9),
-        "rookie_dealer_02_v2_31": (0.6, 0.95),
         "rookie_dealer_02_v2_32": (0.7, 0.95),
     }
 
@@ -239,10 +238,7 @@ def test_rookie_dealer_02_v2_dot_29_alias_loads() -> None:
 
 def test_rookie_dealer_02_v2_dynamic_exposure_profiles_load() -> None:
     expected = {
-        "rookie_dealer_02_v2_33": {"strong_bull": 0.95},
-        "rookie_dealer_02_v2_34": {"strong_bull": 0.95, "bull": 0.90},
         "rookie_dealer_02_v2_35": {"strong_bull": 1.0, "bull": 0.90, "range": 0.70, "bear": 0.40, "strong_bear": 0.0},
-        "rookie_dealer_02_v2_36": {"strong_bull": 0.95, "bull": 0.90, "range": 0.90, "bear": 0.90, "strong_bear": 0.0},
     }
 
     for profile_id, target_exposure_by_regime in expected.items():
@@ -253,36 +249,6 @@ def test_rookie_dealer_02_v2_dynamic_exposure_profiles_load() -> None:
         assert profile["capital_utilization_policy"]["allocation_strategy"] == "relaxed_pending_target_exposure"
         assert profile["dynamic_exposure"]["enabled"] is True
         assert profile["dynamic_exposure"]["target_exposure_by_regime"] == target_exposure_by_regime
-
-
-def test_rookie_dealer_02_v2_dot_33_alias_loads() -> None:
-    profile = load_profile("rookie_dealer_02_v2.33")
-
-    assert profile["profile_id"] == "rookie_dealer_02_v2_33"
-    assert profile["dynamic_exposure"]["target_exposure_by_regime"]["strong_bull"] == 0.95
-
-
-def test_rookie_dealer_02_v2_dot_36_alias_loads() -> None:
-    profile = load_profile("rookie_dealer_02_v2.36")
-
-    assert profile["profile_id"] == "rookie_dealer_02_v2_36"
-    assert profile["dynamic_exposure"]["target_exposure_by_regime"]["strong_bear"] == 0.0
-    assert profile["capital_utilization_policy"]["allocation_strategy"] == "relaxed_pending_target_exposure"
-
-
-def test_rookie_dealer_02_v2_37_affordable_fallback_profile_loads() -> None:
-    profile = load_profile("rookie_dealer_02_v2_37")
-
-    assert profile["profile_id"] == "rookie_dealer_02_v2_37"
-    assert profile["affordable_fallback_buy"]["enabled"] is True
-    assert profile["capital_utilization_policy"]["allocation_strategy"] == "relaxed_pending_target_exposure"
-
-
-def test_rookie_dealer_02_v2_dot_37_alias_loads() -> None:
-    profile = load_profile("rookie_dealer_02_v2.37")
-
-    assert profile["profile_id"] == "rookie_dealer_02_v2_37"
-    assert profile["affordable_fallback_buy"]["enabled"] is True
 
 
 def test_rookie_dealer_02_v2_38_holding_revaluation_profile_loads() -> None:
@@ -297,13 +263,106 @@ def test_rookie_dealer_02_v2_38_holding_revaluation_profile_loads() -> None:
     assert load_profile("rookie_dealer_02_v2.38")["profile_id"] == "rookie_dealer_02_v2_38"
 
 
-def test_rookie_dealer_02_v2_39_to_40_affordable_fallback_quality_profiles_load() -> None:
+def test_rookie_dealer_02_v2_39_hold_extension_only_profile_loads() -> None:
     profile_39 = load_profile("rookie_dealer_02_v2_39")
+
+    assert profile_39["profile_id"] == "rookie_dealer_02_v2_39"
+    assert profile_39["holding_revaluation"]["enabled"] is True
+    assert profile_39["holding_revaluation"]["hold_reselection_enabled"] is True
+    assert profile_39["holding_revaluation"]["hold_extension_max_days"] == 10
+    assert profile_39["holding_revaluation"]["early_exit_on_signal_lost"] is False
+    assert "score_drop_exit_threshold" not in profile_39["holding_revaluation"]
+    assert profile_39["capital_utilization_policy"]["allocation_strategy"] == "relaxed_pending_target_exposure"
+    assert load_profile("rookie_dealer_02_v2.39")["profile_id"] == "rookie_dealer_02_v2_39"
+
+
+def test_rookie_dealer_02_v2_52_to_54_holding_revaluation_profiles_load() -> None:
+    profile_52 = load_profile("rookie_dealer_02_v2_52")
+    profile_53 = load_profile("rookie_dealer_02_v2_53")
+    profile_54 = load_profile("rookie_dealer_02_v2_54")
+
+    assert profile_52["holding_revaluation"]["signal_lost_exit_min_consecutive_days"] == 2
+    assert profile_52["holding_revaluation"]["early_exit_on_signal_lost"] is True
+    assert profile_53["holding_revaluation"]["suppress_signal_lost_exit_when_unrealized_profit"] is True
+    assert profile_54["holding_revaluation"]["hold_reselection_enabled"] is True
+    assert profile_54["holding_revaluation"]["hold_extension_require_confirmation"] is True
+    assert profile_54["holding_revaluation"]["hold_extension_max_count"] == 1
+    assert load_profile("rookie_dealer_02_v2.52")["profile_id"] == "rookie_dealer_02_v2_52"
+    assert load_profile("rookie_dealer_02_v2.53")["profile_id"] == "rookie_dealer_02_v2_53"
+    assert load_profile("rookie_dealer_02_v2.54")["profile_id"] == "rookie_dealer_02_v2_54"
+
+
+def test_rookie_dealer_02_v2_55_max_holding_days_only_profile_loads() -> None:
+    profile_55 = load_profile("rookie_dealer_02_v2_55")
+
+    assert profile_55["profile_id"] == "rookie_dealer_02_v2_55"
+    assert profile_55["trading"]["max_holding_days"] == 7
+    assert profile_55["capital_utilization_policy"]["allocation_strategy"] == "relaxed_pending_target_exposure"
+    assert "holding_revaluation" not in profile_55
+    assert load_profile("rookie_dealer_02_v2.55")["profile_id"] == "rookie_dealer_02_v2_55"
+
+
+def test_rookie_dealer_02_v2_56_conditional_hold_extension_profile_loads() -> None:
+    profile_56 = load_profile("rookie_dealer_02_v2_56")
+
+    assert profile_56["profile_id"] == "rookie_dealer_02_v2_56"
+    assert profile_56["trading"]["max_holding_days"] == 5
+    assert profile_56["conditional_hold_extension"]["enabled"] is True
+    assert profile_56["conditional_hold_extension"]["min_unrealized_profit_rate"] == 0.03
+    assert profile_56["conditional_hold_extension"]["max_holding_days"] == 7
+    assert "holding_revaluation" not in profile_56
+    assert load_profile("rookie_dealer_02_v2.56")["profile_id"] == "rookie_dealer_02_v2_56"
+
+
+def test_rookie_dealer_02_v2_57_trend_continuation_hold_extension_profile_loads() -> None:
+    profile_57 = load_profile("rookie_dealer_02_v2_57")
+
+    assert profile_57["profile_id"] == "rookie_dealer_02_v2_57"
+    assert profile_57["trading"]["max_holding_days"] == 5
+    assert profile_57["conditional_hold_extension"]["enabled"] is True
+    assert profile_57["conditional_hold_extension"]["require_trend_continuation"] is True
+    assert profile_57["conditional_hold_extension"]["min_unrealized_profit_rate"] == 0.015
+    assert profile_57["conditional_hold_extension"]["min_relative_strength_score"] == 60
+    assert profile_57["conditional_hold_extension"]["max_holding_days"] == 7
+    assert "holding_revaluation" not in profile_57
+    assert load_profile("rookie_dealer_02_v2.57")["profile_id"] == "rookie_dealer_02_v2_57"
+
+
+def test_rookie_dealer_02_v2_58_ma25_uptrend_hold_extension_profile_loads() -> None:
+    profile_58 = load_profile("rookie_dealer_02_v2_58")
+
+    assert profile_58["profile_id"] == "rookie_dealer_02_v2_58"
+    assert profile_58["trading"]["max_holding_days"] == 5
+    assert profile_58["conditional_hold_extension"]["enabled"] is True
+    assert profile_58["conditional_hold_extension"]["require_trend_continuation"] is True
+    assert profile_58["conditional_hold_extension"]["skip_ma5_condition"] is True
+    assert profile_58["conditional_hold_extension"]["require_ma25_uptrend"] is True
+    assert profile_58["conditional_hold_extension"]["min_unrealized_profit_rate"] == 0.03
+    assert profile_58["conditional_hold_extension"]["min_relative_strength_score"] == 60
+    assert profile_58["conditional_hold_extension"]["profit_reject_reason"] == "profit_below_threshold"
+    assert profile_58["conditional_hold_extension"]["relative_strength_reject_reason"] == "relative_strength_below_threshold"
+    assert profile_58["conditional_hold_extension"]["max_holding_days"] == 7
+    assert "holding_revaluation" not in profile_58
+    assert load_profile("rookie_dealer_02_v2.58")["profile_id"] == "rookie_dealer_02_v2_58"
+
+
+def test_rookie_dealer_02_v2_59_indicator_enriched_hold_extension_profile_loads() -> None:
+    profile_59 = load_profile("rookie_dealer_02_v2_59")
+
+    assert profile_59["profile_id"] == "rookie_dealer_02_v2_59"
+    assert profile_59["trading"]["max_holding_days"] == 5
+    assert profile_59["conditional_hold_extension"] == load_profile("rookie_dealer_02_v2_58")["conditional_hold_extension"]
+    assert profile_59["conditional_hold_extension"]["require_ma25_uptrend"] is True
+    assert profile_59["conditional_hold_extension"]["min_unrealized_profit_rate"] == 0.03
+    assert profile_59["conditional_hold_extension"]["min_relative_strength_score"] == 60
+    assert "holding_revaluation" not in profile_59
+    assert load_profile("rookie_dealer_02_v2.59")["profile_id"] == "rookie_dealer_02_v2_59"
+
+
+def test_rookie_dealer_02_v2_40_affordable_fallback_quality_profile_loads() -> None:
     profile_40 = load_profile("rookie_dealer_02_v2_40")
 
-    assert profile_39["affordable_fallback_buy"]["min_total_score"] == 55
     assert profile_40["affordable_fallback_buy"]["max_rank_in_day"] == 20
-    assert load_profile("rookie_dealer_02_v2.39")["profile_id"] == "rookie_dealer_02_v2_39"
     assert load_profile("rookie_dealer_02_v2.40")["profile_id"] == "rookie_dealer_02_v2_40"
 
 
@@ -362,24 +421,6 @@ def test_rookie_dealer_02_v2_48_to_50_standard_min_score_profiles_load() -> None
     assert load_profile("rookie_dealer_02_v2.48")["profile_id"] == "rookie_dealer_02_v2_48"
     assert load_profile("rookie_dealer_02_v2.49")["profile_id"] == "rookie_dealer_02_v2_49"
     assert load_profile("rookie_dealer_02_v2.50")["profile_id"] == "rookie_dealer_02_v2_50"
-
-
-def test_rookie_dealer_02_v2_51_affordable_fallback_profile_loads() -> None:
-    profile = load_profile("rookie_dealer_02_v2_51")
-
-    assert profile["profile_id"] == "rookie_dealer_02_v2_51"
-    assert profile["market_filter"]["allowed_sections"] == ["TSEPrime", "TSEStandard"]
-    assert profile["selection"]["min_score"] == 45
-    assert "market_min_score_overrides" not in profile["selection"]
-    assert "standard_selection_quota" not in profile["selection"]
-    assert profile["affordable_fallback_buy"] == {
-        "enabled": True,
-        "surplus_after_selection": True,
-        "replace_unaffordable_selected": False,
-        "min_total_score": 45,
-        "max_rank_in_day": 20,
-    }
-    assert load_profile("rookie_dealer_02_v2.51")["profile_id"] == "rookie_dealer_02_v2_51"
 
 
 def test_standard_market_min_score_override_selects_only_standard() -> None:
@@ -530,16 +571,6 @@ def test_rookie_dealer_02_v2_dot_6_alias_loads() -> None:
 
     assert profile["profile_id"] == "rookie_dealer_02_v2_6"
     assert profile["features"]["relative_strength"] is True
-
-
-def test_rookie_dealer_02_v2_11_profile_uses_investor_context_filter() -> None:
-    profile = load_profile("rookie_dealer_02_v2_11")
-
-    assert profile["profile_id"] == "rookie_dealer_02_v2_11"
-    assert profile["features"]["investor_context"] is True
-    assert profile["scoring"].get("use_investor_context_score") is False
-    assert profile["investor_context_filter"]["enabled"] is True
-    assert profile["investor_context_filter"]["reason"] == "investor_context_negative"
 
 
 def test_rookie_dealer_02_v3_profile_uses_score_and_volume_filters() -> None:

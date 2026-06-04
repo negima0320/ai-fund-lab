@@ -1,9 +1,10 @@
 # AI Fund Lab profile YAML
-# rookie_dealer_02_v2_26 系の affordable fallback 候補を同日スコア上位20件以内に制限するprofileです。
+# rookie_dealer_02_v2_58 と同じ条件付き保有延長を、保有銘柄のindicator補完修正後に検証するprofileです。
+# 秘密情報は書かず、APIキーや口座情報は .env に置きます。
 
-profile_id: rookie_dealer_02_v2_40
-profile_name: 新人ディーラー2号 v2.40
-description: v2.26系 affordable fallback 同日スコア上位20件以内 検証
+profile_id: rookie_dealer_02_v2_59
+profile_name: 新人ディーラー2号 v2.59
+description: v2.58同条件 保有銘柄indicator補完修正版の条件付き保有延長検証
 disable_single_order_amount_limit: true
 
 character:
@@ -69,6 +70,20 @@ trading:
   use_round_lot: true
   round_lot_size: 100
 
+conditional_hold_extension:
+  enabled: true
+  require_trend_continuation: true
+  skip_ma5_condition: true
+  require_ma25_uptrend: true
+  min_unrealized_profit_rate: 0.03
+  minimum_profit_for_extension: 0.03
+  min_relative_strength_score: 60
+  minimum_relative_strength_score: 60
+  profit_reject_reason: profit_below_threshold
+  relative_strength_reject_reason: relative_strength_below_threshold
+  max_holding_days: 7
+  max_extension_count: 1
+
 execution:
   stop_loss_execution: intraday_stop
 
@@ -88,10 +103,6 @@ market_filter:
 volume_filter:
   enabled: true
   min_volume_ratio: 2.0
-
-affordable_fallback_buy:
-  enabled: true
-  max_rank_in_day: 20
 
 capital_utilization_policy:
   enabled: true

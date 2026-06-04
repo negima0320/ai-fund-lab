@@ -20,7 +20,7 @@ python3 -m venv .venv
 .venv/bin/python src/main.py --mode help
 .venv/bin/python src/main.py --mode status --profile rookie_dealer_02_v2_1
 .venv/bin/python src/main.py --mode list-profiles
-.venv/bin/python src/main.py --mode profile-info --profile rookie_dealer_02_v2_51
+.venv/bin/python src/main.py --mode profile-info --profile rookie_dealer_02_v2_38
 .venv/bin/python src/main.py --mode validate-config
 ```
 
@@ -56,7 +56,7 @@ registry上のbaseとexperimentを同一期間で比較します。
 ```bash
 .venv/bin/python src/main.py --mode run-experiments \
   --base-profile rookie_dealer_02_v2_26 \
-  --profiles rookie_dealer_02_v2_26 rookie_dealer_02_v2_51 \
+  --profiles rookie_dealer_02_v2_26 rookie_dealer_02_v2_38 \
   --start-date YYYY-MM-DD \
   --end-date YYYY-MM-DD \
   --skip-price-fetch \
@@ -79,15 +79,15 @@ registry上のbaseとexperimentを同一期間で比較します。
 既存成果物から `feature_analysis.*` だけ再生成できます。
 
 ```bash
-.venv/bin/python src/feature_analysis.py --profile rookie_dealer_02_v2_51
-PYTHONPATH=. .venv/bin/python -m src.feature_analysis --profile rookie_dealer_02_v2_51
+.venv/bin/python src/feature_analysis.py --profile rookie_dealer_02_v2_38
+PYTHONPATH=. .venv/bin/python -m src.feature_analysis --profile rookie_dealer_02_v2_38
 ```
 
 期間を指定する場合:
 
 ```bash
 .venv/bin/python src/feature_analysis.py \
-  --profile rookie_dealer_02_v2_51 \
+  --profile rookie_dealer_02_v2_38 \
   --start-date YYYY-MM-DD \
   --end-date YYYY-MM-DD
 ```
@@ -108,6 +108,40 @@ PYTHONPATH=. .venv/bin/python -m src.feature_analysis --profile rookie_dealer_02
 | `practical_effect` | 差分が実質的に出たか |
 | `verdict` | `candidate` / `needs_review` / `rejected` / `no_practical_effect` |
 | `verdict_reason` | 判定理由 |
+
+## Conditional Hold Extension Checks
+
+最大保有期間到達時の条件付き保有延長は、`conditional_hold_extension` を持つprofileで検証します。直近のprofile:
+
+- `rookie_dealer_02_v2_59`: v2.58同条件で、保有銘柄indicator補完修正後の検証
+- `rookie_dealer_02_v2_60`: v2.59からrelative strength閾値だけを `60` から `5` に緩和
+
+設定確認:
+
+```bash
+.venv/bin/python src/main.py --mode validate-config --profile rookie_dealer_02_v2_60
+.venv/bin/python src/main.py --mode profile-info --profile rookie_dealer_02_v2_60
+```
+
+短期比較を行う場合:
+
+```bash
+.venv/bin/python src/main.py --mode run-experiments \
+  --base-profile rookie_dealer_02_v2_26 \
+  --profiles rookie_dealer_02_v2_26 rookie_dealer_02_v2_60 \
+  --start-date YYYY-MM-DD \
+  --end-date YYYY-MM-DD \
+  --skip-price-fetch \
+  --fast-analysis
+```
+
+確認する主な出力:
+
+- `logs/backtests/<profile>/<START>_to_<END>/backtest_summary.json`
+- `reports/profile_comparisons/compare_<period>_...md/json`
+- `conditional_hold_extension_count`
+- `conditional_hold_extension_rejected_reason_breakdown`
+- `Conditional Hold Extension Rejected Detail`
 
 ## Integrity and Capital Flow
 
@@ -154,6 +188,17 @@ final_assets ≒ initial_capital
 
 ```bash
 .venv/bin/python src/main.py --mode storage-audit
-.venv/bin/python src/main.py --mode inspect-cache --profile rookie_dealer_02_v2_51
+.venv/bin/python src/main.py --mode inspect-cache --profile rookie_dealer_02_v2_38
 ```
 
+不要になったprofile成果物は、retired profile専用のdry-runで対象を確認します。raw価格、`data/processed/common/`、`data/cache/jquants/` は対象外です。
+
+```bash
+.venv/bin/python src/main.py --mode cleanup-retired-profiles --verbose
+```
+
+実際に削除する場合のみ `--apply` を付けます。
+
+```bash
+.venv/bin/python src/main.py --mode cleanup-retired-profiles --apply --verbose
+```

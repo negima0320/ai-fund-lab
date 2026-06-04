@@ -55,7 +55,6 @@ def test_compare_experiments_builds_target_profile_list(tmp_path, monkeypatch) -
     assert "base_profile: rookie_dealer_02_v2_1" in summary
     assert "rookie_dealer_02_v2_6" in summary
     assert "rookie_dealer_02_v2_7" in summary
-    assert "rookie_dealer_02_v2_8" in summary
     assert "rookie_dealer_02_v2_9" in summary
     assert "rookie_dealer_02_v2_10" in summary
 
@@ -67,13 +66,11 @@ def test_run_experiments_selects_registry_profiles() -> None:
 
     assert profiles == [
         "rookie_dealer_02_v2_10",
-        "rookie_dealer_02_v2_11",
         "rookie_dealer_02_v2_12",
         "rookie_dealer_02_v2_13",
         "rookie_dealer_02_v2_14",
         "rookie_dealer_02_v2_6",
         "rookie_dealer_02_v2_7",
-        "rookie_dealer_02_v2_8",
         "rookie_dealer_02_v2_9",
         "rookie_dealer_03_growth",
         "rookie_dealer_03_standard_growth",
@@ -118,13 +115,8 @@ def test_run_experiments_selects_v2_26_dynamic_exposure_profiles() -> None:
     assert profiles == [
         "rookie_dealer_02_v2_29",
         "rookie_dealer_02_v2_30",
-        "rookie_dealer_02_v2_31",
         "rookie_dealer_02_v2_32",
-        "rookie_dealer_02_v2_33",
-        "rookie_dealer_02_v2_34",
         "rookie_dealer_02_v2_35",
-        "rookie_dealer_02_v2_36",
-        "rookie_dealer_02_v2_37",
         "rookie_dealer_02_v2_38",
         "rookie_dealer_02_v2_39",
         "rookie_dealer_02_v2_40",
@@ -138,7 +130,14 @@ def test_run_experiments_selects_v2_26_dynamic_exposure_profiles() -> None:
         "rookie_dealer_02_v2_48",
         "rookie_dealer_02_v2_49",
         "rookie_dealer_02_v2_50",
-        "rookie_dealer_02_v2_51",
+        "rookie_dealer_02_v2_52",
+        "rookie_dealer_02_v2_53",
+        "rookie_dealer_02_v2_54",
+        "rookie_dealer_02_v2_55",
+        "rookie_dealer_02_v2_56",
+        "rookie_dealer_02_v2_57",
+        "rookie_dealer_02_v2_58",
+        "rookie_dealer_02_v2_59",
     ]
 
 
@@ -158,7 +157,6 @@ def test_run_experiments_profiles_option_accepts_standard_screening_profiles() -
             "rookie_dealer_02_v2_48",
             "rookie_dealer_02_v2_49",
             "rookie_dealer_02_v2_50",
-            "rookie_dealer_02_v2_51",
         ],
     )
 
@@ -171,7 +169,6 @@ def test_run_experiments_profiles_option_accepts_standard_screening_profiles() -
         "rookie_dealer_02_v2_48",
         "rookie_dealer_02_v2_49",
         "rookie_dealer_02_v2_50",
-        "rookie_dealer_02_v2_51",
     ]
 
 
@@ -191,10 +188,10 @@ def test_run_experiments_profiles_option_accepts_comma_separated_standard_min_sc
     ]
 
 
-def test_run_experiments_has_no_direct_v2_37_children() -> None:
+def test_run_experiments_has_no_direct_v2_39_children() -> None:
     registry = main_module.load_profile_registry()
 
-    profiles = main_module.select_experiment_profiles("rookie_dealer_02_v2_37", registry, None)
+    profiles = main_module.select_experiment_profiles("rookie_dealer_02_v2_39", registry, None)
 
     assert profiles == []
 
@@ -208,7 +205,7 @@ def test_affordability_filter_changes_scoring_reuse_signature() -> None:
 
 def test_dynamic_exposure_changes_scoring_reuse_signature() -> None:
     base = main_module.load_profile("rookie_dealer_02_v2_26")
-    adjusted = main_module.load_profile("rookie_dealer_02_v2_33")
+    adjusted = main_module.load_profile("rookie_dealer_02_v2_35")
 
     assert main_module._experiment_scoring_signature(base) != main_module._experiment_scoring_signature(adjusted)
 

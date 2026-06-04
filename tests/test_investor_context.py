@@ -36,6 +36,9 @@ def _candidate() -> dict:
         "turnover_value": 2_500_000_000,
         "five_day_volatility": 0.02,
         "fallback": False,
+        "market_section": "TSEPrime",
+        "section": "TSEPrime",
+        "listing_market": "TSEPrime",
     }
 
 
@@ -46,6 +49,26 @@ def _investor_records() -> list[dict]:
         {"Date": "2026-02-27", "overseas_net_buy": 120, "individual_net_buy": -60},
         {"Date": "2026-03-06", "overseas_net_buy": 180, "individual_net_buy": -90},
     ]
+
+
+def _investor_score_profile() -> dict:
+    profile = load_profile("rookie_dealer_02_v2_1")
+    profile["profile_id"] = "test_investor_context_score"
+    profile.setdefault("features", {})["investor_context"] = True
+    profile.setdefault("scoring", {})["use_investor_context_score"] = True
+    return profile
+
+
+def _investor_filter_profile() -> dict:
+    profile = _investor_score_profile()
+    profile["profile_id"] = "test_investor_context_filter"
+    profile.setdefault("scoring", {})["use_investor_context_score"] = False
+    profile["investor_context_filter"] = {
+        "enabled": True,
+        "threshold": -1,
+        "reason": "investor_context_negative",
+    }
+    return profile
 
 
 def test_light_plan_fetches_investor_types_api(monkeypatch) -> None:
@@ -164,7 +187,7 @@ def test_investor_types_api_success_creates_cache_file(monkeypatch, tmp_path) ->
 
 
 def test_investor_context_expands_range_when_first_response_is_empty(monkeypatch, tmp_path) -> None:
-    config = load_profile("rookie_dealer_02_v2_8")
+    config = _investor_score_profile()
     config.setdefault("jquants", {})["plan"] = "light"
     calls: list[tuple[date, date]] = []
 
@@ -204,7 +227,7 @@ def test_investor_context_expands_range_when_first_response_is_empty(monkeypatch
 
 
 def test_investor_context_stops_after_three_empty_responses(monkeypatch, tmp_path) -> None:
-    config = load_profile("rookie_dealer_02_v2_8")
+    config = _investor_score_profile()
     config.setdefault("jquants", {})["plan"] = "light"
     calls: list[tuple[date, date]] = []
 
@@ -241,7 +264,7 @@ def test_investor_context_stops_after_three_empty_responses(monkeypatch, tmp_pat
 
 
 def test_investor_context_uses_preloaded_records_without_daily_api(monkeypatch, tmp_path) -> None:
-    config = load_profile("rookie_dealer_02_v2_8")
+    config = _investor_score_profile()
     config.setdefault("jquants", {})["plan"] = "light"
     main_module._reset_jquants_api_session()
     main_module._jquants_api_session().setdefault("payloads", {})["investor_types"] = {
@@ -263,7 +286,7 @@ def test_investor_context_uses_preloaded_records_without_daily_api(monkeypatch, 
 
 
 def test_investor_context_empty_preload_suppresses_daily_api(monkeypatch, tmp_path) -> None:
-    config = load_profile("rookie_dealer_02_v2_8")
+    config = _investor_score_profile()
     config.setdefault("jquants", {})["plan"] = "light"
     main_module._reset_jquants_api_session()
     main_module._jquants_api_session().setdefault("payloads", {})["investor_types"] = {
@@ -286,7 +309,7 @@ def test_investor_context_empty_preload_suppresses_daily_api(monkeypatch, tmp_pa
 
 
 def test_investor_types_period_preload_reused_by_daily_scoring(monkeypatch, tmp_path) -> None:
-    config = load_profile("rookie_dealer_02_v2_8")
+    config = _investor_score_profile()
     config.setdefault("jquants", {})["plan"] = "light"
     main_module._reset_jquants_api_session()
     calls: list[tuple[date, date]] = []
@@ -322,7 +345,7 @@ def test_investor_types_period_preload_reused_by_daily_scoring(monkeypatch, tmp_
 
 
 def test_investor_types_period_preload_splits_long_range(monkeypatch, tmp_path) -> None:
-    config = load_profile("rookie_dealer_02_v2_8")
+    config = _investor_score_profile()
     config.setdefault("jquants", {})["plan"] = "light"
     main_module._reset_jquants_api_session()
     calls: list[tuple[date, date]] = []
@@ -357,7 +380,7 @@ def test_investor_types_period_preload_splits_long_range(monkeypatch, tmp_path) 
 
 
 def test_investor_types_period_preload_clamps_to_endpoint_supported_start(monkeypatch, tmp_path) -> None:
-    config = load_profile("rookie_dealer_02_v2_8")
+    config = _investor_score_profile()
     config.setdefault("jquants", {})["plan"] = "light"
     config["jquants"]["earliest_supported_date"] = {
         "light": "2021-05-01",
@@ -397,7 +420,7 @@ def test_investor_types_period_preload_clamps_to_endpoint_supported_start(monkey
 
 
 def test_investor_types_period_preload_continues_when_one_chunk_fails(monkeypatch, tmp_path) -> None:
-    config = load_profile("rookie_dealer_02_v2_8")
+    config = _investor_score_profile()
     config.setdefault("jquants", {})["plan"] = "light"
     main_module._reset_jquants_api_session()
     calls = {"count": 0}
@@ -440,7 +463,7 @@ def test_investor_types_period_preload_continues_when_one_chunk_fails(monkeypatc
 
 
 def test_investor_types_period_preload_disables_only_when_all_chunks_fail(monkeypatch, tmp_path) -> None:
-    config = load_profile("rookie_dealer_02_v2_8")
+    config = _investor_score_profile()
     config.setdefault("jquants", {})["plan"] = "light"
     main_module._reset_jquants_api_session()
 
@@ -470,7 +493,7 @@ def test_investor_types_period_preload_disables_only_when_all_chunks_fail(monkey
 
 
 def test_investor_types_rate_limit_retries_and_continues(monkeypatch, tmp_path) -> None:
-    config = load_profile("rookie_dealer_02_v2_8")
+    config = _investor_score_profile()
     config.setdefault("jquants", {})["plan"] = "light"
     config["jquants"]["retry_backoff_seconds"] = [0, 0, 0]
     main_module._reset_jquants_api_session()
@@ -515,7 +538,7 @@ def test_investor_types_rate_limit_retries_and_continues(monkeypatch, tmp_path) 
 
 
 def test_investor_types_bad_request_does_not_retry(monkeypatch, tmp_path) -> None:
-    config = load_profile("rookie_dealer_02_v2_8")
+    config = _investor_score_profile()
     config.setdefault("jquants", {})["plan"] = "light"
     config["jquants"]["retry_backoff_seconds"] = [0, 0, 0]
     main_module._reset_jquants_api_session()
@@ -548,7 +571,7 @@ def test_investor_types_bad_request_does_not_retry(monkeypatch, tmp_path) -> Non
 
 
 def test_investor_types_cache_hit_suppresses_api_call_limit_consumption(monkeypatch, tmp_path) -> None:
-    config = load_profile("rookie_dealer_02_v2_8")
+    config = _investor_score_profile()
     config.setdefault("jquants", {})["plan"] = "light"
     main_module._reset_jquants_api_session()
     start_date, end_date = main_module._investor_types_fetch_ranges(date(2026, 3, 20))[0]
@@ -598,7 +621,7 @@ def test_v2_1_ignores_investor_context_score() -> None:
 
 
 def test_v2_8_adds_investor_context_score_once() -> None:
-    profile = load_profile("rookie_dealer_02_v2_8")
+    profile = _investor_score_profile()
     profile["_investor_context"] = build_investor_context(_investor_records(), "2026-03-06")
 
     item = score_real_candidates([_candidate()], "2026-03-06", profile, "test")["scores"][0]
@@ -617,7 +640,7 @@ def test_v2_8_adds_investor_context_score_once() -> None:
 
 
 def test_v2_11_uses_negative_investor_context_as_filter_not_score() -> None:
-    profile = load_profile("rookie_dealer_02_v2_11")
+    profile = _investor_filter_profile()
     profile["_investor_context"] = {**build_investor_context([], "2026-03-06"), "investor_context_score": -2}
 
     item = score_real_candidates([_candidate()], "2026-03-06", profile, "test")["scores"][0]
@@ -631,7 +654,7 @@ def test_v2_11_uses_negative_investor_context_as_filter_not_score() -> None:
 
 
 def test_v2_11_allows_non_negative_investor_context() -> None:
-    profile = load_profile("rookie_dealer_02_v2_11")
+    profile = _investor_filter_profile()
     profile["_investor_context"] = {**build_investor_context([], "2026-03-06"), "investor_context_score": 0}
 
     item = score_real_candidates([_candidate()], "2026-03-06", profile, "test")["scores"][0]
@@ -641,7 +664,7 @@ def test_v2_11_allows_non_negative_investor_context() -> None:
 
 
 def test_investor_context_filter_rejections_are_kept_when_rejected_details_disabled() -> None:
-    config = load_profile("rookie_dealer_02_v2_11")
+    config = _investor_filter_profile()
     config["analysis"] = {"save_rejected_candidates": False}
     scores = [
         {"code": "1001", "selected": True},
@@ -655,7 +678,7 @@ def test_investor_context_filter_rejections_are_kept_when_rejected_details_disab
 
 
 def test_fast_analysis_does_not_change_investor_context_decision() -> None:
-    profile = load_profile("rookie_dealer_02_v2_8")
+    profile = _investor_score_profile()
     profile["_investor_context"] = build_investor_context(_investor_records(), "2026-03-06")
     fast_profile = {**profile, "analysis": {**profile.get("analysis", {}), "fast_analysis": True}}
 

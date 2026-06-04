@@ -3544,6 +3544,12 @@ def _holding_signal_revaluation_audit(records: list[dict[str, Any]], backtest_su
         summary_audit = {}
     profit_by_reason: dict[str, dict[str, Any]] = {}
     holding_days_values: list[float] = []
+    extended_records = [record for record in records if _truthy(record.get("holding_extended"))]
+    extension_profit_total = 0.0
+    extension_gross_profit = 0.0
+    extension_gross_loss = 0.0
+    extension_win_count = 0
+    extension_holding_days: list[float] = []
     for record in records:
         holding_days = _number(record.get("holding_days"))
         if holding_days is not None:
@@ -3555,17 +3561,65 @@ def _holding_signal_revaluation_audit(records: list[dict[str, Any]], backtest_su
         row["gross_profit"] += float(_number(record.get("gross_profit")) or _number(record.get("profit")) or 0)
         if holding_days is not None:
             row["_holding_days"] += holding_days
+        if _truthy(record.get("holding_extended")):
+            profit = float(_number(record.get("profit")) or _number(record.get("net_profit")) or 0)
+            gross_profit = float(_number(record.get("gross_profit")) or _number(record.get("profit")) or 0)
+            extension_profit_total += profit
+            if gross_profit > 0:
+                extension_gross_profit += gross_profit
+                extension_win_count += 1
+            elif gross_profit < 0:
+                extension_gross_loss += gross_profit
+            if holding_days is not None:
+                extension_holding_days.append(holding_days)
     for row in profit_by_reason.values():
         count = int(row.get("count") or 0)
         row["profit"] = round(float(row.get("profit") or 0), 2)
         row["gross_profit"] = round(float(row.get("gross_profit") or 0), 2)
         row["avg_profit"] = round(row["profit"] / count, 2) if count else None
         row["avg_holding_days"] = round(float(row.pop("_holding_days", 0.0)) / count, 2) if count else None
+    extended_count = len(extended_records)
+    extension_profit_factor = None
+    if extension_gross_loss < 0:
+        extension_profit_factor = round(extension_gross_profit / abs(extension_gross_loss), 4)
+    elif extension_gross_profit > 0:
+        extension_profit_factor = None
     return {
         "enabled": any(record.get("holding_signal_status") for record in records) or bool(summary_audit),
         "reselected_hold_count": int(summary_audit.get("reselected_hold_count") or sum(1 for record in records if _truthy(record.get("holding_reselected")))),
-        "extended_holding_count": int(summary_audit.get("extended_holding_count") or sum(1 for record in records if _truthy(record.get("holding_extended")))),
+        "extended_holding_count": int(summary_audit.get("extended_holding_count") or extended_count),
+        "hold_extension_count": int(summary_audit.get("hold_extension_count") or extended_count),
+        "hold_extension_trigger_count": int(summary_audit.get("hold_extension_trigger_count") or sum(1 for record in records if _truthy(record.get("holding_reselected")))),
+        "extended_holding_trade_count": int(summary_audit.get("extended_holding_trade_count") or extended_count),
+        "extension_profit_total": summary_audit.get("extension_profit_total")
+        if summary_audit.get("extension_profit_total") is not None
+        else round(extension_profit_total, 2),
+        "hold_extension_profit_diff": summary_audit.get("hold_extension_profit_diff")
+        if summary_audit.get("hold_extension_profit_diff") is not None
+        else round(extension_profit_total, 2),
+        "extension_win_rate": summary_audit.get("extension_win_rate")
+        if summary_audit.get("extension_win_rate") is not None
+        else (round(extension_win_count / extended_count, 4) if extended_count else None),
+        "extension_profit_factor": summary_audit.get("extension_profit_factor")
+        if summary_audit.get("extension_profit_factor") is not None
+        else extension_profit_factor,
+        "extension_average_holding_days": summary_audit.get("extension_average_holding_days")
+        if summary_audit.get("extension_average_holding_days") is not None
+        else (round(sum(extension_holding_days) / len(extension_holding_days), 2) if extension_holding_days else None),
+        "normal_exit_count": int(
+            summary_audit.get("normal_exit_count")
+            if summary_audit.get("normal_exit_count") is not None
+            else sum(1 for record in records if record.get("exit_reason") not in {"シグナル消失", "スコア低下"})
+        ),
+        "max_holding_days": summary_audit.get("max_holding_days")
+        if summary_audit.get("max_holding_days") is not None
+        else (max(holding_days_values) if holding_days_values else None),
         "signal_lost_exit_count": int(summary_audit.get("signal_lost_exit_count") or sum(1 for record in records if record.get("exit_reason") == "シグナル消失")),
+        "signal_lost_exit_avoided_count": int(
+            summary_audit.get("signal_lost_exit_avoided_count")
+            if summary_audit.get("signal_lost_exit_avoided_count") is not None
+            else sum(int(_number(record.get("holding_signal_lost_exit_avoided_count")) or 0) for record in records)
+        ),
         "score_deteriorated_exit_count": int(summary_audit.get("score_deteriorated_exit_count") or sum(1 for record in records if record.get("exit_reason") == "スコア低下")),
         "average_holding_days": summary_audit.get("average_holding_days")
         if summary_audit.get("average_holding_days") is not None
@@ -3580,10 +3634,21 @@ def _holding_signal_revaluation_audit_lines(audit: dict[str, Any]) -> list[str]:
     lines = [
         f"- enabled: {audit.get('enabled')}",
         f"- reselected_hold_count: {audit.get('reselected_hold_count', 0)}",
+        f"- hold_extension_trigger_count: {audit.get('hold_extension_trigger_count', 0)}",
+        f"- hold_extension_count: {audit.get('hold_extension_count', 0)}",
         f"- extended_holding_count: {audit.get('extended_holding_count', 0)}",
+        f"- extended_holding_trade_count: {audit.get('extended_holding_trade_count', 0)}",
+        f"- extension_profit_total: {_format_yen(audit.get('extension_profit_total'))}",
+        f"- hold_extension_profit_diff: {_format_yen(audit.get('hold_extension_profit_diff'))}",
+        f"- extension_win_rate: {_format_percent(audit.get('extension_win_rate'))}",
+        f"- extension_profit_factor: {_format_number(audit.get('extension_profit_factor'))}",
+        f"- extension_average_holding_days: {_format_number(audit.get('extension_average_holding_days'))}",
+        f"- normal_exit_count: {audit.get('normal_exit_count', 0)}",
         f"- signal_lost_exit_count: {audit.get('signal_lost_exit_count', 0)}",
+        f"- signal_lost_exit_avoided_count: {audit.get('signal_lost_exit_avoided_count', 0)}",
         f"- score_deteriorated_exit_count: {audit.get('score_deteriorated_exit_count', 0)}",
         f"- average_holding_days: {_format_number(audit.get('average_holding_days'))}",
+        f"- max_holding_days: {_format_number(audit.get('max_holding_days'))}",
         "",
         "### Profit By Exit Reason",
         "",
@@ -8482,7 +8547,7 @@ def _write_feature_analysis_outputs(config: dict[str, Any], root: Path, start_da
 
 def main(argv: list[str] | None = None) -> int:
     parser = ArgumentParser(description="Regenerate feature_analysis.md/json from existing backtest artifacts.")
-    parser.add_argument("--profile", required=True, help="Profile id, e.g. rookie_dealer_02_v2_51")
+    parser.add_argument("--profile", required=True, help="Profile id, e.g. rookie_dealer_02_v2_38")
     parser.add_argument("--start-date", help="Backtest start date. If omitted, infer from latest logs/backtests period.")
     parser.add_argument("--end-date", help="Backtest end date. If omitted, infer from latest logs/backtests period.")
     args = parser.parse_args(argv)

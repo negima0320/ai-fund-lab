@@ -34,6 +34,7 @@ This report records the documentation棚卸し performed against the current imp
 | Tachibana docs overstated future/live flow or called everything unimplemented | Read-only broker and guarded demo flow exist; actual external order placing remains disabled | `docs/tachibana-plan.md` updated |
 | KabuStation docs could imply near-term implementation | Current KabuStation broker is a disabled stub | `docs/kabu-station-plan.md` updated |
 | J-Quants plan notes were incomplete | Free/light capability matrix and fallback behavior are implemented in `src/jquants_plan.py` and `config/jquants.yaml` | `docs/jquants_plan_matrix.md` updated |
+| Conditional hold extension / v2.59-v2.60 behavior was not documented | `conditional_hold_extension` evaluates only at max holding exit, keeps take-profit/stop-loss priority, enriches held positions from indicators, and emits rejected detail fields. v2.59 verifies indicator enrichment; v2.60 lowers relative strength threshold to 5 | `README.md`, `docs/trading-rules.md`, `docs/rookie-dealer-decision-flow.md`, and `docs/operations.md` updated |
 
 ## Current CLI Checks
 
@@ -43,7 +44,7 @@ These lightweight commands were used or should remain valid:
 python3 src/main.py --mode help
 python3 src/main.py --mode list-profiles
 python3 src/main.py --mode validate-config
-python3 src/main.py --mode profile-info --profile rookie_dealer_02_v2_51
+python3 src/main.py --mode profile-info --profile rookie_dealer_02_v2_38
 ```
 
 `validate-config` currently succeeds with warnings rather than errors when the local config has known warnings such as unregistered legacy profile files or `auto_order_enabled: true` in safety-reviewed demo settings.
@@ -58,4 +59,3 @@ The docs intentionally do not:
 - claim Standard/Growth experiments are profitable or production-ready
 - claim financial statements are currently part of the main `total_score`
 - claim old news/financial fixed scoring is active
-

@@ -153,7 +153,7 @@ Feature Activation Auditでは `data_enabled`、`scoring_enabled`、`actual_trig
 
 `features.investor_context: true` かつ `scoring.use_investor_context_score: true` のprofileで有効です。J-Quants `/equities/investor-types` をもとに、海外投資家の買越、4週合計、トレンド、個人投資家との差などを補助的に評価します。
 
-`rookie_dealer_02_v2_11` のように、スコア加算ではなくフィルターとして使うprofileもあります。
+`investor_context_filter.enabled: true` のprofileでは、スコア加算ではなくマイナス需給の除外フィルターとして使えます。現在の整理済みregistryでは、この系統の旧検証profileは削除済みです。
 
 ## affordability / winner-loser adjustments
 
@@ -207,4 +207,3 @@ Standard市場拡張profileでは、Primeの条件を維持したまま、Standa
 | `/fins/summary` | 財務サマリ | 現在は主にaudit/future candidate |
 
 future data leakを避けるため、dynamic exposureの市場局面はsignal dateの前営業日以前のmarket contextを使います。同日終値由来contextを同日判断に使った場合はIntegrity側で検出対象です。
-

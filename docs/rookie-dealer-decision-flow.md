@@ -139,7 +139,65 @@ Affordable Fallback Buy Auditでは以下を確認します。
 - available cash before/after fallback
 - selected samples
 
-## 8. Integrity
+## 8. Exit and Holding Revaluation
+
+通常の売却判定はPaperBrokerの保有ポジションに対して行われ、主なexit reasonは損切り、利確、最大保有期間到達、market/risk exitです。損切りと利確は、保有延長系profileでも優先されます。
+
+### Conditional Hold Extension
+
+`conditional_hold_extension.enabled: true` のprofileでは、最大保有期間到達で売却する直前に、条件を満たす保有銘柄だけ最大保有期間を延長できます。これは銘柄選定やスコアリングそのものを変える機能ではなく、exit timingの検証機能です。
+
+現在の判定に使う主な項目:
+
+- `profit_rate_at_max_holding`: 最大保有期間到達時点の含み益率
+- `relative_strength_score`
+- `close`
+- `ma25`
+- `previous_ma25`
+- `max_extension_count`
+- extension用の `max_holding_days`
+
+`require_ma25_uptrend: true` の場合は `ma25 > previous_ma25` が必要です。`skip_ma5_condition: true` のprofileではMA5条件を見ません。
+
+延長されなかった場合は、以下のような理由が保存されます。
+
+- `profit_below_threshold`
+- `relative_strength_below_threshold`
+- `below_ma25`
+- `ma25_not_uptrend`
+- `missing_indicator`
+- `already_extended`
+
+### Indicator Enrichment for Held Positions
+
+保有銘柄が当日の通常候補に出ていない場合でも、`enrich_candidates_with_position_prices()` が `indicators_YYYY-MM-DD.json` から保有銘柄の市場スナップショットを補完します。条件付き保有延長では、この補完行に以下のfieldが必要です。
+
+- `previous_ma25`
+- `relative_strength_score`
+- `relative_strength_5d` / `relative_strength_10d` / `relative_strength_20d`
+- `stock_return_5d` / `stock_return_10d` / `stock_return_20d`
+- `benchmark_return_5d` / `benchmark_return_10d` / `benchmark_return_20d`
+- `benchmark_source`
+
+これらがindicatorに存在する場合は補完行へコピーされます。indicator自体に存在しない場合は、延長判定のreject reasonが `missing_indicator` になることがあります。
+
+### Recent Conditional Hold Profiles
+
+- `rookie_dealer_02_v2_59`: v2.58と同じ条件付き保有延長設定。保有銘柄indicator補完修正後の検証用。
+- `rookie_dealer_02_v2_60`: v2.59をベースに、`min_relative_strength_score` / `minimum_relative_strength_score` を `60` から `5` に緩和した発動確認用。
+
+`compare_profiles.md/json` と `backtest_summary.json` には以下が出ます。
+
+- `conditional_hold_extension_count`
+- `conditional_hold_extension_profit_diff`
+- `conditional_hold_extension_win_rate`
+- `conditional_hold_extension_profit_factor`
+- `conditional_hold_extension_rejected_count`
+- `conditional_hold_extension_rejected_reason_breakdown`
+- `conditional_hold_extension_rejected_samples`
+- `Conditional Hold Extension Rejected Detail`
+
+## 9. Integrity
 
 重要な監査:
 
@@ -149,4 +207,3 @@ Affordable Fallback Buy Auditでは以下を確認します。
 - `future_data_leak_count`: signal date以降の情報混入
 - `signal_entry_date_violation_count`: signal date / entry date整合性
 - `invalid_below_threshold_selected_count`: profile設定で許可されない閾値未満選定
-

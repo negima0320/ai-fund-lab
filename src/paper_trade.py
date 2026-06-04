@@ -915,6 +915,7 @@ def _technical_snapshot(item: dict[str, Any]) -> dict[str, Any]:
         "candlestick_signals": item.get("candlestick_signals", []),
         "ma5": item.get("ma5"),
         "ma25": item.get("ma25"),
+        "previous_ma25": item.get("previous_ma25"),
         "macd_hist": item.get("macd_hist"),
         "bb_position": item.get("bb_position"),
         "atr": item.get("atr"),
@@ -1004,6 +1005,7 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "candlestick_signals",
         "ma5",
         "ma25",
+        "previous_ma25",
         "macd_hist",
         "bb_position",
         "atr",
@@ -1056,6 +1058,19 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "holding_effective_max_days",
         "holding_reselected",
         "holding_extended",
+        "holding_signal_lost_streak",
+        "holding_signal_lost_exit_avoided",
+        "holding_signal_lost_exit_avoided_count",
+        "holding_extension_count",
+        "holding_extension_eligible",
+        "holding_extension_reason",
+        "holding_unrealized_profit_rate",
+        "conditional_hold_extension_applied",
+        "conditional_hold_extension_count",
+        "conditional_hold_extension_reason",
+        "conditional_hold_extension_trigger_profit_rate",
+        "conditional_hold_extension_rejected",
+        "conditional_hold_extension_rejected_reason",
         "market_filter_reason",
         "earnings_filter_checked",
         "earnings_filter_blocked",
@@ -1873,8 +1888,31 @@ def _holding_revaluation_config(config: dict[str, Any]) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _conditional_hold_extension_config(config: dict[str, Any]) -> dict[str, Any]:
+    value = config.get("conditional_hold_extension") or {}
+    return value if isinstance(value, dict) else {}
+
+
 def _holding_revaluation_enabled(config: dict[str, Any]) -> bool:
+    return bool(_holding_revaluation_config(config).get("enabled")) or bool(_conditional_hold_extension_config(config).get("enabled"))
+
+
+def _holding_signal_revaluation_enabled(config: dict[str, Any]) -> bool:
     return bool(_holding_revaluation_config(config).get("enabled"))
+
+
+def _bool_config(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    return int(value)
 
 
 def _holding_signal_revaluation(
@@ -1886,7 +1924,8 @@ def _holding_signal_revaluation(
     default_max_holding_days: int,
 ) -> dict[str, Any]:
     cfg = _holding_revaluation_config(config)
-    enabled = bool(cfg.get("enabled"))
+    conditional_cfg = _conditional_hold_extension_config(config)
+    enabled = bool(cfg.get("enabled")) or bool(conditional_cfg.get("enabled"))
     code = str(position.get("code") or "")
     market = market or {}
     row_score = _optional_float(market.get("total_score"))
@@ -1898,6 +1937,15 @@ def _holding_signal_revaluation(
     score_drop = None
     if entry_score is not None and row_score is not None:
         score_drop = round(entry_score - row_score, 4)
+    entry_price = _optional_float(position.get("entry_price"))
+    current_price = _optional_float(market.get("close")) or _optional_float(position.get("current_price"))
+    unrealized_profit_rate = None
+    if entry_price and current_price is not None:
+        unrealized_profit_rate = round((current_price - entry_price) / entry_price, 4)
+    previous_signal_lost_streak = int(position.get("holding_signal_lost_streak") or 0)
+    previous_extension_count = int(position.get("holding_extension_count") or 0)
+    previous_avoided_count = int(position.get("holding_signal_lost_exit_avoided_count") or 0)
+    previous_extended = _bool_config(position.get("holding_extended"), False)
     if not enabled:
         return {
             "holding_signal_status": "",
@@ -1907,6 +1955,19 @@ def _holding_signal_revaluation(
             "holding_effective_max_days": default_max_holding_days,
             "holding_reselected": False,
             "holding_extended": False,
+            "holding_signal_lost_streak": 0,
+            "holding_signal_lost_exit_avoided": False,
+            "holding_signal_lost_exit_avoided_count": previous_avoided_count,
+            "holding_extension_count": previous_extension_count,
+            "holding_extension_eligible": False,
+            "holding_extension_reason": "",
+            "holding_unrealized_profit_rate": unrealized_profit_rate,
+            "conditional_hold_extension_applied": False,
+            "conditional_hold_extension_count": 0,
+            "conditional_hold_extension_reason": "",
+            "conditional_hold_extension_trigger_profit_rate": None,
+            "conditional_hold_extension_rejected": False,
+            "conditional_hold_extension_rejected_reason": "",
         }
 
     if code in selected_codes:
@@ -1916,16 +1977,89 @@ def _holding_signal_revaluation(
     else:
         status = "signal_lost"
 
-    threshold = _optional_float(cfg.get("score_drop_exit_threshold"))
-    if market and threshold is not None and score_drop is not None and score_drop >= threshold:
-        status = "score_deteriorated"
+    signal_lost_streak = previous_signal_lost_streak + 1 if status == "signal_lost" else 0
+    if _holding_signal_revaluation_enabled(config):
+        threshold = _optional_float(cfg.get("score_drop_exit_threshold"))
+        score_below = _optional_float(cfg.get("score_drop_exit_score_below"))
+        score_lost_days = int(cfg.get("score_drop_exit_requires_signal_lost_days") or 0)
+        score_only_when_not_profitable = _bool_config(cfg.get("score_drop_exit_only_when_not_profitable"), False)
+        score_exit_allowed = True
+        if score_below is not None and (row_score is None or row_score >= score_below):
+            score_exit_allowed = False
+        if score_lost_days and signal_lost_streak < score_lost_days:
+            score_exit_allowed = False
+        if score_only_when_not_profitable and unrealized_profit_rate is not None and unrealized_profit_rate > 0:
+            score_exit_allowed = False
+        if market and threshold is not None and score_drop is not None and score_drop >= threshold and score_exit_allowed:
+            status = "score_deteriorated"
 
     effective_max_days = default_max_holding_days
     reselected = status == "reselected"
     extended = False
+    extension_eligible = False
+    extension_reason = ""
+    extension_count = previous_extension_count
     if reselected and bool(cfg.get("hold_reselection_enabled", False)):
-        effective_max_days = max(default_max_holding_days, int(cfg.get("hold_extension_max_days") or default_max_holding_days))
+        extension_eligible, extension_reason = _holding_extension_eligible(position, market, cfg, score_drop, unrealized_profit_rate)
+        max_extension_count = int(cfg.get("hold_extension_max_count") or 0)
+        may_start_extension = max_extension_count <= 0 or previous_extension_count < max_extension_count
+        if previous_extended or (extension_eligible and may_start_extension):
+            effective_max_days = max(default_max_holding_days, int(cfg.get("hold_extension_max_days") or default_max_holding_days))
+        if effective_max_days > default_max_holding_days and holding_days >= default_max_holding_days and not previous_extended:
+            extension_count = previous_extension_count + 1
         extended = effective_max_days > default_max_holding_days and holding_days >= default_max_holding_days
+    conditional_applied = _bool_config(position.get("conditional_hold_extension_applied"), False)
+    conditional_count = int(position.get("conditional_hold_extension_count") or 0)
+    conditional_reason = str(position.get("conditional_hold_extension_reason") or "")
+    conditional_trigger_profit_rate = _optional_float(position.get("conditional_hold_extension_trigger_profit_rate"))
+    conditional_rejected = False
+    conditional_rejected_reason = ""
+    conditional_profit_rate_at_max_holding = None
+    conditional_close_at_max_holding = None
+    conditional_ma25_at_max_holding = None
+    conditional_previous_ma25_at_max_holding = None
+    conditional_relative_strength_score_at_max_holding = None
+    if _bool_config(conditional_cfg.get("enabled"), False):
+        min_profit_rate = _optional_float(
+            conditional_cfg.get("min_unrealized_profit_rate")
+            if conditional_cfg.get("min_unrealized_profit_rate") is not None
+            else conditional_cfg.get("minimum_profit_for_extension")
+        )
+        if min_profit_rate is None:
+            min_profit_rate = 0.03
+        extension_max_days = int(conditional_cfg.get("max_holding_days") or conditional_cfg.get("extend_to_max_holding_days") or default_max_holding_days)
+        max_extension_count = int(conditional_cfg.get("max_extension_count") or 1)
+        may_start_extension = max_extension_count <= 0 or conditional_count < max_extension_count
+        if holding_days >= default_max_holding_days:
+            conditional_profit_rate_at_max_holding = unrealized_profit_rate
+            conditional_close_at_max_holding = _optional_float(market.get("close")) or current_price
+            conditional_ma25_at_max_holding = _optional_float(market.get("ma25"))
+            conditional_previous_ma25_at_max_holding = _optional_float(market.get("previous_ma25"))
+            conditional_relative_strength_score_at_max_holding = _optional_float(market.get("relative_strength_score"))
+        allowed, decision_reason, rejected_reasons = _conditional_hold_extension_decision(
+            market,
+            entry_price,
+            current_price,
+            unrealized_profit_rate,
+            conditional_cfg,
+            min_profit_rate,
+            conditional_count,
+            may_start_extension,
+        )
+        if conditional_applied or (holding_days >= default_max_holding_days and allowed):
+            effective_max_days = max(default_max_holding_days, extension_max_days)
+            extended = effective_max_days > default_max_holding_days and holding_days >= default_max_holding_days
+            if not conditional_applied and holding_days >= default_max_holding_days:
+                conditional_applied = True
+                conditional_count += 1
+                conditional_reason = decision_reason or f"unrealized_profit_rate>={min_profit_rate:.4f}"
+                conditional_trigger_profit_rate = unrealized_profit_rate
+            if conditional_applied:
+                extension_eligible = True
+                extension_reason = conditional_reason or "conditional_profit_extension"
+        elif holding_days >= default_max_holding_days:
+            conditional_rejected = True
+            conditional_rejected_reason = "+".join(rejected_reasons) if rejected_reasons else "unknown"
 
     return {
         "holding_signal_status": status,
@@ -1935,7 +2069,133 @@ def _holding_signal_revaluation(
         "holding_effective_max_days": effective_max_days,
         "holding_reselected": reselected,
         "holding_extended": extended,
+        "holding_signal_lost_streak": signal_lost_streak,
+        "holding_signal_lost_exit_avoided": False,
+        "holding_signal_lost_exit_avoided_count": previous_avoided_count,
+        "holding_extension_count": extension_count,
+        "holding_extension_eligible": extension_eligible,
+        "holding_extension_reason": extension_reason,
+        "holding_unrealized_profit_rate": unrealized_profit_rate,
+        "conditional_hold_extension_applied": conditional_applied,
+        "conditional_hold_extension_count": conditional_count,
+        "conditional_hold_extension_reason": conditional_reason,
+        "conditional_hold_extension_trigger_profit_rate": conditional_trigger_profit_rate,
+        "conditional_hold_extension_rejected": conditional_rejected,
+        "conditional_hold_extension_rejected_reason": conditional_rejected_reason,
+        "conditional_hold_extension_profit_rate_at_max_holding": conditional_profit_rate_at_max_holding,
+        "conditional_hold_extension_close_at_max_holding": conditional_close_at_max_holding,
+        "conditional_hold_extension_ma25_at_max_holding": conditional_ma25_at_max_holding,
+        "conditional_hold_extension_previous_ma25_at_max_holding": conditional_previous_ma25_at_max_holding,
+        "conditional_hold_extension_relative_strength_score_at_max_holding": conditional_relative_strength_score_at_max_holding,
     }
+
+
+def _conditional_hold_extension_decision(
+    market: dict[str, Any],
+    entry_price: float | None,
+    current_price: float | None,
+    unrealized_profit_rate: float | None,
+    cfg: dict[str, Any],
+    min_profit_rate: float,
+    conditional_count: int,
+    may_start_extension: bool,
+) -> tuple[bool, str, list[str]]:
+    reasons: list[str] = []
+    if not may_start_extension or conditional_count > 0:
+        reasons.append("already_extended")
+    if unrealized_profit_rate is None:
+        reasons.append("missing_indicator")
+    elif unrealized_profit_rate < min_profit_rate:
+        reasons.append(_conditional_hold_extension_profit_reject_reason(cfg))
+    if entry_price is None or current_price is None:
+        if "missing_indicator" not in reasons:
+            reasons.append("missing_indicator")
+    elif current_price <= entry_price:
+        reasons.append(_conditional_hold_extension_profit_reject_reason(cfg))
+    if _bool_config(cfg.get("require_trend_continuation"), False):
+        close = _optional_float(market.get("close"))
+        ma5 = _optional_float(market.get("ma5"))
+        ma25 = _optional_float(market.get("ma25"))
+        previous_ma25 = _optional_float(market.get("previous_ma25"))
+        relative_strength_score = _optional_float(market.get("relative_strength_score"))
+        if close is None:
+            reasons.append("missing_indicator")
+        if not _bool_config(cfg.get("skip_ma5_condition"), False):
+            if ma5 is None:
+                reasons.append("missing_indicator")
+            elif close is not None and close < ma5:
+                reasons.append("below_ma5")
+        if ma25 is None:
+            reasons.append("missing_indicator")
+        elif close is not None and close < ma25:
+            reasons.append("below_ma25")
+        if _bool_config(cfg.get("require_ma25_uptrend"), False):
+            if ma25 is None or previous_ma25 is None:
+                reasons.append("missing_indicator")
+            elif ma25 <= previous_ma25:
+                reasons.append("ma25_not_uptrend")
+        min_relative_strength = _optional_float(cfg.get("min_relative_strength_score"))
+        if min_relative_strength is None:
+            min_relative_strength = _optional_float(cfg.get("minimum_relative_strength_score"))
+        if min_relative_strength is None:
+            min_relative_strength = 60.0
+        if relative_strength_score is None:
+            reasons.append("missing_indicator")
+        elif relative_strength_score < min_relative_strength:
+            reasons.append(_conditional_hold_extension_relative_strength_reject_reason(cfg))
+    if reasons:
+        deduped = list(dict.fromkeys(reasons))
+        return False, "", deduped
+    return True, _conditional_hold_extension_reason(cfg, min_profit_rate), []
+
+
+def _conditional_hold_extension_profit_reject_reason(cfg: dict[str, Any]) -> str:
+    if cfg.get("profit_reject_reason"):
+        return str(cfg.get("profit_reject_reason"))
+    return "low_profit_rate"
+
+
+def _conditional_hold_extension_relative_strength_reject_reason(cfg: dict[str, Any]) -> str:
+    if cfg.get("relative_strength_reject_reason"):
+        return str(cfg.get("relative_strength_reject_reason"))
+    return "low_relative_strength"
+
+
+def _conditional_hold_extension_reason(cfg: dict[str, Any], min_profit_rate: float) -> str:
+    if _bool_config(cfg.get("require_trend_continuation"), False):
+        min_relative_strength = _optional_float(cfg.get("min_relative_strength_score"))
+        if min_relative_strength is None:
+            min_relative_strength = _optional_float(cfg.get("minimum_relative_strength_score"))
+        if min_relative_strength is None:
+            min_relative_strength = 60.0
+        if _bool_config(cfg.get("require_ma25_uptrend"), False):
+            return f"trend_continuation_profit>={min_profit_rate:.4f}_rs>={min_relative_strength:.1f}_ma25_uptrend"
+        return f"trend_continuation_profit>={min_profit_rate:.4f}_rs>={min_relative_strength:.1f}"
+    return f"unrealized_profit_rate>={min_profit_rate:.4f}"
+
+
+def _holding_extension_eligible(
+    position: dict[str, Any],
+    market: dict[str, Any],
+    cfg: dict[str, Any],
+    score_drop: float | None,
+    unrealized_profit_rate: float | None,
+) -> tuple[bool, str]:
+    if not _bool_config(cfg.get("hold_extension_require_confirmation"), False):
+        return True, "reselected"
+    reasons = []
+    min_profit_rate = _optional_float(cfg.get("hold_extension_min_unrealized_profit_rate"))
+    if min_profit_rate is not None and unrealized_profit_rate is not None and unrealized_profit_rate >= min_profit_rate:
+        reasons.append("unrealized_profit")
+    max_score_drop = _optional_float(cfg.get("hold_extension_max_score_drop"))
+    if max_score_drop is not None and score_drop is not None and score_drop <= max_score_drop:
+        reasons.append("score_maintained")
+    max_rank = _optional_int(cfg.get("hold_extension_max_rank"))
+    rank_value = market.get("daily_score_rank") if market.get("daily_score_rank") is not None else market.get("rank")
+    rank = _optional_int(rank_value)
+    if max_rank is not None and rank is not None and rank <= max_rank:
+        reasons.append("top_rank")
+    return bool(reasons), "+".join(reasons)
 
 
 def _apply_holding_revaluation_exit_plan(
@@ -1945,7 +2205,7 @@ def _apply_holding_revaluation_exit_plan(
     current_price: float,
     holding_days: int,
 ) -> dict[str, Any]:
-    if not _holding_revaluation_enabled(config):
+    if not _holding_signal_revaluation_enabled(config):
         return exit_plan
     cfg = _holding_revaluation_config(config)
     if bool(cfg.get("stop_loss_always_priority", True)) and exit_plan.get("exit_reason") == "損切り":
@@ -1954,9 +2214,26 @@ def _apply_holding_revaluation_exit_plan(
         return exit_plan
     status = str(holding_signal.get("holding_signal_status") or "")
     reason = ""
-    if status == "signal_lost" and bool(cfg.get("early_exit_on_signal_lost", False)):
-        reason = "シグナル消失"
+    unrealized_profit_rate = _optional_float(holding_signal.get("holding_unrealized_profit_rate"))
+    if status == "signal_lost" and _bool_config(cfg.get("early_exit_on_signal_lost"), False):
+        min_lost_days = int(cfg.get("signal_lost_exit_min_consecutive_days") or 1)
+        lost_streak = int(holding_signal.get("holding_signal_lost_streak") or 0)
+        loss_threshold = _optional_float(cfg.get("signal_lost_exit_unrealized_loss_rate_threshold"))
+        loss_override = loss_threshold is not None and unrealized_profit_rate is not None and unrealized_profit_rate <= loss_threshold
+        suppress_profit = _bool_config(cfg.get("suppress_signal_lost_exit_when_unrealized_profit"), False)
+        if suppress_profit and unrealized_profit_rate is not None and unrealized_profit_rate > 0:
+            holding_signal["holding_signal_lost_exit_avoided"] = True
+            holding_signal["holding_signal_lost_exit_avoided_count"] = int(holding_signal.get("holding_signal_lost_exit_avoided_count") or 0) + 1
+        elif lost_streak >= min_lost_days or loss_override:
+            reason = "シグナル消失"
+        else:
+            holding_signal["holding_signal_lost_exit_avoided"] = True
+            holding_signal["holding_signal_lost_exit_avoided_count"] = int(holding_signal.get("holding_signal_lost_exit_avoided_count") or 0) + 1
     elif status == "score_deteriorated" and cfg.get("score_drop_exit_threshold") is not None:
+        if _bool_config(cfg.get("suppress_score_drop_exit_when_unrealized_profit"), False) and unrealized_profit_rate is not None and unrealized_profit_rate > 0:
+            holding_signal["holding_signal_lost_exit_avoided"] = True
+            holding_signal["holding_signal_lost_exit_avoided_count"] = int(holding_signal.get("holding_signal_lost_exit_avoided_count") or 0) + 1
+            return exit_plan
         reason = "スコア低下"
     if not reason:
         return exit_plan

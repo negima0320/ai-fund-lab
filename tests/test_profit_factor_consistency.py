@@ -1,20 +1,171 @@
 from __future__ import annotations
 
 import csv
+import json
 from copy import deepcopy
 
 import main
 from db import analyze_operation_data, get_database_path, initialize_database, save_portfolio_snapshot, save_scoring_results, save_trades
 from main import (
+    _compare_profiles_output_stem,
+    _effective_config_differences,
     _profile_compare_row,
     build_profile_diff_analysis,
     build_profile_diff_analyses,
     build_profile_ranking,
+    enrich_candidates_with_position_prices,
     render_compare_profiles_markdown,
     write_trades_csv,
     write_backtest_summary,
 )
 from profile_loader import load_profile
+
+
+def test_compare_profiles_output_stem_keeps_two_profile_name_readable() -> None:
+    stem = _compare_profiles_output_stem(
+        "2026-01-05",
+        "2026-03-06",
+        ["rookie_dealer_02_v2_26", "rookie_dealer_02_v2_38"],
+    )
+
+    assert stem == "compare_2026-01-05_to_2026-03-06_rookie_dealer_02_v2_26_vs_rookie_dealer_02_v2_38"
+    assert len(f"{stem}.json") < 200
+
+
+def test_compare_profiles_output_stem_shortens_many_profiles_with_hash() -> None:
+    profile_ids = [f"rookie_dealer_02_v2_{index}" for index in range(1, 25)]
+
+    stem = _compare_profiles_output_stem("2026-01-05", "2026-03-06", profile_ids)
+
+    assert stem.startswith("compare_2026-01-05_to_2026-03-06_24profiles_")
+    assert len(stem.rsplit("_", 1)[-1]) == 10
+    assert len(f"{stem}.json") < 200
+    assert "rookie_dealer_02_v2_1_vs" not in stem
+
+
+def test_effective_config_differences_include_conditional_hold_extension() -> None:
+    base = load_profile("rookie_dealer_02_v2_26")
+    target = load_profile("rookie_dealer_02_v2_58")
+
+    differences = _effective_config_differences(base, target)
+
+    keys = {item["key"] for item in differences}
+    assert "conditional_hold_extension" in keys
+
+
+def test_enrich_candidates_with_position_prices_copies_hold_extension_indicator_fields(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main, "ROOT", tmp_path)
+    processed = tmp_path / "data" / "processed"
+    processed.mkdir(parents=True)
+    (processed / "indicators_2026-02-06.json").write_text(
+        json.dumps(
+            {
+                "indicators": [
+                    {
+                        "code": "18780",
+                        "name": "大東建託",
+                        "close": 3385.0,
+                        "volume": 100000,
+                        "ma5": 3200.0,
+                        "ma25": 3089.36,
+                        "previous_ma25": 3074.16,
+                        "rsi": 61.2,
+                        "volume_ratio": 2.5,
+                        "relative_strength_score": 7,
+                        "relative_strength_5d": 0.04,
+                        "relative_strength_10d": 0.05,
+                        "relative_strength_20d": 0.08,
+                        "stock_return_5d": 0.06,
+                        "stock_return_10d": 0.09,
+                        "stock_return_20d": 0.12,
+                        "benchmark_return_5d": 0.02,
+                        "benchmark_return_10d": 0.04,
+                        "benchmark_return_20d": 0.04,
+                        "benchmark_source": "topix",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    )
+    state = {"positions": [{"code": "18780"}]}
+
+    enriched = enrich_candidates_with_position_prices([], state, "2026-02-06")
+
+    assert len(enriched) == 1
+    row = enriched[0]
+    assert row["previous_ma25"] == 3074.16
+    assert row["relative_strength_score"] == 7
+    assert row["relative_strength_5d"] == 0.04
+    assert row["relative_strength_10d"] == 0.05
+    assert row["relative_strength_20d"] == 0.08
+    assert row["stock_return_5d"] == 0.06
+    assert row["stock_return_10d"] == 0.09
+    assert row["stock_return_20d"] == 0.12
+    assert row["benchmark_return_5d"] == 0.02
+    assert row["benchmark_return_10d"] == 0.04
+    assert row["benchmark_return_20d"] == 0.04
+    assert row["benchmark_source"] == "topix"
+
+
+def test_run_compare_profiles_writes_readable_two_profile_outputs(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "ai_fund_lab.sqlite3"
+    db_path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(main, "ROOT", tmp_path)
+    monkeypatch.setattr(main, "load_profile", lambda profile_id: {"profile_id": profile_id})
+    monkeypatch.setattr(main, "get_database_path", lambda _config, _root: db_path)
+    monkeypatch.setattr(
+        main,
+        "_profile_compare_row",
+        lambda config, *_args: {
+            "profile_id": config["profile_id"],
+            "profile_name": config["profile_id"],
+            "final_assets": 1000000,
+            "total_trades": 0,
+        },
+    )
+    monkeypatch.setattr(main, "build_profile_ranking", lambda rows: [])
+    monkeypatch.setattr(main, "build_profile_diff_analyses", lambda *_args: [])
+
+    markdown_path, json_path = main.run_compare_profiles(
+        ["rookie_dealer_02_v2_26", "rookie_dealer_02_v2_38"],
+        "2026-01-05",
+        "2026-03-06",
+    )
+
+    assert markdown_path.exists()
+    assert json_path.exists()
+    assert "rookie_dealer_02_v2_26_vs_rookie_dealer_02_v2_38" in json_path.name
+    assert "compared_profiles" in json_path.read_text(encoding="utf-8")
+
+
+def test_run_compare_profiles_writes_short_many_profile_outputs(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "ai_fund_lab.sqlite3"
+    db_path.write_text("", encoding="utf-8")
+    profile_ids = [f"rookie_dealer_02_v2_{index}" for index in range(1, 25)]
+    monkeypatch.setattr(main, "ROOT", tmp_path)
+    monkeypatch.setattr(main, "load_profile", lambda profile_id: {"profile_id": profile_id})
+    monkeypatch.setattr(main, "get_database_path", lambda _config, _root: db_path)
+    monkeypatch.setattr(
+        main,
+        "_profile_compare_row",
+        lambda config, *_args: {
+            "profile_id": config["profile_id"],
+            "profile_name": config["profile_id"],
+            "final_assets": 1000000,
+            "total_trades": 0,
+        },
+    )
+    monkeypatch.setattr(main, "build_profile_ranking", lambda rows: [])
+    monkeypatch.setattr(main, "build_profile_diff_analyses", lambda *_args: [])
+
+    markdown_path, json_path = main.run_compare_profiles(profile_ids, "2026-01-05", "2026-03-06")
+
+    assert markdown_path.exists()
+    assert json_path.exists()
+    assert "_24profiles_" in json_path.name
+    assert len(json_path.name) < 200
+    assert all(profile_id in json_path.read_text(encoding="utf-8") for profile_id in profile_ids)
 
 
 def test_analyze_and_compare_profiles_profit_factor_match(config_copy: dict, tmp_path) -> None:
@@ -558,10 +709,10 @@ def test_profile_diff_analysis_marks_no_practical_effect(tmp_path) -> None:
 
 def test_profile_diff_analysis_counts_affordable_fallback_buy_as_selection_diff(tmp_path) -> None:
     profile_26 = load_profile("rookie_dealer_02_v2_26")
-    profile_37 = load_profile("rookie_dealer_02_v2_37")
+    profile_40 = load_profile("rookie_dealer_02_v2_40")
     db_path = str(tmp_path / "ai_fund_lab.sqlite3")
     profile_26["database"]["path"] = db_path
-    profile_37["database"]["path"] = db_path
+    profile_40["database"]["path"] = db_path
     initialize_database(profile_26, tmp_path)
     scores = [
         {
@@ -579,10 +730,10 @@ def test_profile_diff_analysis_counts_affordable_fallback_buy_as_selection_diff(
             "selected": False,
         },
     ]
-    for profile in [profile_26, profile_37]:
+    for profile in [profile_26, profile_40]:
         save_scoring_results(profile, tmp_path, {"date": "2026-03-06", "scores": deepcopy(scores)})
     save_trades(
-        profile_37,
+        profile_40,
         tmp_path,
         "2026-03-07",
         [
@@ -608,7 +759,7 @@ def test_profile_diff_analysis_counts_affordable_fallback_buy_as_selection_diff(
     )
 
     analysis = build_profile_diff_analysis(
-        [profile_26, profile_37],
+        [profile_26, profile_40],
         get_database_path(profile_26, tmp_path),
         "2026-03-01",
         "2026-03-31",
@@ -616,7 +767,7 @@ def test_profile_diff_analysis_counts_affordable_fallback_buy_as_selection_diff(
 
     assert analysis is not None
     assert analysis["base_profile_id"] == "rookie_dealer_02_v2_26"
-    assert analysis["target_profile_id"] == "rookie_dealer_02_v2_37"
+    assert analysis["target_profile_id"] == "rookie_dealer_02_v2_40"
     assert analysis["newly_selected_count"] == 1
     assert analysis["selection_diff_count"] == 1
     assert analysis["no_practical_effect"] is False
@@ -629,14 +780,71 @@ def test_profile_diff_analysis_counts_affordable_fallback_buy_as_selection_diff(
     assert analysis["trade_outcome_diff"]["new_buy_trades"][0]["affordable_fallback_buy_selected"] is True
 
 
+def test_profile_diff_analysis_falls_back_to_scoring_logs_when_target_db_rows_are_skipped(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main, "ROOT", tmp_path)
+    profile_21 = load_profile("rookie_dealer_02_v2_1")
+    profile_22 = load_profile("rookie_dealer_02_v2_2")
+    db_path = str(tmp_path / "ai_fund_lab.sqlite3")
+    profile_21["database"]["path"] = db_path
+    profile_22["database"]["path"] = db_path
+    initialize_database(profile_21, tmp_path)
+    save_scoring_results(
+        profile_21,
+        tmp_path,
+        {
+            "date": "2026-03-06",
+            "scores": [
+                {
+                    "code": "1001",
+                    "name": "Same",
+                    "rank": 1,
+                    "total_score": 80,
+                    "selected": True,
+                }
+            ],
+        },
+    )
+    scoring_dir = tmp_path / "logs" / "backtests" / "rookie_dealer_02_v2_2" / "2026-03-01_to_2026-03-31"
+    scoring_dir.mkdir(parents=True)
+    main.write_json(
+        scoring_dir / "scoring_2026-03-06.json",
+        {
+            "date": "2026-03-06",
+            "profile_id": "rookie_dealer_02_v2_2",
+            "scores": [
+                {
+                    "code": "1001",
+                    "name": "Same",
+                    "rank": 1,
+                    "total_score": 80,
+                    "selected": True,
+                }
+            ],
+        },
+    )
+
+    analysis = build_profile_diff_analysis(
+        [profile_21, profile_22],
+        get_database_path(profile_21, tmp_path),
+        "2026-03-01",
+        "2026-03-31",
+    )
+
+    assert analysis is not None
+    assert analysis["base_selected_count"] == 1
+    assert analysis["target_selected_count"] == 1
+    assert analysis["selection_diff_count"] == 0
+    assert analysis["practical_effect"] == "no_practical_effect"
+
+
 def test_profile_diff_analysis_uses_backtest_summary_fallback_trades_when_db_is_stale(tmp_path, monkeypatch) -> None:
     profile_26 = load_profile("rookie_dealer_02_v2_26")
-    profile_37 = load_profile("rookie_dealer_02_v2_37")
+    profile_40 = load_profile("rookie_dealer_02_v2_40")
     db_path = str(tmp_path / "ai_fund_lab.sqlite3")
     profile_26["database"]["path"] = db_path
-    profile_37["database"]["path"] = db_path
+    profile_40["database"]["path"] = db_path
     initialize_database(profile_26, tmp_path)
-    for profile in [profile_26, profile_37]:
+    for profile in [profile_26, profile_40]:
         save_scoring_results(
             profile,
             tmp_path,
@@ -647,9 +855,9 @@ def test_profile_diff_analysis_uses_backtest_summary_fallback_trades_when_db_is_
                     {"code": "1002", "name": "Affordable Fallback", "rank": 2, "total_score": 77, "selected": False},
                 ],
             },
-        )
+    )
     monkeypatch.setattr(main, "ROOT", tmp_path)
-    summary_path = tmp_path / "logs" / "backtests" / "rookie_dealer_02_v2_37" / "2026-03-01_to_2026-03-31" / "backtest_summary.json"
+    summary_path = tmp_path / "logs" / "backtests" / "rookie_dealer_02_v2_40" / "2026-03-01_to_2026-03-31" / "backtest_summary.json"
     main.write_json(
         summary_path,
         {
@@ -673,7 +881,7 @@ def test_profile_diff_analysis_uses_backtest_summary_fallback_trades_when_db_is_
     )
 
     analysis = build_profile_diff_analysis(
-        [profile_26, profile_37],
+        [profile_26, profile_40],
         get_database_path(profile_26, tmp_path),
         "2026-03-01",
         "2026-03-31",

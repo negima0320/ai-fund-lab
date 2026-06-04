@@ -370,6 +370,32 @@ def test_cleanup_storage_is_dry_run_by_default_and_keeps_raw_prices(tmp_path, mo
     assert raw.exists()
 
 
+def test_cleanup_retired_profiles_dry_run_targets_profile_artifacts_only(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    report = tmp_path / "reports" / "rookie_dealer_02_v2_51" / "backtests" / "feature_analysis.md"
+    log = tmp_path / "logs" / "backtests" / "rookie_dealer_02_v2_51" / "2026-01-01_to_2026-03-06" / "trades.csv"
+    processed = tmp_path / "data" / "processed" / "rookie_dealer_02_v2_51" / "scored_candidates_2026-01-05.json"
+    common = tmp_path / "data" / "processed" / "common" / "indicators" / "key" / "indicators_2026-01-05.json"
+    raw = tmp_path / "data" / "raw" / "prices_2026-01-05.json"
+    for path in [report, log, processed, common, raw]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+
+    plan = main_module.build_cleanup_retired_profiles_plan(["rookie_dealer_02_v2_51"])
+    result = main_module.execute_cleanup_retired_profiles_plan(plan, apply=False)
+    paths = {item["relative_path"] for item in plan["targets"]}
+
+    assert result["dry_run"] is True
+    assert "reports/rookie_dealer_02_v2_51" in paths
+    assert "logs/backtests/rookie_dealer_02_v2_51" in paths
+    assert "data/processed/rookie_dealer_02_v2_51" in paths
+    assert all("data/processed/common" not in path for path in paths)
+    assert all("data/raw" not in path for path in paths)
+    assert report.exists()
+    assert log.exists()
+    assert processed.exists()
+
+
 def test_cleanup_storage_reports_keep_reason_for_recent_files(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(main_module, "ROOT", tmp_path)
     log = tmp_path / "logs" / "backtests" / "recent.json"
@@ -665,7 +691,7 @@ def test_backtest_speed_flags_are_parsed(monkeypatch) -> None:
             "2026-03-06",
             "--profiles",
             "rookie_dealer_02_v2_6",
-            "rookie_dealer_02_v2_11",
+            "rookie_dealer_02_v2_38",
             "--no-daily-logs",
             "--skip-price-fetch",
             "--quiet",
@@ -676,7 +702,7 @@ def test_backtest_speed_flags_are_parsed(monkeypatch) -> None:
 
     args = main_module.parse_args()
 
-    assert args.profiles == ["rookie_dealer_02_v2_6", "rookie_dealer_02_v2_11"]
+    assert args.profiles == ["rookie_dealer_02_v2_6", "rookie_dealer_02_v2_38"]
     assert args.no_daily_logs is True
     assert args.skip_price_fetch is True
     assert args.quiet is True

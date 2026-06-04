@@ -1,9 +1,10 @@
 # AI Fund Lab profile YAML
-# rookie_dealer_02_v2_26 をベースに、strong_bull/bullのtarget_exposureを引き上げるprofileです。
+# rookie_dealer_02_v2_59 の条件付き保有延長を、relative_strength 閾値だけ緩和して検証するprofileです。
+# 秘密情報は書かず、APIキーや口座情報は .env に置きます。
 
-profile_id: rookie_dealer_02_v2_34
-profile_name: 新人ディーラー2号 v2.34
-description: v2.26ベース strong_bull 0.95 / bull 0.90 検証
+profile_id: rookie_dealer_02_v2_60
+profile_name: 新人ディーラー2号 v2.60
+description: v2.59ベース 条件付き保有延長 relative_strength 閾値5検証
 disable_single_order_amount_limit: true
 
 character:
@@ -69,6 +70,20 @@ trading:
   use_round_lot: true
   round_lot_size: 100
 
+conditional_hold_extension:
+  enabled: true
+  require_trend_continuation: true
+  skip_ma5_condition: true
+  require_ma25_uptrend: true
+  min_unrealized_profit_rate: 0.03
+  minimum_profit_for_extension: 0.03
+  min_relative_strength_score: 5
+  minimum_relative_strength_score: 5
+  profit_reject_reason: profit_below_threshold
+  relative_strength_reject_reason: relative_strength_below_threshold
+  max_holding_days: 7
+  max_extension_count: 1
+
 execution:
   stop_loss_execution: intraday_stop
 
@@ -88,12 +103,6 @@ market_filter:
 volume_filter:
   enabled: true
   min_volume_ratio: 2.0
-
-dynamic_exposure:
-  enabled: true
-  target_exposure_by_regime:
-    strong_bull: 0.95
-    bull: 0.90
 
 capital_utilization_policy:
   enabled: true

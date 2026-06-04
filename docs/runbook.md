@@ -8,7 +8,7 @@
 .venv/bin/python src/main.py --mode help
 .venv/bin/python src/main.py --mode validate-config
 .venv/bin/python src/main.py --mode list-profiles
-.venv/bin/python src/main.py --mode profile-info --profile rookie_dealer_02_v2_51
+.venv/bin/python src/main.py --mode profile-info --profile rookie_dealer_02_v2_38
 ```
 
 ## Before Long Backtests
@@ -34,7 +34,7 @@
 ```bash
 .venv/bin/python src/main.py --mode run-experiments \
   --base-profile rookie_dealer_02_v2_26 \
-  --profiles rookie_dealer_02_v2_26 rookie_dealer_02_v2_51 \
+  --profiles rookie_dealer_02_v2_26 rookie_dealer_02_v2_38 \
   --start-date YYYY-MM-DD \
   --end-date YYYY-MM-DD \
   --skip-price-fetch \
@@ -46,8 +46,8 @@
 ## Report Regeneration
 
 ```bash
-.venv/bin/python src/feature_analysis.py --profile rookie_dealer_02_v2_51
-PYTHONPATH=. .venv/bin/python -m src.feature_analysis --profile rookie_dealer_02_v2_51
+.venv/bin/python src/feature_analysis.py --profile rookie_dealer_02_v2_38
+PYTHONPATH=. .venv/bin/python -m src.feature_analysis --profile rookie_dealer_02_v2_38
 ```
 
 ## Key Files to Inspect

@@ -54,6 +54,34 @@ PaperBrokerの買付は以下を見ます。
 
 詳細なexit reasonの集計は `feature_analysis.md` のExit Reason系分析で確認します。
 
+## Conditional Hold Extension
+
+`conditional_hold_extension` は、最大保有期間到達時だけ判定されるexit timing実験です。通常の利確・損切りを無視して保有を伸ばすものではありません。利確・損切り条件に到達した場合は従来どおり売却します。
+
+主な設定:
+
+- `enabled`: 条件付き保有延長を有効化
+- `min_unrealized_profit_rate` / `minimum_profit_for_extension`: 延長に必要な含み益率
+- `min_relative_strength_score` / `minimum_relative_strength_score`: 延長に必要な相対強度score
+- `require_ma25_uptrend`: `ma25 > previous_ma25` を要求
+- `skip_ma5_condition`: MA5条件を使わない
+- `max_holding_days`: 延長後の最大保有日数
+- `max_extension_count`: 延長回数上限
+
+保有中銘柄が当日の候補リストにない場合でも、`indicators_YYYY-MM-DD.json` から `close`、`ma25`、`previous_ma25`、`relative_strength_score` などを補完して判定します。補完できない場合は `missing_indicator` として拒否理由に残します。
+
+直近の検証profile:
+
+- `rookie_dealer_02_v2_59`: v2.58同条件で、保有銘柄indicator補完修正後の検証
+- `rookie_dealer_02_v2_60`: v2.59からrelative strength閾値だけを `60` から `5` に緩和
+
+関連出力:
+
+- `conditional_hold_extension_count`
+- `conditional_hold_extension_profit_diff`
+- `conditional_hold_extension_rejected_reason_breakdown`
+- `Conditional Hold Extension Rejected Detail`
+
 ## Integrity
 
 売買結果は以下で監査します。
@@ -63,4 +91,3 @@ PaperBrokerの買付は以下を見ます。
 - `Compounding / Capital Flow Audit`
 - `Trade Market Audit`
 - `Monthly Performance Audit`
-

@@ -364,6 +364,13 @@ def main() -> None:
             verbose=args.verbose,
         )
         return
+    if args.mode == "cleanup-retired-profiles":
+        run_cleanup_retired_profiles(
+            profile_ids=args.retired_profiles,
+            apply=args.apply,
+            verbose=args.verbose,
+        )
+        return
     if args.mode == "compact-processed-cache":
         run_compact_processed_cache(apply=args.apply, verbose=args.verbose)
         return
@@ -596,6 +603,7 @@ def parse_args() -> Any:
             "validate-config",
             "storage-audit",
             "cleanup-storage",
+            "cleanup-retired-profiles",
             "compact-processed-cache",
             "inspect-cache",
             "performance-audit",
@@ -812,6 +820,12 @@ def parse_args() -> Any:
         "--include-processed",
         action="store_true",
         help="Include profile-specific processed indicators/candidates in cleanup-storage.",
+    )
+    parser.add_argument(
+        "--retired-profiles",
+        nargs="+",
+        default=None,
+        help="Profile ids to inspect/delete in cleanup-retired-profiles. Defaults to the curated retired profile list.",
     )
     parser.add_argument(
         "--exclude-raw-prices",
@@ -2383,6 +2397,168 @@ def run_cleanup_storage(
             print(f"- ... {omitted} more targets omitted")
     if not apply:
         print("- dry-run only; use --apply to delete")
+
+
+RETIRED_PROFILE_CLEANUP_DEFAULTS = (
+    "rookie_dealer_02_v2_8",
+    "rookie_dealer_02_v2_11",
+    "rookie_dealer_02_v2_31",
+    "rookie_dealer_02_v2_33",
+    "rookie_dealer_02_v2_34",
+    "rookie_dealer_02_v2_36",
+    "rookie_dealer_02_v2_37",
+    "rookie_dealer_02_v2_51",
+)
+
+
+def run_cleanup_retired_profiles(
+    *,
+    profile_ids: list[str] | None = None,
+    apply: bool = False,
+    verbose: bool = False,
+) -> None:
+    plan = build_cleanup_retired_profiles_plan(profile_ids)
+    result = execute_cleanup_retired_profiles_plan(plan, apply=apply)
+    print(f"Cleanup Retired Profiles {'Apply' if apply else 'Dry Run'}")
+    print(f"- profiles: {', '.join(plan['profile_ids'])}")
+    print(f"- targets: {plan['target_count']}")
+    print(f"- files: {plan['file_count']}")
+    print(f"- directories: {plan['directory_count']}")
+    print(f"- total_size: {_format_bytes(plan['total_size'])}")
+    print(f"- deleted_count: {result['deleted_count']}")
+    by_reason = plan.get("by_reason", {})
+    if by_reason:
+        print("reasons:")
+        for reason, count in sorted(by_reason.items()):
+            print(f"- {reason}: {count}")
+    if verbose:
+        for item in plan["targets"][:500]:
+            kind = "dir" if item.get("is_dir") else "file"
+            print(f"- [{kind}] {item['relative_path']} ({_format_bytes(item['size'])}) reason={item['reason']}")
+        omitted = len(plan["targets"]) - 500
+        if omitted > 0:
+            print(f"- ... {omitted} more targets omitted")
+    if not apply:
+        print("- dry-run only; use --apply to delete")
+
+
+def build_cleanup_retired_profiles_plan(profile_ids: list[str] | None = None) -> dict[str, Any]:
+    ids = tuple(dict.fromkeys(profile_ids or list(RETIRED_PROFILE_CLEANUP_DEFAULTS)))
+    targets: list[dict[str, Any]] = []
+    for profile_id in ids:
+        targets.extend(_retired_profile_direct_targets(profile_id))
+    targets.extend(_retired_profile_experiment_targets(ids))
+    deduped = {item["path"]: item for item in targets if _cleanup_retired_profile_path_allowed(Path(item["path"]))}
+    ordered = sorted(deduped.values(), key=lambda item: item["relative_path"])
+    by_reason: dict[str, int] = {}
+    for item in ordered:
+        by_reason[str(item["reason"])] = by_reason.get(str(item["reason"]), 0) + 1
+    return {
+        "profile_ids": list(ids),
+        "targets": ordered,
+        "target_count": len(ordered),
+        "file_count": sum(1 for item in ordered if not item.get("is_dir")),
+        "directory_count": sum(1 for item in ordered if item.get("is_dir")),
+        "total_size": sum(int(item.get("size") or 0) for item in ordered),
+        "by_reason": by_reason,
+    }
+
+
+def execute_cleanup_retired_profiles_plan(plan: dict[str, Any], apply: bool = False) -> dict[str, Any]:
+    deleted: list[str] = []
+    if apply:
+        for item in sorted(plan.get("targets", []), key=lambda row: str(row.get("path", "")).count("/"), reverse=True):
+            path = Path(item["path"])
+            if not _cleanup_retired_profile_path_allowed(path):
+                continue
+            if path.is_symlink():
+                continue
+            if path.is_dir():
+                shutil.rmtree(path)
+                deleted.append(str(path))
+            elif path.is_file():
+                path.unlink()
+                deleted.append(str(path))
+    return {"dry_run": not apply, "deleted_count": len(deleted), "deleted": deleted}
+
+
+def _retired_profile_direct_targets(profile_id: str) -> list[dict[str, Any]]:
+    candidates = [
+        (ROOT / "reports" / profile_id, "retired_profile_report"),
+        (ROOT / "logs" / "backtests" / profile_id, "retired_profile_backtest_logs"),
+        (ROOT / "data" / "processed" / profile_id, "retired_profile_processed_cache"),
+    ]
+    targets: list[dict[str, Any]] = []
+    for path, reason in candidates:
+        targets.extend(_cleanup_retired_path_targets(path, reason))
+    return targets
+
+
+def _retired_profile_experiment_targets(profile_ids: tuple[str, ...]) -> list[dict[str, Any]]:
+    root = ROOT / "reports" / "experiments"
+    if not root.exists():
+        return []
+    targets: list[dict[str, Any]] = []
+    for path in root.rglob("*"):
+        if not path.exists() or path.is_symlink():
+            continue
+        parts = set(path.parts)
+        name = path.name
+        if not any(profile_id in parts or profile_id in name for profile_id in profile_ids):
+            continue
+        targets.extend(_cleanup_retired_path_targets(path, "retired_profile_experiment_artifact"))
+    return targets
+
+
+def _cleanup_retired_path_targets(path: Path, reason: str) -> list[dict[str, Any]]:
+    if not path.exists() or path.is_symlink():
+        return []
+    try:
+        size = _path_total_size(path) if path.is_dir() else path.stat().st_size
+    except OSError:
+        return []
+    return [
+        {
+            "path": str(path),
+            "relative_path": str(path.relative_to(ROOT)) if _is_relative_to(path, ROOT) else str(path),
+            "size": size,
+            "reason": reason,
+            "is_dir": path.is_dir(),
+        }
+    ]
+
+
+def _path_total_size(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
+    total = 0
+    for child in path.rglob("*"):
+        if child.is_file() and not child.is_symlink():
+            try:
+                total += child.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def _cleanup_retired_profile_path_allowed(path: Path) -> bool:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    allowed_roots = [
+        ROOT / "reports",
+        ROOT / "logs" / "backtests",
+        ROOT / "data" / "processed",
+    ]
+    if not any(_is_relative_to(resolved, root.resolve()) for root in allowed_roots if root.exists()):
+        return False
+    blocked_roots = [
+        ROOT / "data" / "processed" / "common",
+        ROOT / "data" / "raw",
+        ROOT / "data" / "cache" / "jquants",
+    ]
+    return not any(_is_relative_to(resolved, root.resolve()) for root in blocked_roots if root.exists())
 
 
 def run_compact_processed_cache(apply: bool = False, verbose: bool = False) -> None:
@@ -4452,7 +4628,8 @@ def _feature_analysis_breakdown_keys() -> list[str]:
 
 
 def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_text: str) -> tuple[Path, Path]:
-    _print_date_resolution("Compare Profiles Date Resolution", _runtime_date_resolution(start_date_text, end_date_text))
+    date_resolution = _runtime_date_resolution(start_date_text, end_date_text)
+    _print_date_resolution("Compare Profiles Date Resolution", date_resolution)
     profiles = [load_profile(profile_id) for profile_id in profile_ids]
     db_path = get_database_path(profiles[0], ROOT)
     if not db_path.exists():
@@ -4465,7 +4642,12 @@ def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_
     payload = {
         "start_date": start_date_text,
         "end_date": end_date_text,
-        "date_resolution": _runtime_date_resolution(start_date_text, end_date_text),
+        "requested_start_date": date_resolution.get("requested_start_date"),
+        "requested_end_date": date_resolution.get("requested_end_date"),
+        "effective_start_date": date_resolution.get("effective_start_date"),
+        "effective_end_date": date_resolution.get("effective_end_date"),
+        "date_resolution": date_resolution,
+        "compared_profiles": profile_ids,
         "profiles": rows,
         "ranking": ranking,
         "profile_diff_analyses": profile_diff_analyses,
@@ -4474,9 +4656,9 @@ def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_
     }
     output_dir = ROOT / "reports" / "profile_comparisons"
     output_dir.mkdir(parents=True, exist_ok=True)
-    key = f"{start_date_text}_to_{end_date_text}_{'_vs_'.join(profile_ids)}"
-    json_path = output_dir / f"compare_{key}.json"
-    markdown_path = output_dir / f"compare_{key}.md"
+    stem = _compare_profiles_output_stem(start_date_text, end_date_text, profile_ids)
+    json_path = output_dir / f"{stem}.json"
+    markdown_path = output_dir / f"{stem}.md"
     write_json(json_path, payload)
     write_text(markdown_path, render_compare_profiles_markdown(payload))
 
@@ -4508,6 +4690,25 @@ def run_compare_profiles(profile_ids: list[str], start_date_text: str, end_date_
     print(f"markdown: {markdown_path.relative_to(ROOT)}")
     print(f"json: {json_path.relative_to(ROOT)}")
     return markdown_path, json_path
+
+
+def _compare_profiles_output_stem(
+    start_date_text: str | None,
+    end_date_text: str | None,
+    profile_ids: list[str],
+    *,
+    max_filename_length: int = 200,
+) -> str:
+    start = start_date_text or "unknown_start"
+    end = end_date_text or "unknown_end"
+    readable_key = f"compare_{start}_to_{end}_{'_vs_'.join(profile_ids)}"
+    readable_json_name = f"{readable_key}.json"
+    readable_md_name = f"{readable_key}.md"
+    if len(profile_ids) <= 8 and len(readable_json_name) <= max_filename_length and len(readable_md_name) <= max_filename_length:
+        return readable_key
+    joined = "_vs_".join(profile_ids)
+    digest = hashlib.sha1(joined.encode("utf-8")).hexdigest()[:10]
+    return f"compare_{start}_to_{end}_{len(profile_ids)}profiles_{digest}"
 
 
 PROFILE_REGISTRY_PATH = ROOT / "config" / "profile_registry.yaml"
@@ -5666,6 +5867,18 @@ def build_experiment_batch_summary(
                 "expectancy": row.get("expectancy"),
                 "max_drawdown": row.get("max_drawdown"),
                 "total_trades": row.get("total_trades"),
+                "signal_lost_exit_count": row.get("signal_lost_exit_count"),
+                "signal_lost_exit_avoided_count": row.get("signal_lost_exit_avoided_count"),
+                "hold_extension_count": row.get("hold_extension_count"),
+                "hold_extension_profit_diff": row.get("hold_extension_profit_diff"),
+                "conditional_hold_extension_count": row.get("conditional_hold_extension_count"),
+                "conditional_hold_extension_profit_diff": row.get("conditional_hold_extension_profit_diff"),
+                "conditional_hold_extension_win_rate": row.get("conditional_hold_extension_win_rate"),
+                "conditional_hold_extension_profit_factor": row.get("conditional_hold_extension_profit_factor"),
+                "conditional_hold_extension_rejected_count": row.get("conditional_hold_extension_rejected_count"),
+                "conditional_hold_extension_rejected_reason_breakdown": row.get("conditional_hold_extension_rejected_reason_breakdown"),
+                "extension_decision_reason": row.get("extension_decision_reason"),
+                "profit_by_exit_reason": row.get("profit_by_exit_reason", {}),
                 **monthly_summary,
                 "newly_selected_count": diff.get("newly_selected_count", 0),
                 "removed_count": diff.get("removed_count", 0),
@@ -6268,8 +6481,8 @@ def render_experiment_batch_markdown(summary: dict[str, Any]) -> str:
             "",
             "## Results",
             "",
-            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | monthly_win_rate | winning_months | losing_months | average_monthly_return | worst_month_return | best_month_return | max_consecutive_losing_months | newly_selected_count | removed_count | investor_filter_rejected_count | market_filter | market_candidate_count | market_scored_count | market_selected_count | market_buy_trade_count | market_sell_trade_count | market_profit_by_section | market_profit_factor_by_section | market_filter_excluded_count | market_trade_consistency_warning | result_integrity_status | integrity_error_count | integrity_warning_count | market_filter_violation_count | trade_without_selected_count | out_of_period_trade_count | stale_cache_read_count | score_integrity_status | total_score_mismatch_count | stale_score_cache_count | future_data_leak_count | signal_entry_date_violation_count | no_trade_fallback_selected_count | selected_below_regular_min_score_count | fallback_top_pick_selected_count | invalid_below_threshold_selected_count | selection_diff_count | outcome_diff_count | indicators_last_date | candidates_last_date | scored_candidates_last_date | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | earnings_calendar_records | earnings_filter_rejected_count | earnings_filter_status | practical_effect | effect_reason | verdict | verdict_reason |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| profile_id | role | description | required_plan | enabled_features | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | total_trades | signal_lost_exit_count | signal_lost_exit_avoided_count | hold_extension_count | hold_extension_profit_diff | conditional_hold_extension_count | conditional_hold_extension_profit_diff | conditional_hold_extension_profit_factor | monthly_win_rate | winning_months | losing_months | average_monthly_return | worst_month_return | best_month_return | max_consecutive_losing_months | newly_selected_count | removed_count | investor_filter_rejected_count | market_filter | market_candidate_count | market_scored_count | market_selected_count | market_buy_trade_count | market_sell_trade_count | market_profit_by_section | market_profit_factor_by_section | market_filter_excluded_count | market_trade_consistency_warning | result_integrity_status | integrity_error_count | integrity_warning_count | market_filter_violation_count | trade_without_selected_count | out_of_period_trade_count | stale_cache_read_count | score_integrity_status | total_score_mismatch_count | stale_score_cache_count | future_data_leak_count | signal_entry_date_violation_count | no_trade_fallback_selected_count | selected_below_regular_min_score_count | fallback_top_pick_selected_count | invalid_below_threshold_selected_count | selection_diff_count | outcome_diff_count | indicators_last_date | candidates_last_date | scored_candidates_last_date | feature_data_enabled | feature_scoring_enabled | feature_trigger_count | earnings_calendar_records | earnings_filter_rejected_count | earnings_filter_status | practical_effect | effect_reason | verdict | verdict_reason |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for row in _experiment_summary_result_rows(summary):
@@ -6295,7 +6508,12 @@ def _experiment_summary_table_row(row: dict[str, Any]) -> str:
         f"{_format_optional_number(row.get('final_assets'))} | {_format_optional_number(row.get('net_cumulative_profit'))} | "
         f"{_format_optional_percent(row.get('win_rate'))} | {_format_optional_number(row.get('profit_factor'))} | "
         f"{_format_optional_percent(row.get('expectancy'))} | {_format_optional_percent(row.get('max_drawdown'))} | "
-        f"{row.get('total_trades')} | {_format_optional_percent(row.get('monthly_win_rate'))} | "
+        f"{row.get('total_trades')} | "
+        f"{row.get('signal_lost_exit_count', 0)} | {row.get('signal_lost_exit_avoided_count', 0)} | "
+        f"{row.get('hold_extension_count', 0)} | {_format_optional_number(row.get('hold_extension_profit_diff'))} | "
+        f"{row.get('conditional_hold_extension_count', 0)} | {_format_optional_number(row.get('conditional_hold_extension_profit_diff'))} | "
+        f"{_format_optional_number(row.get('conditional_hold_extension_profit_factor'))} | "
+        f"{_format_optional_percent(row.get('monthly_win_rate'))} | "
         f"{row.get('winning_months') if row.get('winning_months') is not None else ''} | "
         f"{row.get('losing_months') if row.get('losing_months') is not None else ''} | "
         f"{_format_optional_percent(row.get('average_monthly_return'))} | {_format_optional_percent(row.get('worst_month_return'))} | "
@@ -6547,6 +6765,7 @@ def _profile_compare_row(config: dict[str, Any], db_path: Path, start_date_text:
     market_coverage = _backtest_summary_market_coverage(profile_id, start_date_text, end_date_text)
     if not _market_coverage_has_counts(market_coverage) and scoring_rows:
         market_coverage = _market_coverage_from_scoring_rows(scoring_rows)
+    holding_audit = _holding_signal_revaluation_summary(closed)
     row = {
         "profile_id": profile_id,
         "profile_name": profile_name_from(config),
@@ -6565,6 +6784,19 @@ def _profile_compare_row(config: dict[str, Any], db_path: Path, start_date_text:
         "expectancy": expectancy,
         "max_drawdown": max_drawdown,
         "average_holding_days": _average_number(holding_days),
+        "signal_lost_exit_count": holding_audit.get("signal_lost_exit_count"),
+        "signal_lost_exit_avoided_count": holding_audit.get("signal_lost_exit_avoided_count"),
+        "hold_extension_count": holding_audit.get("hold_extension_count"),
+        "hold_extension_profit_diff": holding_audit.get("hold_extension_profit_diff"),
+        "conditional_hold_extension_count": holding_audit.get("conditional_hold_extension_count"),
+        "conditional_hold_extension_profit_diff": holding_audit.get("conditional_hold_extension_profit_diff"),
+        "conditional_hold_extension_win_rate": holding_audit.get("conditional_hold_extension_win_rate"),
+        "conditional_hold_extension_profit_factor": holding_audit.get("conditional_hold_extension_profit_factor"),
+        "conditional_hold_extension_rejected_count": holding_audit.get("conditional_hold_extension_rejected_count"),
+        "conditional_hold_extension_rejected_reason_breakdown": holding_audit.get("conditional_hold_extension_rejected_reason_breakdown"),
+        "conditional_hold_extension_rejected_samples": holding_audit.get("conditional_hold_extension_rejected_samples"),
+        "extension_decision_reason": holding_audit.get("extension_decision_reason"),
+        "profit_by_exit_reason": holding_audit.get("profit_by_exit_reason"),
         "total_trades": pf_metrics["total_trades"],
         "closed_trade_count": pf_metrics["closed_trade_count"],
         "win_count": pf_metrics["win_count"],
@@ -6605,6 +6837,20 @@ def _profile_compare_row_with_backtest_summary(
         "win_count",
         "loss_count",
         "excluded_order_event_count",
+        "signal_lost_exit_count",
+        "signal_lost_exit_avoided_count",
+        "hold_extension_count",
+        "hold_extension_profit_diff",
+        "conditional_hold_extension_count",
+        "conditional_hold_extension_profit_diff",
+        "conditional_hold_extension_win_rate",
+        "conditional_hold_extension_profit_factor",
+        "conditional_hold_extension_rejected_count",
+        "conditional_hold_extension_rejected_reason_breakdown",
+        "conditional_hold_extension_rejected_samples",
+        "extension_decision_reason",
+        "average_holding_days",
+        "profit_by_exit_reason",
     ]
     for key in summary_metric_keys:
         if key in summary:
@@ -6838,10 +7084,9 @@ def _build_profile_diff_analysis_for_pair(
     newly_selected_keys = sorted(set(target_selected) - set(base_selected))
     removed_keys = sorted(set(base_selected) - set(target_selected))
     outcome_diff = _trade_outcome_diff(base_trade_rows, target_trade_rows)
-    summary_diff = _summary_diff(
-        _profile_compare_row(base_config, db_path, start_date_text, end_date_text),
-        _profile_compare_row(target_config, db_path, start_date_text, end_date_text),
-    )
+    base_compare_row = _profile_compare_row(base_config, db_path, start_date_text, end_date_text)
+    target_compare_row = _profile_compare_row(target_config, db_path, start_date_text, end_date_text)
+    summary_diff = _summary_diff(base_compare_row, target_compare_row)
     target_market_coverage = _backtest_summary_market_coverage(target_profile_id, start_date_text, end_date_text)
     selection_diff_count = len(newly_selected_keys) + len(removed_keys)
     outcome_diff_count = outcome_diff["outcome_diff_count"]
@@ -6861,6 +7106,11 @@ def _build_profile_diff_analysis_for_pair(
         "target_conditional_selected_count": _conditional_selected_count(target_rows),
         "base_conditional_rejected_count": _conditional_rejected_count(base_rows),
         "target_conditional_rejected_count": _conditional_rejected_count(target_rows),
+        "target_conditional_hold_extension_count": target_compare_row.get("conditional_hold_extension_count"),
+        "target_conditional_hold_extension_rejected_count": target_compare_row.get("conditional_hold_extension_rejected_count"),
+        "target_conditional_hold_extension_rejected_reason_breakdown": target_compare_row.get("conditional_hold_extension_rejected_reason_breakdown"),
+        "target_conditional_hold_extension_rejected_samples": target_compare_row.get("conditional_hold_extension_rejected_samples"),
+        "target_extension_decision_reason": target_compare_row.get("extension_decision_reason"),
         "investor_filter_rejected_count": _investor_filter_rejected_count(target_rows),
         "market_filter": {
             "base_allowed_sections": sorted(allowed_market_sections(base_config)),
@@ -6900,7 +7150,7 @@ def _investor_filter_rejected_count(rows: list[dict[str, Any]]) -> int:
 def _load_scoring_rows_for_profile(db_path: Path, profile_id: str, start_date_text: str, end_date_text: str) -> list[dict[str, Any]]:
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
-        return [
+        rows = [
             dict(row)
             for row in connection.execute(
                 """
@@ -6912,6 +7162,88 @@ def _load_scoring_rows_for_profile(db_path: Path, profile_id: str, start_date_te
                 (profile_id, start_date_text, end_date_text),
             )
         ]
+    if rows:
+        return rows
+    return _load_scoring_rows_from_existing_outputs(profile_id, start_date_text, end_date_text)
+
+
+def _load_scoring_rows_from_existing_outputs(profile_id: str, start_date_text: str, end_date_text: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for path in _scoring_output_paths_for_period(profile_id, start_date_text, end_date_text):
+        payload_rows = _scoring_rows_from_payload_path(path, profile_id, start_date_text, end_date_text)
+        if payload_rows:
+            rows.extend(payload_rows)
+    rows.sort(key=lambda item: (str(item.get("date") or ""), _safe_rank_sort_key(item.get("rank")), str(item.get("code") or "")))
+    return rows
+
+
+def _scoring_output_paths_for_period(profile_id: str, start_date_text: str, end_date_text: str) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    seen_dates: set[str] = set()
+    roots = [
+        ROOT / "logs" / "backtests" / profile_id / f"{start_date_text}_to_{end_date_text}",
+        ROOT / "data" / "processed" / profile_id,
+        ROOT / "logs" / "scoring" / profile_id,
+    ]
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in sorted(root.glob("scoring_*.json")) + sorted(root.glob("scored_candidates_*.json")):
+            if path in seen:
+                continue
+            target_date = _date_from_scoring_output_name(path)
+            if target_date and start_date_text <= target_date <= end_date_text:
+                if target_date in seen_dates:
+                    continue
+                paths.append(path)
+                seen.add(path)
+                seen_dates.add(target_date)
+    return paths
+
+
+def _date_from_scoring_output_name(path: Path) -> str:
+    stem = path.stem
+    for prefix in ("scoring_", "scored_candidates_"):
+        if stem.startswith(prefix):
+            value = stem.removeprefix(prefix)
+            return value if len(value) == 10 else ""
+    return ""
+
+
+def _scoring_rows_from_payload_path(path: Path, profile_id: str, start_date_text: str, end_date_text: str) -> list[dict[str, Any]]:
+    try:
+        payload = read_json(path)
+    except Exception:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    target_date = str(payload.get("date") or _date_from_scoring_output_name(path))
+    if not target_date or not (start_date_text <= target_date <= end_date_text):
+        return []
+    scores = payload.get("scores", [])
+    if not isinstance(scores, list):
+        return []
+    rows = []
+    for item in scores:
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        row.setdefault("date", target_date)
+        row.setdefault("profile_id", payload.get("profile_id") or profile_id)
+        row.setdefault("profile_name", payload.get("profile_name") or profile_id)
+        row.setdefault("source_provider", payload.get("source_provider"))
+        row.setdefault("config_version", payload.get("config_version"))
+        row["_selection_diff_source"] = str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path)
+        rows.append(row)
+    return rows
+
+
+def _safe_rank_sort_key(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("inf")
 
 
 def _load_trade_rows_for_profile(db_path: Path, profile_id: str, start_date_text: str, end_date_text: str) -> list[dict[str, Any]]:
@@ -7163,6 +7495,9 @@ def _trade_outcome_diff_record(
         "target_profit_rate": _trade_profit_rate_value(target),
         "base_holding_days": base.get("holding_days"),
         "target_holding_days": target.get("holding_days"),
+        "target_conditional_hold_extension_applied": bool(target.get("conditional_hold_extension_applied")),
+        "target_conditional_hold_extension_reason": target.get("conditional_hold_extension_reason") or target.get("holding_extension_reason"),
+        "target_conditional_hold_extension_trigger_profit_rate": target.get("conditional_hold_extension_trigger_profit_rate"),
     }
 
 
@@ -7266,7 +7601,8 @@ def _selection_diff_record(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _effective_config_differences(base_config: dict[str, Any], target_config: dict[str, Any]) -> list[dict[str, Any]]:
-    keys = [
+    nested_keys = [
+        ("trading", "max_holding_days"),
         ("market_filter", "risk_off_buy_policy"),
         ("market_filter", "risk_off_max_buy_orders"),
         ("market_filter", "risk_off_min_score"),
@@ -7281,13 +7617,32 @@ def _effective_config_differences(base_config: dict[str, Any], target_config: di
         ("execution", "stop_loss_execution"),
     ]
     differences = []
-    for section, key in keys:
+    for section, key in nested_keys:
         base_value = (base_config.get(section) or {}).get(key)
         target_value = (target_config.get(section) or {}).get(key)
         if base_value != target_value:
             differences.append(
                 {
                     "key": f"{section}.{key}",
+                    "base": base_value,
+                    "target": target_value,
+                }
+            )
+    root_keys = [
+        "conditional_hold_extension",
+        "holding_revaluation",
+        "holding_signal_revaluation",
+        "capital_utilization_policy",
+        "affordable_fallback_buy",
+        "dynamic_exposure",
+    ]
+    for key in root_keys:
+        base_value = base_config.get(key)
+        target_value = target_config.get(key)
+        if base_value != target_value:
+            differences.append(
+                {
+                    "key": key,
                     "base": base_value,
                     "target": target_value,
                 }
@@ -7360,9 +7715,10 @@ def render_compare_profiles_markdown(payload: dict[str, Any]) -> str:
         f"- effective_start_date: {resolution.get('effective_start_date', payload['start_date'])}",
         f"- effective_end_date: {resolution.get('effective_end_date', payload['end_date'])}",
         f"- source: start={resolution.get('start_date_source', 'default')} end={resolution.get('end_date_source', 'default')}",
+        f"- compared_profiles: {', '.join(payload.get('compared_profiles') or [row.get('profile_id', '') for row in payload.get('profiles', [])])}",
         "",
-        "| profile | stop_loss_execution | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | avg_holding_days | closed | wins | losses | excluded | avg_win | avg_loss | total_trades | loss_over_stop_count | conditional_selected | conditional_rejected |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| profile | stop_loss_execution | final_assets | net_cumulative_profit | win_rate | profit_factor | expectancy | max_drawdown | avg_holding_days | signal_lost_exit | signal_lost_avoided | hold_extension | hold_extension_profit | conditional_hold_extension | conditional_hold_extension_profit | conditional_hold_extension_pf | closed | wins | losses | excluded | avg_win | avg_loss | total_trades | loss_over_stop_count | conditional_selected | conditional_rejected |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in payload["profiles"]:
         lines.append(
@@ -7376,6 +7732,13 @@ def render_compare_profiles_markdown(payload: dict[str, Any]) -> str:
             f"{_format_optional_percent(row.get('expectancy'))} | "
             f"{_format_optional_percent(row.get('max_drawdown'))} | "
             f"{_format_optional_number(row.get('average_holding_days'))} | "
+            f"{row.get('signal_lost_exit_count')} | "
+            f"{row.get('signal_lost_exit_avoided_count')} | "
+            f"{row.get('hold_extension_count')} | "
+            f"{_format_optional_yen(row.get('hold_extension_profit_diff'))} | "
+            f"{row.get('conditional_hold_extension_count')} | "
+            f"{_format_optional_yen(row.get('conditional_hold_extension_profit_diff'))} | "
+            f"{_format_optional_number(row.get('conditional_hold_extension_profit_factor'))} | "
             f"{row.get('closed_trade_count')} | "
             f"{row.get('win_count')} | "
             f"{row.get('loss_count')} | "
@@ -7450,6 +7813,10 @@ def _profile_diff_analysis_lines(analysis: dict[str, Any]) -> list[str]:
         f"- target conditional selected count: {analysis.get('target_conditional_selected_count')}",
         f"- base conditional rejected count: {analysis.get('base_conditional_rejected_count')}",
         f"- target conditional rejected count: {analysis.get('target_conditional_rejected_count')}",
+        f"- target conditional hold extension count: {analysis.get('target_conditional_hold_extension_count')}",
+        f"- target conditional hold extension rejected count: {analysis.get('target_conditional_hold_extension_rejected_count')}",
+        f"- target conditional hold extension rejected reasons: {_compact_json(analysis.get('target_conditional_hold_extension_rejected_reason_breakdown') or {})}",
+        f"- target extension decision reasons: {_compact_json(analysis.get('target_extension_decision_reason') or {})}",
         f"- investor_filter_rejected_count: {analysis.get('investor_filter_rejected_count', 0)}",
         f"- market_filter: {_compact_json(analysis.get('market_filter', {}))}",
         f"- market_candidate_count: {_compact_json(analysis.get('market_candidate_count', {}))}",
@@ -7488,12 +7855,24 @@ def _profile_diff_analysis_lines(analysis: dict[str, Any]) -> list[str]:
         ]
     )
     lines.extend(_trade_outcome_diff_lines(outcome.get("outcome_diffs", [])))
+    conditional_items = [
+        item
+        for item in outcome.get("outcome_diffs", [])
+        if item.get("target_conditional_hold_extension_applied")
+    ]
+    if conditional_items:
+        lines.extend(["", "## Conditional Hold Extension Detail", ""])
+        lines.extend(_conditional_hold_extension_detail_lines(conditional_items))
+    rejected_samples = analysis.get("target_conditional_hold_extension_rejected_samples") or []
+    if rejected_samples:
+        lines.extend(["", "## Conditional Hold Extension Rejected Detail", ""])
+        lines.extend(_conditional_hold_extension_rejected_detail_lines(rejected_samples))
     lines.extend(["", "### Effective Config Differences", ""])
     differences = analysis.get("effective_config_differences") or []
     if differences:
         lines.extend(
             [
-                f"- {item.get('key')}: {item.get('base')} -> {item.get('target')}"
+                f"- {item.get('key')}: {_compact_json(item.get('base'))} -> {_compact_json(item.get('target'))}"
                 for item in differences
             ]
         )
@@ -7520,6 +7899,44 @@ def _trade_outcome_diff_lines(items: list[dict[str, Any]]) -> list[str]:
         )
         for item in items[:50]
     ]
+
+
+def _conditional_hold_extension_detail_lines(items: list[dict[str, Any]]) -> list[str]:
+    lines = [
+        "| code | name | entry_date | original_exit_date | extended_exit_date | original_profit | extended_profit | diff | reason |",
+        "|---|---|---|---|---|---:|---:|---:|---|",
+    ]
+    for item in items[:50]:
+        base_profit = _to_float(item.get("base_profit"))
+        target_profit = _to_float(item.get("target_profit"))
+        diff = round(target_profit - base_profit, 2) if base_profit is not None and target_profit is not None else None
+        lines.append(
+            "| "
+            f"{item.get('code')} | {item.get('name') or ''} | {item.get('entry_date')} | "
+            f"{item.get('base_exit_date') or ''} | {item.get('target_exit_date') or ''} | "
+            f"{_format_optional_yen(base_profit)} | {_format_optional_yen(target_profit)} | {_format_optional_yen(diff)} | "
+            f"{item.get('target_conditional_hold_extension_reason') or ''} |"
+        )
+    return lines
+
+
+def _conditional_hold_extension_rejected_detail_lines(items: list[dict[str, Any]]) -> list[str]:
+    lines = [
+        "| code | name | entry_date | exit_date | reject_reason | profit_rate_at_max_holding | relative_strength_score | close | ma25 | previous_ma25 |",
+        "|---|---|---|---|---|---:|---:|---:|---:|---:|",
+    ]
+    for item in items[:50]:
+        lines.append(
+            "| "
+            f"{item.get('code')} | {item.get('name') or ''} | {item.get('entry_date') or ''} | {item.get('exit_date') or ''} | "
+            f"{item.get('reject_reason') or ''} | "
+            f"{_format_optional_percent(item.get('profit_rate_at_max_holding'))} | "
+            f"{_format_optional_number(item.get('relative_strength_score'))} | "
+            f"{_format_optional_number(item.get('close'))} | "
+            f"{_format_optional_number(item.get('ma25'))} | "
+            f"{_format_optional_number(item.get('previous_ma25'))} |"
+        )
+    return lines
 
 
 def _selection_diff_lines(items: list[dict[str, Any]]) -> list[str]:
@@ -12751,7 +13168,15 @@ RUNTIME_TRADE_FIELDS = {
     "affordable_fallback_replaced_by_code", "affordable_fallback_no_candidate",
     "holding_signal_status", "holding_entry_score", "holding_current_score",
     "holding_score_drop", "holding_effective_max_days", "holding_reselected",
-    "holding_extended",
+    "holding_extended", "conditional_hold_extension_applied",
+    "conditional_hold_extension_count", "conditional_hold_extension_reason",
+    "conditional_hold_extension_trigger_profit_rate",
+    "conditional_hold_extension_rejected", "conditional_hold_extension_rejected_reason",
+    "conditional_hold_extension_profit_rate_at_max_holding",
+    "conditional_hold_extension_close_at_max_holding",
+    "conditional_hold_extension_ma25_at_max_holding",
+    "conditional_hold_extension_previous_ma25_at_max_holding",
+    "conditional_hold_extension_relative_strength_score_at_max_holding",
     "config_version",
 }
 
@@ -14189,6 +14614,7 @@ def enrich_candidates_with_position_prices(
                 "volume": indicator.get("volume"),
                 "ma5": indicator.get("ma5"),
                 "ma25": indicator.get("ma25"),
+                "previous_ma25": indicator.get("previous_ma25"),
                 "volume_ratio": indicator.get("volume_ratio"),
                 "rsi": indicator.get("rsi"),
                 "macd": indicator.get("macd"),
@@ -14201,6 +14627,17 @@ def enrich_candidates_with_position_prices(
                 "atr": indicator.get("atr"),
                 "turnover_value": indicator.get("turnover_value"),
                 "five_day_volatility": indicator.get("five_day_volatility"),
+                "stock_return_5d": indicator.get("stock_return_5d"),
+                "stock_return_10d": indicator.get("stock_return_10d"),
+                "stock_return_20d": indicator.get("stock_return_20d"),
+                "benchmark_source": indicator.get("benchmark_source"),
+                "benchmark_return_5d": indicator.get("benchmark_return_5d"),
+                "benchmark_return_10d": indicator.get("benchmark_return_10d"),
+                "benchmark_return_20d": indicator.get("benchmark_return_20d"),
+                "relative_strength_5d": indicator.get("relative_strength_5d"),
+                "relative_strength_10d": indicator.get("relative_strength_10d"),
+                "relative_strength_20d": indicator.get("relative_strength_20d"),
+                "relative_strength_score": indicator.get("relative_strength_score"),
                 "candle_type": indicator.get("candle_type"),
                 "candlestick_signals": indicator.get("candlestick_signals", []),
                 "sector_momentum_score": indicator.get("sector_momentum_score"),
@@ -14346,7 +14783,24 @@ def write_backtest_summary(
         "holding_signal_revaluation_audit": holding_signal_revaluation_audit,
         "reselected_hold_count": holding_signal_revaluation_audit["reselected_hold_count"],
         "extended_holding_count": holding_signal_revaluation_audit["extended_holding_count"],
+        "hold_extension_count": holding_signal_revaluation_audit["hold_extension_count"],
+        "hold_extension_trigger_count": holding_signal_revaluation_audit["hold_extension_trigger_count"],
+        "extended_holding_trade_count": holding_signal_revaluation_audit["extended_holding_trade_count"],
+        "extension_profit_total": holding_signal_revaluation_audit["extension_profit_total"],
+        "hold_extension_profit_diff": holding_signal_revaluation_audit["hold_extension_profit_diff"],
+        "extension_win_rate": holding_signal_revaluation_audit["extension_win_rate"],
+        "extension_profit_factor": holding_signal_revaluation_audit["extension_profit_factor"],
+        "conditional_hold_extension_count": holding_signal_revaluation_audit["conditional_hold_extension_count"],
+        "conditional_hold_extension_profit_diff": holding_signal_revaluation_audit["conditional_hold_extension_profit_diff"],
+        "conditional_hold_extension_win_rate": holding_signal_revaluation_audit["conditional_hold_extension_win_rate"],
+        "conditional_hold_extension_profit_factor": holding_signal_revaluation_audit["conditional_hold_extension_profit_factor"],
+        "conditional_hold_extension_rejected_count": holding_signal_revaluation_audit["conditional_hold_extension_rejected_count"],
+        "conditional_hold_extension_rejected_reason_breakdown": holding_signal_revaluation_audit["conditional_hold_extension_rejected_reason_breakdown"],
+        "conditional_hold_extension_rejected_samples": holding_signal_revaluation_audit["conditional_hold_extension_rejected_samples"],
+        "extension_decision_reason": holding_signal_revaluation_audit["extension_decision_reason"],
+        "normal_exit_count": holding_signal_revaluation_audit["normal_exit_count"],
         "signal_lost_exit_count": holding_signal_revaluation_audit["signal_lost_exit_count"],
+        "signal_lost_exit_avoided_count": holding_signal_revaluation_audit["signal_lost_exit_avoided_count"],
         "score_deteriorated_exit_count": holding_signal_revaluation_audit["score_deteriorated_exit_count"],
         "average_holding_days": holding_signal_revaluation_audit["average_holding_days"],
         "profit_by_exit_reason": holding_signal_revaluation_audit["profit_by_exit_reason"],
@@ -14429,6 +14883,21 @@ def _date_resolution_with_coverage(
 def _holding_signal_revaluation_summary(closed_trades: list[dict[str, Any]]) -> dict[str, Any]:
     profit_by_reason: dict[str, dict[str, Any]] = {}
     holding_days_values: list[float] = []
+    extended_trades = [trade for trade in closed_trades if _truthy_value(trade.get("holding_extended"))]
+    extension_profit_total = 0.0
+    extension_gross_profit = 0.0
+    extension_gross_loss = 0.0
+    extension_win_count = 0
+    extension_holding_days: list[float] = []
+    conditional_extended_trades = [trade for trade in closed_trades if _truthy_value(trade.get("conditional_hold_extension_applied"))]
+    conditional_profit_total = 0.0
+    conditional_gross_profit = 0.0
+    conditional_gross_loss = 0.0
+    conditional_win_count = 0
+    conditional_reasons: dict[str, int] = {}
+    conditional_rejected_count = 0
+    conditional_rejected_reasons: dict[str, int] = {}
+    conditional_rejected_samples: list[dict[str, Any]] = []
     for trade in closed_trades:
         holding_days = _safe_float(trade.get("holding_days"))
         if holding_days is not None:
@@ -14450,16 +14919,99 @@ def _holding_signal_revaluation_summary(closed_trades: list[dict[str, Any]]) -> 
         row["gross_profit"] += float(trade.get("gross_profit") or trade.get("profit") or 0)
         if holding_days is not None:
             row["_holding_days_sum"] += holding_days
+        if _truthy_value(trade.get("holding_extended")):
+            profit = float(trade.get("profit") or trade.get("net_profit") or 0)
+            gross_profit = float(trade.get("gross_profit") or trade.get("profit") or 0)
+            extension_profit_total += profit
+            if gross_profit > 0:
+                extension_gross_profit += gross_profit
+                extension_win_count += 1
+            elif gross_profit < 0:
+                extension_gross_loss += gross_profit
+            if holding_days is not None:
+                extension_holding_days.append(holding_days)
+        if _truthy_value(trade.get("conditional_hold_extension_applied")):
+            profit = float(trade.get("profit") or trade.get("net_profit") or 0)
+            gross_profit = float(trade.get("gross_profit") or trade.get("profit") or 0)
+            conditional_profit_total += profit
+            if gross_profit > 0:
+                conditional_gross_profit += gross_profit
+                conditional_win_count += 1
+            elif gross_profit < 0:
+                conditional_gross_loss += gross_profit
+            reason = str(trade.get("conditional_hold_extension_reason") or trade.get("holding_extension_reason") or "conditional_profit_extension")
+            conditional_reasons[reason] = conditional_reasons.get(reason, 0) + 1
+        if _truthy_value(trade.get("conditional_hold_extension_rejected")):
+            conditional_rejected_count += 1
+            reasons = str(trade.get("conditional_hold_extension_rejected_reason") or "unknown").split("+")
+            for reason in reasons:
+                reason = reason or "unknown"
+                conditional_rejected_reasons[reason] = conditional_rejected_reasons.get(reason, 0) + 1
+            if len(conditional_rejected_samples) < 20:
+                conditional_rejected_samples.append(
+                    {
+                        "code": trade.get("code"),
+                        "name": trade.get("name"),
+                        "entry_date": trade.get("entry_date"),
+                        "exit_date": trade.get("exit_date"),
+                        "extended": bool(_truthy_value(trade.get("conditional_hold_extension_applied"))),
+                        "rejected": True,
+                        "reject_reason": trade.get("conditional_hold_extension_rejected_reason") or "unknown",
+                        "profit_rate_at_max_holding": trade.get("conditional_hold_extension_profit_rate_at_max_holding")
+                        if trade.get("conditional_hold_extension_profit_rate_at_max_holding") is not None
+                        else trade.get("holding_unrealized_profit_rate"),
+                        "relative_strength_score": trade.get("conditional_hold_extension_relative_strength_score_at_max_holding")
+                        if trade.get("conditional_hold_extension_relative_strength_score_at_max_holding") is not None
+                        else trade.get("relative_strength_score"),
+                        "close": trade.get("conditional_hold_extension_close_at_max_holding") or trade.get("exit_price"),
+                        "ma25": trade.get("conditional_hold_extension_ma25_at_max_holding") or trade.get("ma25"),
+                        "previous_ma25": trade.get("conditional_hold_extension_previous_ma25_at_max_holding") or trade.get("previous_ma25"),
+                    }
+                )
     for row in profit_by_reason.values():
         count = int(row.get("count") or 0)
         row["profit"] = round(float(row.get("profit") or 0), 2)
         row["gross_profit"] = round(float(row.get("gross_profit") or 0), 2)
         row["avg_profit"] = round(row["profit"] / count, 2) if count else None
         row["avg_holding_days"] = round(float(row.pop("_holding_days_sum", 0.0)) / count, 2) if count else None
+    extended_count = len(extended_trades)
+    extension_profit_factor = None
+    if extension_gross_loss < 0:
+        extension_profit_factor = round(extension_gross_profit / abs(extension_gross_loss), 4)
+    elif extension_gross_profit > 0:
+        extension_profit_factor = None
+    conditional_count = len(conditional_extended_trades)
+    conditional_profit_factor = None
+    if conditional_gross_loss < 0:
+        conditional_profit_factor = round(conditional_gross_profit / abs(conditional_gross_loss), 4)
+    elif conditional_gross_profit > 0:
+        conditional_profit_factor = None
+    normal_exit_count = sum(1 for trade in closed_trades if trade.get("exit_reason") not in {"シグナル消失", "スコア低下"})
     return {
         "reselected_hold_count": sum(1 for trade in closed_trades if _truthy_value(trade.get("holding_reselected"))),
-        "extended_holding_count": sum(1 for trade in closed_trades if _truthy_value(trade.get("holding_extended"))),
+        "extended_holding_count": extended_count,
+        "hold_extension_count": extended_count,
+        "extended_holding_trade_count": extended_count,
+        "hold_extension_trigger_count": sum(1 for trade in closed_trades if _truthy_value(trade.get("holding_reselected"))),
+        "extension_profit_total": round(extension_profit_total, 2),
+        "hold_extension_profit_diff": round(extension_profit_total, 2),
+        "extension_win_rate": round(extension_win_count / extended_count, 4) if extended_count else None,
+        "extension_profit_factor": extension_profit_factor,
+        "extension_average_holding_days": round(sum(extension_holding_days) / len(extension_holding_days), 2) if extension_holding_days else None,
+        "conditional_hold_extension_count": conditional_count,
+        "conditional_hold_extension_profit_diff": round(conditional_profit_total, 2),
+        "conditional_hold_extension_win_rate": round(conditional_win_count / conditional_count, 4) if conditional_count else None,
+        "conditional_hold_extension_profit_factor": conditional_profit_factor,
+        "conditional_hold_extension_profit": round(conditional_profit_total, 2),
+        "conditional_hold_extension_pf": conditional_profit_factor,
+        "conditional_hold_extension_rejected_count": conditional_rejected_count,
+        "conditional_hold_extension_rejected_reason_breakdown": dict(sorted(conditional_rejected_reasons.items())),
+        "conditional_hold_extension_rejected_samples": conditional_rejected_samples,
+        "extension_decision_reason": dict(sorted(conditional_reasons.items())),
+        "normal_exit_count": normal_exit_count,
+        "max_holding_days": max(holding_days_values) if holding_days_values else None,
         "signal_lost_exit_count": sum(1 for trade in closed_trades if trade.get("exit_reason") == "シグナル消失"),
+        "signal_lost_exit_avoided_count": sum(int(trade.get("holding_signal_lost_exit_avoided_count") or 0) for trade in closed_trades),
         "score_deteriorated_exit_count": sum(1 for trade in closed_trades if trade.get("exit_reason") == "スコア低下"),
         "average_holding_days": round(sum(holding_days_values) / len(holding_days_values), 2) if holding_days_values else None,
         "profit_by_exit_reason": dict(sorted(profit_by_reason.items())),
@@ -20018,6 +20570,24 @@ def write_trades_csv(path: Path, trades: list[dict[str, Any]]) -> None:
         "holding_effective_max_days",
         "holding_reselected",
         "holding_extended",
+        "holding_signal_lost_streak",
+        "holding_signal_lost_exit_avoided",
+        "holding_signal_lost_exit_avoided_count",
+        "holding_extension_count",
+        "holding_extension_eligible",
+        "holding_extension_reason",
+        "holding_unrealized_profit_rate",
+        "conditional_hold_extension_applied",
+        "conditional_hold_extension_count",
+        "conditional_hold_extension_reason",
+        "conditional_hold_extension_trigger_profit_rate",
+        "conditional_hold_extension_rejected",
+        "conditional_hold_extension_rejected_reason",
+        "conditional_hold_extension_profit_rate_at_max_holding",
+        "conditional_hold_extension_close_at_max_holding",
+        "conditional_hold_extension_ma25_at_max_holding",
+        "conditional_hold_extension_previous_ma25_at_max_holding",
+        "conditional_hold_extension_relative_strength_score_at_max_holding",
         "broker_provider",
         "order_status",
         "config_version",

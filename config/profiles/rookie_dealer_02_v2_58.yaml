@@ -1,10 +1,25 @@
 # AI Fund Lab profile YAML
-# rookie_dealer_02_v2_50 をベースに、余剰資金のaffordable fallbackを検証します。
+# rookie_dealer_02_v2_57 をベースに、最大保有期間到達時の条件付き延長をより現実的なトレンド継続条件で検証するprofileです。
+# 秘密情報は書かず、APIキーや口座情報は .env に置きます。
 
-profile_id: rookie_dealer_02_v2_51
-profile_name: 新人ディーラー2号 v2.51
-description: v2.50ベース 余剰資金 affordable fallback 検証
+profile_id: rookie_dealer_02_v2_58
+profile_name: 新人ディーラー2号 v2.58
+description: 最大保有期間到達時、含み益3%以上かつMA25上昇トレンド継続時のみ2営業日延長
 disable_single_order_amount_limit: true
+
+character:
+  role: 新人ディーラー
+  personality:
+    - 教科書通り
+    - データ重視
+    - 損切り最優先
+    - 過熱銘柄を追わない
+    - 出来高確認を重視
+    - リスク管理重視
+  catchphrases:
+    - 過熱した銘柄は追いません
+    - 出来高2倍以上を確認します
+    - 市場平均に勝つ銘柄を優先します
 
 features:
   market_context: true
@@ -21,7 +36,10 @@ scoring:
   relative_strength_score_weight: 10
   relative_strength:
     benchmark: topix
-    windows: [5, 10, 20]
+    windows:
+      - 5
+      - 10
+      - 20
     score_rules:
       rs_5d_gt: 0.03
       rs_5d_points: 3
@@ -52,6 +70,20 @@ trading:
   use_round_lot: true
   round_lot_size: 100
 
+conditional_hold_extension:
+  enabled: true
+  require_trend_continuation: true
+  skip_ma5_condition: true
+  require_ma25_uptrend: true
+  min_unrealized_profit_rate: 0.03
+  minimum_profit_for_extension: 0.03
+  min_relative_strength_score: 60
+  minimum_relative_strength_score: 60
+  profit_reject_reason: profit_below_threshold
+  relative_strength_reject_reason: relative_strength_below_threshold
+  max_holding_days: 7
+  max_extension_count: 1
+
 execution:
   stop_loss_execution: intraday_stop
 
@@ -66,38 +98,11 @@ selection:
   reject_overheated_rsi: true
 
 market_filter:
-  allowed_sections:
-    - TSEPrime
-    - TSEStandard
   risk_off_min_score: 50
-
-screening:
-  market_overrides:
-    TSEStandard:
-      min_turnover_value: 300000000
-      min_volume_ratio: 1.2
-      require_close_above_ma5: false
-      require_ma5_above_ma25: false
-      rsi_min: 35
-      rsi_max: 75
-      max_five_day_volatility: 0.16
-      fallback:
-        min_turnover_value: 200000000
-        min_volume_ratio: 1.0
-        rsi_min: 30
-        rsi_max: 78
-        max_five_day_volatility: 0.20
 
 volume_filter:
   enabled: true
   min_volume_ratio: 2.0
-
-affordable_fallback_buy:
-  enabled: true
-  surplus_after_selection: true
-  replace_unaffordable_selected: false
-  min_total_score: 45
-  max_rank_in_day: 20
 
 capital_utilization_policy:
   enabled: true
