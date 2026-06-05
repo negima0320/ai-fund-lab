@@ -17,7 +17,7 @@ data/processed/
 
 # ML generated data and synced cache
 data/ml/
-data/cache/jquants/prices/
+data/cache/
 models/ml/
 
 # Generated reports
