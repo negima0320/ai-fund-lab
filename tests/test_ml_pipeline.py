@@ -46,6 +46,32 @@ class FakeLabelGenerator:
         return [self.root / f"labels_{as_of_date}.parquet"]
 
 
+class FakeCandidateExporter:
+    def __init__(self, calls: list[str], root: Path) -> None:
+        self.calls = calls
+        self.root = root
+
+    def build_candidates(
+        self,
+        target_date: str,
+        top_n: int,
+        min_turnover_value: float,
+        max_bad_entry_probability: float,
+    ) -> pd.DataFrame:
+        self.calls.append(
+            f"build_candidates:{target_date}:{top_n}:{int(min_turnover_value)}:{max_bad_entry_probability}"
+        )
+        return pd.DataFrame({"date": [pd.Timestamp(target_date)], "code": ["1001"]})
+
+    def save_csv(self, df: pd.DataFrame, target_date: str) -> Path:
+        self.calls.append(f"save_candidates_csv:{target_date}")
+        return self.root / f"ai_candidates_{target_date}.csv"
+
+    def save_markdown(self, df: pd.DataFrame, target_date: str) -> Path:
+        self.calls.append(f"save_candidates_md:{target_date}")
+        return self.root / f"ai_candidates_{target_date}.md"
+
+
 def _touch_current_models(model_root: Path) -> None:
     model_root.mkdir(parents=True, exist_ok=True)
     (model_root / "feature_columns.json").write_text("[]", encoding="utf-8")
@@ -58,6 +84,7 @@ def _pipeline(tmp_path: Path, calls: list[str], model_root: Path) -> DailyMLPipe
         feature_builder=FakeFeatureBuilder(calls, tmp_path / "features"),
         predictor=FakePredictor(calls, tmp_path / "predictions"),
         label_generator=FakeLabelGenerator(calls, tmp_path / "labels"),
+        candidate_exporter=FakeCandidateExporter(calls, tmp_path / "candidates"),
         model_root=model_root,
     )
 
@@ -74,10 +101,15 @@ def test_daily_pipeline_runs_steps_in_order_when_models_exist(tmp_path) -> None:
         "save_features:2026-06-01",
         "predict:2026-06-01",
         "save_predictions:2026-06-01",
+        "build_candidates:2026-06-01:10:50000000:0.7",
+        "save_candidates_csv:2026-06-01",
+        "save_candidates_md:2026-06-01",
         "update_labels:2026-06-01",
     ]
     assert result["features_path"] == tmp_path / "features" / "features_2026-06-01.parquet"
     assert result["predictions_path"] == tmp_path / "predictions" / "predictions_2026-06-01.parquet"
+    assert result["candidate_csv_path"] == tmp_path / "candidates" / "ai_candidates_2026-06-01.csv"
+    assert result["candidate_md_path"] == tmp_path / "candidates" / "ai_candidates_2026-06-01.md"
     assert result["labels_paths"] == [tmp_path / "labels" / "labels_2026-06-01.parquet"]
     assert result["warnings"] == []
 
@@ -94,8 +126,13 @@ def test_daily_pipeline_skips_prediction_when_models_are_missing(tmp_path) -> No
         "update_labels:2026-06-01",
     ]
     assert result["predictions_path"] is None
+    assert result["candidate_csv_path"] is None
+    assert result["candidate_md_path"] is None
     assert result["labels_paths"] == [tmp_path / "labels" / "labels_2026-06-01.parquet"]
-    assert result["warnings"] == ["current ML models are missing; skipped prediction"]
+    assert result["warnings"] == [
+        "current ML models are missing; skipped prediction",
+        "prediction was skipped; skipped AI candidate export",
+    ]
 
 
 def test_daily_pipeline_skips_prediction_when_any_model_file_is_missing(tmp_path) -> None:
@@ -109,3 +146,34 @@ def test_daily_pipeline_skips_prediction_when_any_model_file_is_missing(tmp_path
     assert "predict:2026-06-01" not in calls
     assert result["predictions_path"] is None
     assert result["warnings"]
+
+
+def test_daily_pipeline_can_disable_candidate_export(tmp_path) -> None:
+    calls: list[str] = []
+    model_root = tmp_path / "models" / "ml" / "current"
+    _touch_current_models(model_root)
+
+    result = _pipeline(tmp_path, calls, model_root).run_daily_pipeline(
+        "2026-06-01",
+        export_candidates=False,
+    )
+
+    assert "build_candidates:2026-06-01:10:50000000:0.7" not in calls
+    assert result["candidate_csv_path"] is None
+    assert result["candidate_md_path"] is None
+
+
+def test_daily_pipeline_passes_candidate_export_options(tmp_path) -> None:
+    calls: list[str] = []
+    model_root = tmp_path / "models" / "ml" / "current"
+    _touch_current_models(model_root)
+
+    result = _pipeline(tmp_path, calls, model_root).run_daily_pipeline(
+        "2026-06-01",
+        candidate_top_n=5,
+        min_turnover_value=100_000_000,
+        max_bad_entry_probability=0.6,
+    )
+
+    assert "build_candidates:2026-06-01:5:100000000:0.6" in calls
+    assert result["candidate_csv_path"] == tmp_path / "candidates" / "ai_candidates_2026-06-01.csv"
