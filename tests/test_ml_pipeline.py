@@ -74,7 +74,11 @@ class FakeCandidateExporter:
 
 def _touch_current_models(model_root: Path) -> None:
     model_root.mkdir(parents=True, exist_ok=True)
-    (model_root / "feature_columns.json").write_text("[]", encoding="utf-8")
+    (model_root / "feature_columns.json").write_text(
+        '["topix_return_5d", "topix_return_10d", "topix_return_20d", '
+        '"relative_return_10d", "EPS", "Sales_growth", "FEPS_growth"]',
+        encoding="utf-8",
+    )
     for filename in MODEL_FILENAMES.values():
         (model_root / filename).write_text("model", encoding="utf-8")
 
@@ -177,3 +181,17 @@ def test_daily_pipeline_passes_candidate_export_options(tmp_path) -> None:
 
     assert "build_candidates:2026-06-01:5:100000000:0.6" in calls
     assert result["candidate_csv_path"] == tmp_path / "candidates" / "2026-06-01.csv"
+
+
+def test_daily_pipeline_warns_when_current_model_is_not_enriched_v2(tmp_path) -> None:
+    calls: list[str] = []
+    model_root = tmp_path / "models" / "ml" / "current"
+    model_root.mkdir(parents=True, exist_ok=True)
+    (model_root / "feature_columns.json").write_text('["close"]', encoding="utf-8")
+    for filename in MODEL_FILENAMES.values():
+        (model_root / filename).write_text("model", encoding="utf-8")
+
+    result = _pipeline(tmp_path, calls, model_root).run_daily_pipeline("2026-06-01")
+
+    assert any("does not look like enriched_v2" in warning for warning in result["warnings"])
+    assert "predict:2026-06-01" in calls

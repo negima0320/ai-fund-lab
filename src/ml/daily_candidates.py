@@ -26,8 +26,27 @@ DAILY_CANDIDATE_COLUMNS = [
     "bad_entry_probability_10d",
     "entry_risk_label",
     "ml_score",
+    "suggested_position_size",
+    "assumed_exit_rule",
+    "model_profile",
     "reason",
 ]
+
+DEFAULT_TOP_N = 10
+DEFAULT_MIN_TURNOVER_VALUE = 50_000_000
+DEFAULT_POSITION_SIZE = 200_000
+DEFAULT_EXIT_RULE = "close_20d"
+DEFAULT_MODEL_PROFILE = "enriched_v2"
+
+ENRICHED_V2_REQUIRED_FEATURES = {
+    "topix_return_5d",
+    "topix_return_10d",
+    "topix_return_20d",
+    "relative_return_10d",
+    "EPS",
+    "Sales_growth",
+    "FEPS_growth",
+}
 
 
 class DailyAICandidateExporter:
@@ -48,8 +67,8 @@ class DailyAICandidateExporter:
     def build_candidates(
         self,
         target_date: str,
-        top_n: int = 10,
-        min_turnover_value: float = 50_000_000,
+        top_n: int = DEFAULT_TOP_N,
+        min_turnover_value: float = DEFAULT_MIN_TURNOVER_VALUE,
         max_bad_entry_probability: float | None = None,
     ) -> pd.DataFrame:
         predictions = self._read_required_parquet(self.prediction_root / f"predictions_{target_date}.parquet", "predictions")
@@ -94,6 +113,9 @@ class DailyAICandidateExporter:
         candidates = candidates.reset_index(drop=True)
         candidates["rank"] = range(1, len(candidates) + 1)
         candidates = self._add_previous_comparison(candidates, target_date)
+        candidates["suggested_position_size"] = DEFAULT_POSITION_SIZE
+        candidates["assumed_exit_rule"] = DEFAULT_EXIT_RULE
+        candidates["model_profile"] = DEFAULT_MODEL_PROFILE
         candidates["reason"] = candidates.apply(
             lambda row: (
                 f"risk_adjusted_score={row['risk_adjusted_score']:.4f}が高く、"
@@ -128,8 +150,13 @@ class DailyAICandidateExporter:
                 "- ranking: risk_adjusted_return",
                 "- score: expected_return_10d - 0.5 * bad_entry_probability_10d",
                 "- liquidity: turnover_value >= 50,000,000",
-                "- exit assumption: close_10d",
-                "- note: report-only; no orders are placed",
+                "- exit assumption: close_20d",
+                "- suggested position size: 200,000 JPY",
+                "- max positions assumption: 5",
+                "- model profile: enriched_v2",
+                "- validation memo: 5y walk-forward enriched v2 risk_adjusted_return PF 1.7225 / DD -13.64%",
+                "- validation memo: realistic portfolio main condition total_return +20.57% / PF 1.4376 / DD -7.33%",
+                "- note: this is a human-review candidate report, not a trading instruction; no orders are placed",
                 "",
                 "## Previous Day Comparison",
                 "",

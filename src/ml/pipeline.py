@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 from ml.config import ML_MODEL_CURRENT_ROOT, MODEL_FILENAMES
-from ml.daily_candidates import DailyAICandidateExporter
+from ml.daily_candidates import DailyAICandidateExporter, ENRICHED_V2_REQUIRED_FEATURES
 from ml.feature_builder import FeatureBuilder
 from ml.label_generator import LabelGenerator
 from ml.predictor import Predictor
@@ -44,6 +45,9 @@ class DailyMLPipeline:
         candidate_csv_path = None
         candidate_md_path = None
         if self._current_models_available():
+            model_warning = self._current_model_profile_warning()
+            if model_warning:
+                warnings.append(model_warning)
             predictions = self.predictor.predict_daily(target_date)
             predictions_path = self.predictor.save_predictions(predictions, target_date)
         else:
@@ -79,6 +83,21 @@ class DailyMLPipeline:
         required_paths = [self.model_root / "feature_columns.json"]
         required_paths.extend(self.model_root / filename for filename in MODEL_FILENAMES.values())
         return all(path.exists() for path in required_paths)
+
+    def _current_model_profile_warning(self) -> str | None:
+        feature_path = self.model_root / "feature_columns.json"
+        try:
+            feature_columns = json.loads(feature_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return "current ML model profile could not be checked; expected enriched_v2 for daily AI candidates"
+        feature_set = {str(column) for column in feature_columns}
+        missing = sorted(ENRICHED_V2_REQUIRED_FEATURES - feature_set)
+        if missing:
+            return (
+                "current ML model does not look like enriched_v2; "
+                f"missing enriched features: {', '.join(missing)}"
+            )
+        return None
 
 
 def run_daily_pipeline(

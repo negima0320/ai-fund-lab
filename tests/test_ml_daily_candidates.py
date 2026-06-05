@@ -95,11 +95,17 @@ def test_daily_candidates_filter_sort_and_save(tmp_path) -> None:
     assert candidates["candidate_status"].tolist() == ["continued", "new", "new"]
     assert candidates.loc[1, "name"] == "Delta"
     assert candidates.loc[0, "risk_adjusted_score"] == 0.0
+    assert candidates.loc[0, "suggested_position_size"] == 200_000
+    assert candidates.loc[0, "assumed_exit_rule"] == "close_20d"
+    assert candidates.loc[0, "model_profile"] == "enriched_v2"
     assert csv_path.exists()
     assert md_path.exists()
     markdown = md_path.read_text(encoding="utf-8")
     assert "Daily AI Candidates" in markdown
     assert "ranking: risk_adjusted_return" in markdown
+    assert "exit assumption: close_20d" in markdown
+    assert "5y walk-forward enriched v2 risk_adjusted_return PF 1.7225 / DD -13.64%" in markdown
+    assert "not a trading instruction" in markdown
     assert "脱落(dropped): 1 (9999)" in markdown
     assert csv_path.name == "2026-05-15.csv"
     assert md_path.name == "2026-05-15.md"
