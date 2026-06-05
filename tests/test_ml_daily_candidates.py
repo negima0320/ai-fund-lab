@@ -77,18 +77,29 @@ def test_daily_candidates_filter_sort_and_save(tmp_path) -> None:
         ],
     )
 
-    candidates = exporter.build_candidates(
-        "2026-05-15",
-        top_n=10,
-        min_turnover_value=50_000_000,
-        max_bad_entry_probability=0.70,
-    )
+    previous_path = exporter.report_root / "2026-05-14.csv"
+    previous_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {"date": "2026-05-14", "code": "1001"},
+            {"date": "2026-05-14", "code": "9999"},
+        ]
+    ).to_csv(previous_path, index=False)
+
+    candidates = exporter.build_candidates("2026-05-15", top_n=10, min_turnover_value=50_000_000)
     csv_path = exporter.save_csv(candidates, "2026-05-15")
     md_path = exporter.save_markdown(candidates, "2026-05-15")
 
-    assert candidates["code"].tolist() == ["1004", "1001"]
-    assert candidates["rank"].tolist() == [1, 2]
-    assert candidates.loc[0, "name"] == "Delta"
+    assert candidates["code"].tolist() == ["1001", "1004", "1002"]
+    assert candidates["rank"].tolist() == [1, 2, 3]
+    assert candidates["candidate_status"].tolist() == ["continued", "new", "new"]
+    assert candidates.loc[1, "name"] == "Delta"
+    assert candidates.loc[0, "risk_adjusted_score"] == 0.0
     assert csv_path.exists()
     assert md_path.exists()
-    assert "Daily AI Candidates" in md_path.read_text(encoding="utf-8")
+    markdown = md_path.read_text(encoding="utf-8")
+    assert "Daily AI Candidates" in markdown
+    assert "ranking: risk_adjusted_return" in markdown
+    assert "脱落(dropped): 1 (9999)" in markdown
+    assert csv_path.name == "2026-05-15.csv"
+    assert md_path.name == "2026-05-15.md"

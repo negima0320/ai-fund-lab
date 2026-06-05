@@ -11,6 +11,7 @@ from ml.data_loader import JQuantsDataLoader
 
 DAILY_CANDIDATE_COLUMNS = [
     "rank",
+    "candidate_status",
     "date",
     "code",
     "name",
@@ -18,6 +19,7 @@ DAILY_CANDIDATE_COLUMNS = [
     "sector_name",
     "close",
     "turnover_value",
+    "risk_adjusted_score",
     "expected_return_10d",
     "expected_max_return_20d",
     "swing_success_probability_20d",
@@ -48,7 +50,7 @@ class DailyAICandidateExporter:
         target_date: str,
         top_n: int = 10,
         min_turnover_value: float = 50_000_000,
-        max_bad_entry_probability: float = 0.70,
+        max_bad_entry_probability: float | None = None,
     ) -> pd.DataFrame:
         predictions = self._read_required_parquet(self.prediction_root / f"predictions_{target_date}.parquet", "predictions")
         features = self._read_required_parquet(self.feature_root / f"features_{target_date}.parquet", "features")
@@ -79,18 +81,22 @@ class DailyAICandidateExporter:
         if missing:
             raise ValueError(f"daily candidate input is missing required columns: {', '.join(missing)}")
 
-        candidates = data[
-            (data["bad_entry_probability_10d"] < max_bad_entry_probability)
-            & (data["turnover_value"] >= min_turnover_value)
-        ].copy()
-        candidates = candidates.dropna(subset=["expected_return_10d"]).sort_values("expected_return_10d", ascending=False).head(top_n)
+        data["risk_adjusted_score"] = data["expected_return_10d"] - 0.5 * data["bad_entry_probability_10d"]
+
+        candidates = data[data["turnover_value"] >= min_turnover_value].copy()
+        if max_bad_entry_probability is not None:
+            candidates = candidates[candidates["bad_entry_probability_10d"] < max_bad_entry_probability].copy()
+        candidates = (
+            candidates.dropna(subset=["risk_adjusted_score"])
+            .sort_values("risk_adjusted_score", ascending=False)
+            .head(top_n)
+        )
         candidates = candidates.reset_index(drop=True)
         candidates["rank"] = range(1, len(candidates) + 1)
+        candidates = self._add_previous_comparison(candidates, target_date)
         candidates["reason"] = candidates.apply(
             lambda row: (
-                f"expected_return_10d={row['expected_return_10d']:.4f}が高く、"
-                f"bad_entry_probability_10d={row['bad_entry_probability_10d']:.4f}が"
-                f"{max_bad_entry_probability:.2f}未満、"
+                f"risk_adjusted_score={row['risk_adjusted_score']:.4f}が高く、"
                 f"turnover_value={row['turnover_value']:.0f}が流動性条件を満たすため。"
             ),
             axis=1,
@@ -101,28 +107,35 @@ class DailyAICandidateExporter:
         return candidates[[column for column in DAILY_CANDIDATE_COLUMNS if column in candidates.columns]]
 
     def save_csv(self, df: pd.DataFrame, target_date: str) -> Path:
-        path = self.report_root / f"ai_candidates_{target_date}.csv"
+        path = self.report_root / f"{target_date}.csv"
         path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(path, index=False)
         return path
 
     def save_markdown(self, df: pd.DataFrame, target_date: str) -> Path:
-        path = self.report_root / f"ai_candidates_{target_date}.md"
+        path = self.report_root / f"{target_date}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self.format_markdown(df, target_date), encoding="utf-8")
         return path
 
     def format_markdown(self, df: pd.DataFrame, target_date: str) -> str:
+        comparison = self._comparison_summary(df, target_date)
         return "\n".join(
             [
                 "# Daily AI Candidates",
                 "",
                 f"- date: {target_date}",
-                "- ranking: expected_return_10d",
-                "- filter: bad_entry_probability_10d < 0.70",
+                "- ranking: risk_adjusted_return",
+                "- score: expected_return_10d - 0.5 * bad_entry_probability_10d",
                 "- liquidity: turnover_value >= 50,000,000",
                 "- exit assumption: close_10d",
                 "- note: report-only; no orders are placed",
+                "",
+                "## Previous Day Comparison",
+                "",
+                comparison,
+                "",
+                "## Candidates",
                 "",
                 self._table(df.to_dict("records"), DAILY_CANDIDATE_COLUMNS),
                 "",
@@ -145,6 +158,50 @@ class DailyAICandidateExporter:
 
     def _feature_columns(self, features: pd.DataFrame) -> list[str]:
         return [column for column in ["close", "turnover_value"] if column in features.columns]
+
+    def _add_previous_comparison(self, candidates: pd.DataFrame, target_date: str) -> pd.DataFrame:
+        output = candidates.copy()
+        previous = self._previous_candidates(target_date)
+        previous_codes = set(previous["code"].astype(str)) if not previous.empty and "code" in previous.columns else set()
+        output["candidate_status"] = output["code"].astype(str).map(
+            lambda code: "continued" if code in previous_codes else "new"
+        )
+        return output
+
+    def _previous_candidates(self, target_date: str) -> pd.DataFrame:
+        target = pd.Timestamp(target_date)
+        candidates = []
+        for path in self.report_root.glob("*.csv"):
+            date_text = path.stem.replace("ai_candidates_", "")
+            try:
+                date = pd.Timestamp(date_text)
+            except ValueError:
+                continue
+            if date < target:
+                candidates.append((date, path))
+        if not candidates:
+            return pd.DataFrame()
+        _, path = max(candidates, key=lambda item: item[0])
+        try:
+            df = pd.read_csv(path, dtype={"code": "string"})
+        except Exception:
+            return pd.DataFrame()
+        return df
+
+    def _comparison_summary(self, df: pd.DataFrame, target_date: str) -> str:
+        previous = self._previous_candidates(target_date)
+        current_codes = set(df["code"].astype(str)) if not df.empty and "code" in df.columns else set()
+        previous_codes = set(previous["code"].astype(str)) if not previous.empty and "code" in previous.columns else set()
+        new_codes = sorted(current_codes - previous_codes)
+        continued_codes = sorted(current_codes & previous_codes)
+        dropped_codes = sorted(previous_codes - current_codes)
+        return "\n".join(
+            [
+                f"- 新規(new): {len(new_codes)}" + (f" ({', '.join(new_codes)})" if new_codes else ""),
+                f"- 継続(continued): {len(continued_codes)}" + (f" ({', '.join(continued_codes)})" if continued_codes else ""),
+                f"- 脱落(dropped): {len(dropped_codes)}" + (f" ({', '.join(dropped_codes)})" if dropped_codes else ""),
+            ]
+        )
 
     def _listed_info(self, target_date: str) -> pd.DataFrame:
         info = self.data_loader.load_listed_info(target_date)

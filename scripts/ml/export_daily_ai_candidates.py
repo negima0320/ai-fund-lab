@@ -19,7 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--date", required=True)
     parser.add_argument("--top-n", type=int, default=10)
     parser.add_argument("--min-turnover-value", type=float, default=50_000_000)
-    parser.add_argument("--max-bad-entry-probability", type=float, default=0.70)
+    parser.add_argument("--max-bad-entry-probability", type=float, default=None)
     return parser.parse_args()
 
 
@@ -43,7 +43,10 @@ def main() -> None:
         for row in candidates.head(args.top_n).to_dict("records"):
             print(
                 f"rank={row['rank']} code={row['code']} name={row.get('name', '')} "
+                f"risk_adjusted_score={row.get('risk_adjusted_score')} "
                 f"expected_return_10d={row.get('expected_return_10d')} "
+                f"expected_max_return_20d={row.get('expected_max_return_20d')} "
+                f"swing_success_probability_20d={row.get('swing_success_probability_20d')} "
                 f"bad_entry_probability_10d={row.get('bad_entry_probability_10d')} "
                 f"turnover_value={row.get('turnover_value')}"
             )

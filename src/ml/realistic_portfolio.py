@@ -20,7 +20,7 @@ RANKING_COLUMNS = {
 
 GRID_RANKINGS = ["expected_return_10d", "risk_adjusted_return", "expected_max_return_20d", "ml_score"]
 GRID_MAX_POSITIONS = [5, 10]
-GRID_EXIT_RULES = ["close_10d", "close_20d"]
+GRID_EXIT_RULES = ["close_5d", "close_10d", "close_20d"]
 GRID_MIN_TURNOVER_VALUES = [50_000_000, 100_000_000]
 
 
@@ -40,6 +40,7 @@ class RealisticPortfolioConfig:
     def config_id(self) -> str:
         return (
             f"{self.ranking}_top{self.top_n}_"
+            f"size{int(self.position_size)}_"
             f"pos{self.max_positions}_{self.exit_rule}_"
             f"turnover{int(self.min_turnover_value)}"
         )
@@ -297,7 +298,10 @@ class MLRealisticPortfolioSimulator:
         entry_idx = self._first_index_after(prices, signal_date)
         if entry_idx is None:
             return None
-        offset = 9 if config.exit_rule == "close_10d" else 19
+        offset_by_rule = {"close_5d": 4, "close_10d": 9, "close_20d": 19}
+        offset = offset_by_rule.get(config.exit_rule)
+        if offset is None:
+            return None
         if entry_idx + offset >= len(prices):
             return None
         entry = prices.iloc[entry_idx]
@@ -367,6 +371,7 @@ class MLRealisticPortfolioSimulator:
             "config_id": config.config_id,
             "ranking": config.ranking,
             "top_n": config.top_n,
+            "position_size": config.position_size,
             "max_positions": config.max_positions,
             "exit_rule": config.exit_rule,
             "min_turnover_value": config.min_turnover_value,

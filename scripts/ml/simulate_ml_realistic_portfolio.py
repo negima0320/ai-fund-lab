@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--initial-cash", type=float, default=1_000_000)
     parser.add_argument("--position-size", type=float, default=100_000)
     parser.add_argument("--max-positions", type=int, default=5)
-    parser.add_argument("--exit-rule", default="close_20d", choices=["close_10d", "close_20d"])
+    parser.add_argument("--exit-rule", default="close_20d", choices=["close_5d", "close_10d", "close_20d"])
     parser.add_argument("--fee-rate", type=float, default=0.001)
     parser.add_argument("--slippage-rate", type=float, default=0.001)
     parser.add_argument("--min-turnover-value", type=float, default=50_000_000)

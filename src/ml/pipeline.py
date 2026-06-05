@@ -33,7 +33,7 @@ class DailyMLPipeline:
         export_candidates: bool = True,
         candidate_top_n: int = 10,
         min_turnover_value: float = 50_000_000,
-        max_bad_entry_probability: float = 0.70,
+        max_bad_entry_probability: float | None = None,
     ) -> dict[str, Any]:
         warnings: list[str] = []
 
@@ -86,7 +86,7 @@ def run_daily_pipeline(
     export_candidates: bool = True,
     candidate_top_n: int = 10,
     min_turnover_value: float = 50_000_000,
-    max_bad_entry_probability: float = 0.70,
+    max_bad_entry_probability: float | None = None,
 ) -> dict[str, Any]:
     return DailyMLPipeline().run_daily_pipeline(
         target_date,

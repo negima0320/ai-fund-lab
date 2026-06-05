@@ -8,6 +8,7 @@ import pytest
 
 from ml.data_loader import JQuantsDataLoader
 from ml.realistic_portfolio import MLRealisticPortfolioSimulator, RealisticPortfolioConfig
+from ml.realistic_portfolio_bottleneck import MLRealisticPortfolioBottleneckAnalyzer
 
 
 def _write_json(path: Path, rows: list[dict]) -> None:
@@ -161,3 +162,61 @@ def test_realistic_portfolio_counts_cash_rejections_and_saves_outputs(tmp_path) 
     assert json_path.exists()
     assert csv_path.exists()
     assert "ML Realistic Portfolio Simulation" in md_path.read_text(encoding="utf-8")
+
+
+def test_realistic_portfolio_supports_close_5d_exit(tmp_path) -> None:
+    simulator = _simulator(tmp_path)
+    _write_daily_inputs(simulator, "2026-01-01", [("1001", 0.9, 100_000_000)])
+    _write_price_cache(tmp_path, ["1001"])
+    config = RealisticPortfolioConfig(
+        ranking="expected_return_10d",
+        top_n=1,
+        initial_cash=300_000,
+        position_size=100_000,
+        max_positions=5,
+        exit_rule="close_5d",
+        fee_rate=0.0,
+        slippage_rate=0.0,
+        min_turnover_value=50_000_000,
+    )
+
+    result = simulator.simulate_one("2026-01-01", "2026-01-01", config)
+
+    assert result["summary"][0]["total_trades"] == 1
+    assert result["trades"][0]["holding_days"] == 5
+
+
+def test_bottleneck_analyzer_reports_bought_vs_rejected(tmp_path) -> None:
+    simulator = _simulator(tmp_path)
+    _write_daily_inputs(
+        simulator,
+        "2026-01-01",
+        [
+            ("1001", 0.9, 100_000_000),
+            ("1002", 0.8, 1_000_000),
+        ],
+    )
+    _write_price_cache(tmp_path, ["1001", "1002"])
+    config = RealisticPortfolioConfig(
+        ranking="expected_return_10d",
+        top_n=2,
+        initial_cash=300_000,
+        position_size=100_000,
+        max_positions=5,
+        exit_rule="close_10d",
+        fee_rate=0.0,
+        slippage_rate=0.0,
+        min_turnover_value=50_000_000,
+    )
+    analyzer = MLRealisticPortfolioBottleneckAnalyzer(simulator=simulator, report_root=tmp_path / "reports" / "ml")
+
+    result = analyzer.analyze("2026-01-01", "2026-01-01", config)
+    md_path = analyzer.save_report(result)
+    csv_path = analyzer.save_candidates_csv(result)
+
+    reasons = {(row["status"], row["reason"]) for row in result["candidate_rows"]}
+    assert ("bought", "bought") in reasons
+    assert ("rejected", "liquidity") in reasons
+    assert result["monthly_rejections"][0]["rejected_by_liquidity"] == 1
+    assert md_path.exists()
+    assert csv_path.exists()

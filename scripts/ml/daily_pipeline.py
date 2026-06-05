@@ -19,7 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--date", required=True, help="Target date in YYYY-MM-DD format.")
     parser.add_argument("--top-n", type=int, default=10, help="Daily AI candidate count.")
     parser.add_argument("--min-turnover-value", type=float, default=50_000_000)
-    parser.add_argument("--max-bad-entry-probability", type=float, default=0.70)
+    parser.add_argument("--max-bad-entry-probability", type=float, default=None)
     parser.add_argument("--no-export-candidates", action="store_true", help="Skip daily AI candidate CSV/Markdown export.")
     return parser.parse_args()
 

@@ -56,7 +56,7 @@ class FakeCandidateExporter:
         target_date: str,
         top_n: int,
         min_turnover_value: float,
-        max_bad_entry_probability: float,
+        max_bad_entry_probability: float | None,
     ) -> pd.DataFrame:
         self.calls.append(
             f"build_candidates:{target_date}:{top_n}:{int(min_turnover_value)}:{max_bad_entry_probability}"
@@ -65,11 +65,11 @@ class FakeCandidateExporter:
 
     def save_csv(self, df: pd.DataFrame, target_date: str) -> Path:
         self.calls.append(f"save_candidates_csv:{target_date}")
-        return self.root / f"ai_candidates_{target_date}.csv"
+        return self.root / f"{target_date}.csv"
 
     def save_markdown(self, df: pd.DataFrame, target_date: str) -> Path:
         self.calls.append(f"save_candidates_md:{target_date}")
-        return self.root / f"ai_candidates_{target_date}.md"
+        return self.root / f"{target_date}.md"
 
 
 def _touch_current_models(model_root: Path) -> None:
@@ -101,15 +101,15 @@ def test_daily_pipeline_runs_steps_in_order_when_models_exist(tmp_path) -> None:
         "save_features:2026-06-01",
         "predict:2026-06-01",
         "save_predictions:2026-06-01",
-        "build_candidates:2026-06-01:10:50000000:0.7",
+        "build_candidates:2026-06-01:10:50000000:None",
         "save_candidates_csv:2026-06-01",
         "save_candidates_md:2026-06-01",
         "update_labels:2026-06-01",
     ]
     assert result["features_path"] == tmp_path / "features" / "features_2026-06-01.parquet"
     assert result["predictions_path"] == tmp_path / "predictions" / "predictions_2026-06-01.parquet"
-    assert result["candidate_csv_path"] == tmp_path / "candidates" / "ai_candidates_2026-06-01.csv"
-    assert result["candidate_md_path"] == tmp_path / "candidates" / "ai_candidates_2026-06-01.md"
+    assert result["candidate_csv_path"] == tmp_path / "candidates" / "2026-06-01.csv"
+    assert result["candidate_md_path"] == tmp_path / "candidates" / "2026-06-01.md"
     assert result["labels_paths"] == [tmp_path / "labels" / "labels_2026-06-01.parquet"]
     assert result["warnings"] == []
 
@@ -158,7 +158,7 @@ def test_daily_pipeline_can_disable_candidate_export(tmp_path) -> None:
         export_candidates=False,
     )
 
-    assert "build_candidates:2026-06-01:10:50000000:0.7" not in calls
+    assert "build_candidates:2026-06-01:10:50000000:None" not in calls
     assert result["candidate_csv_path"] is None
     assert result["candidate_md_path"] is None
 
@@ -176,4 +176,4 @@ def test_daily_pipeline_passes_candidate_export_options(tmp_path) -> None:
     )
 
     assert "build_candidates:2026-06-01:5:100000000:0.6" in calls
-    assert result["candidate_csv_path"] == tmp_path / "candidates" / "ai_candidates_2026-06-01.csv"
+    assert result["candidate_csv_path"] == tmp_path / "candidates" / "2026-06-01.csv"
