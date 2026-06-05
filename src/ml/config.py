@@ -50,6 +50,51 @@ FEATURE_COLUMNS = [
     "close_position",
     "gap_up_ratio",
     "daily_range_ratio",
+    "EPS",
+    "BPS",
+    "EqAR",
+    "Sales_growth",
+    "OP_growth",
+    "NP_growth",
+    "FEPS_growth",
+    "FSales_growth",
+    "FOP_growth",
+    "PayoutRatioAnn",
+    "days_to_earnings",
+    "days_after_earnings",
+    "is_near_earnings",
+]
+
+FINANCIAL_FEATURE_COLUMNS = [
+    "EPS",
+    "BPS",
+    "EqAR",
+    "Sales_growth",
+    "OP_growth",
+    "NP_growth",
+    "FEPS_growth",
+    "FSales_growth",
+    "FOP_growth",
+    "PayoutRatioAnn",
+]
+
+FINANCIAL_NUMERIC_COLUMNS = [
+    "Sales",
+    "OP",
+    "NP",
+    "EPS",
+    "BPS",
+    "EqAR",
+    "FEPS",
+    "FSales",
+    "FOP",
+    "PayoutRatioAnn",
+]
+
+EARNINGS_FEATURE_COLUMNS = [
+    "days_to_earnings",
+    "days_after_earnings",
+    "is_near_earnings",
 ]
 
 LABEL_LOOKAHEAD_DAYS = 20

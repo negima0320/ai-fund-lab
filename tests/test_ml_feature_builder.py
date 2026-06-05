@@ -15,6 +15,11 @@ def _write_price(path: Path, rows: list[dict]) -> None:
     path.write_text(json.dumps({"records": rows}), encoding="utf-8")
 
 
+def _write_cache(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"records": rows}), encoding="utf-8")
+
+
 def _price_row(day: int, code: str = "1001", close: float | None = None, volume: float | None = None) -> dict:
     close_value = float(close if close is not None else day * 10)
     return {
@@ -103,3 +108,81 @@ def test_save_daily_features_writes_parquet_path(monkeypatch, tmp_path) -> None:
     assert path == tmp_path / "data" / "ml" / "features" / "features_2026-01-02.parquet"
     assert calls == {"path": path, "index": False}
     assert path.exists()
+
+
+def test_financial_features_use_only_disclosed_information(tmp_path) -> None:
+    _write_price(tmp_path / "jquants" / "prices" / "2026-01-10.json", [_price_row(10)])
+    _write_cache(
+        tmp_path / "jquants" / "financial_statements" / "2026-01-01_to_2026-01-20.json",
+        [
+            {
+                "DiscDate": "2026-01-01",
+                "DiscTime": "15:00:00",
+                "Code": "1001",
+                "Sales": "100",
+                "OP": "10",
+                "NP": "5",
+                "EPS": "10",
+                "BPS": "100",
+                "EqAR": "0.50",
+                "FEPS": "12",
+                "FSales": "130",
+                "FOP": "13",
+                "PayoutRatioAnn": "0.30",
+            },
+            {
+                "DiscDate": "2026-01-05",
+                "DiscTime": "15:00:00",
+                "Code": "1001",
+                "Sales": "120",
+                "OP": "15",
+                "NP": "6",
+                "EPS": "11",
+                "BPS": "110",
+                "EqAR": "0.55",
+                "FEPS": "13.2",
+                "FSales": "150",
+                "FOP": "18",
+                "PayoutRatioAnn": "0.35",
+            },
+            {
+                "DiscDate": "2026-01-11",
+                "DiscTime": "15:00:00",
+                "Code": "1001",
+                "Sales": "999",
+                "OP": "999",
+                "NP": "999",
+                "EPS": "999",
+            },
+        ],
+    )
+
+    df = _builder(tmp_path).build_daily_features("2026-01-10")
+
+    assert df.loc[0, "EPS"] == pytest.approx(11)
+    assert df.loc[0, "BPS"] == pytest.approx(110)
+    assert df.loc[0, "EqAR"] == pytest.approx(0.55)
+    assert df.loc[0, "Sales_growth"] == pytest.approx(0.2)
+    assert df.loc[0, "OP_growth"] == pytest.approx(0.5)
+    assert df.loc[0, "NP_growth"] == pytest.approx(0.2)
+    assert df.loc[0, "FEPS_growth"] == pytest.approx(0.2)
+    assert df.loc[0, "FSales_growth"] == pytest.approx(0.25)
+    assert df.loc[0, "FOP_growth"] == pytest.approx(0.2)
+    assert df.loc[0, "PayoutRatioAnn"] == pytest.approx(0.35)
+
+
+def test_earnings_calendar_features_are_added(tmp_path) -> None:
+    _write_price(tmp_path / "jquants" / "prices" / "2026-01-10.json", [_price_row(10)])
+    _write_cache(
+        tmp_path / "jquants" / "earnings_calendar" / "2026-01-01_to_2026-01-20.json",
+        [
+            {"Date": "2026-01-07", "Code": "1001"},
+            {"Date": "2026-01-14", "Code": "1001"},
+        ],
+    )
+
+    df = _builder(tmp_path).build_daily_features("2026-01-10")
+
+    assert df.loc[0, "days_to_earnings"] == 4
+    assert df.loc[0, "days_after_earnings"] == 3
+    assert bool(df.loc[0, "is_near_earnings"]) is True

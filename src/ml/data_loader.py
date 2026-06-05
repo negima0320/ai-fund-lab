@@ -10,6 +10,7 @@ import pandas as pd
 
 from ml.config import (
     ADJUSTED_PRICE_COLUMNS,
+    FINANCIAL_NUMERIC_COLUMNS,
     INVESTOR_TYPE_DATE_COLUMNS,
     INVESTOR_TYPE_NUMERIC_COLUMNS,
     JQUANTS_CACHE_DIRS,
@@ -50,6 +51,11 @@ PRICE_ALIASES = {
 TRADING_CALENDAR_ALIASES = {
     "Date": "date",
     "HolDiv": "holiday_division",
+}
+
+FINANCIAL_STATEMENT_ALIASES = {
+    **COMMON_ALIASES,
+    "DiscDate": "date",
 }
 
 
@@ -110,9 +116,10 @@ class JQuantsDataLoader:
         return df.sort_values(sort_columns).reset_index(drop=True) if sort_columns else df.reset_index(drop=True)
 
     def load_financial_statements(self, start_date: str, end_date: str) -> pd.DataFrame:
-        df = self._load_endpoint("financial_statements", aliases=COMMON_ALIASES)
+        df = self._load_endpoint("financial_statements", aliases=FINANCIAL_STATEMENT_ALIASES)
         df = self._normalize_date_column(df, "date")
         df = self._normalize_code_column(df)
+        df = self._normalize_numeric_columns(df, FINANCIAL_NUMERIC_COLUMNS)
         df = self._filter_date_range(df, "date", start_date, end_date)
         return self._order_columns(df, ["date", "code"])
 
