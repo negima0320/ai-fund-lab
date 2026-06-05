@@ -14,6 +14,7 @@ ML_PREDICTIONS_ROOT = ML_DATA_ROOT / "predictions"
 ML_MODELS_ROOT = ROOT / "models" / "ml"
 ML_MODEL_ARCHIVE_ROOT = ML_MODELS_ROOT / "archive"
 ML_MODEL_CURRENT_ROOT = ML_MODELS_ROOT / "current"
+ML_REPORTS_ROOT = ROOT / "reports" / "ml"
 
 FEATURE_HISTORY_DAYS = 180
 
@@ -55,6 +56,7 @@ LABEL_LOOKAHEAD_DAYS = 20
 LABEL_HORIZONS = [5, 10]
 UPSIDE_THRESHOLD = 0.05
 BAD_ENTRY_THRESHOLD = -0.05
+SWING_SUCCESS_THRESHOLD = 0.10
 
 LABEL_COLUMNS = [
     "date",
@@ -64,6 +66,9 @@ LABEL_COLUMNS = [
     "future_10d_return",
     "upside_10d",
     "bad_entry_10d",
+    "future_max_return_10d",
+    "future_max_return_20d",
+    "future_swing_success_20d",
 ]
 
 REQUIRED_LABEL_COLUMNS = [
@@ -71,6 +76,12 @@ REQUIRED_LABEL_COLUMNS = [
     "future_10d_return",
     "upside_10d",
     "bad_entry_10d",
+]
+
+OPTIONAL_LABEL_COLUMNS = [
+    "future_max_return_10d",
+    "future_max_return_20d",
+    "future_swing_success_20d",
 ]
 
 DATASET_REQUIRED_COLUMNS = [
@@ -91,6 +102,9 @@ MODEL_TARGETS = {
     "future_10d_return_regression": {"target": "future_10d_return", "task": "regression"},
     "upside_10d_classification": {"target": "upside_10d", "task": "classification"},
     "bad_entry_10d_classification": {"target": "bad_entry_10d", "task": "classification"},
+    "future_max_return_10d_regression": {"target": "future_max_return_10d", "task": "regression"},
+    "future_max_return_20d_regression": {"target": "future_max_return_20d", "task": "regression"},
+    "future_swing_success_20d_classification": {"target": "future_swing_success_20d", "task": "classification"},
 }
 
 MODEL_EXCLUDE_COLUMNS = [
@@ -101,6 +115,9 @@ MODEL_EXCLUDE_COLUMNS = [
     "future_10d_return",
     "upside_10d",
     "bad_entry_10d",
+    "future_max_return_10d",
+    "future_max_return_20d",
+    "future_swing_success_20d",
 ]
 
 CATEGORICAL_FEATURE_COLUMNS = [
@@ -138,6 +155,9 @@ MODEL_FILENAMES = {
     "future_10d_return_regression": "future_10d_return_regression.joblib",
     "upside_10d_classification": "upside_10d_classification.joblib",
     "bad_entry_10d_classification": "bad_entry_10d_classification.joblib",
+    "future_max_return_10d_regression": "future_max_return_10d_regression.joblib",
+    "future_max_return_20d_regression": "future_max_return_20d_regression.joblib",
+    "future_swing_success_20d_classification": "future_swing_success_20d_classification.joblib",
 }
 
 PREDICTION_COLUMNS = [
@@ -147,6 +167,9 @@ PREDICTION_COLUMNS = [
     "expected_return_10d",
     "upside_probability_10d",
     "bad_entry_probability_10d",
+    "expected_max_return_10d",
+    "expected_max_return_20d",
+    "swing_success_probability_20d",
     "entry_risk_label",
     "ml_score",
 ]

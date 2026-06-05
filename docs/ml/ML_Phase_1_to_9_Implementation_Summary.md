@@ -2,6 +2,11 @@
 
 This document summarizes the lightweight ML pipeline implemented for AI Fund Lab.
 
+For the later evaluation, backtest join, win/loss analysis, and swing-label
+modeling work, see:
+
+- `docs/ml/ML_Phase_10_to_16_Implementation_Summary.md`
+
 ## Scope
 
 Implemented:

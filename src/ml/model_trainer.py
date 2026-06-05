@@ -16,11 +16,12 @@ from ml.config import (
     ML_MODEL_ARCHIVE_ROOT,
     ML_MODEL_CURRENT_ROOT,
     MODEL_EXCLUDE_COLUMNS,
+    MODEL_TARGETS,
 )
 
 
 class ModelTrainer:
-    """Train and save the four initial LightGBM models."""
+    """Train and save the configured LightGBM models."""
 
     def __init__(
         self,
@@ -32,6 +33,7 @@ class ModelTrainer:
         self.current_root = Path(current_root)
         self.timestamp = timestamp
         self.feature_columns: list[str] = []
+        self.warnings: list[str] = []
 
     def load_dataset(self, path: str | Path) -> pd.DataFrame:
         return pd.read_parquet(path)
@@ -42,18 +44,25 @@ class ModelTrainer:
         models: dict[str, Any] = {}
         metrics: dict[str, Any] = {}
 
-        for target in ["future_5d_return", "future_10d_return"]:
-            name = f"{target}_regression"
-            model, model_metrics = self.train_regression(target, train_prepared, valid_prepared, feature_columns)
+        for name, spec in MODEL_TARGETS.items():
+            target = spec["target"]
+            task = spec["task"]
+            if target not in train_prepared.columns:
+                self.warnings.append(f"{name} skipped because target column is missing: {target}")
+                continue
+            target_train, target_valid = self._target_frames(train_prepared, valid_prepared, target)
+            if target_train.empty:
+                self.warnings.append(f"{name} skipped because train target has no non-null rows: {target}")
+                continue
+            if task == "regression":
+                model, model_metrics = self.train_regression(target, target_train, target_valid, feature_columns)
+            else:
+                model, model_metrics = self.train_classification(target, target_train, target_valid, feature_columns)
             models[name] = model
             metrics[name] = model_metrics
 
-        for target in ["upside_10d", "bad_entry_10d"]:
-            name = f"{target}_classification"
-            model, model_metrics = self.train_classification(target, train_prepared, valid_prepared, feature_columns)
-            models[name] = model
-            metrics[name] = model_metrics
-
+        if self.warnings:
+            metrics["warnings"] = list(self.warnings)
         return {"models": models, "metrics": metrics, "feature_columns": feature_columns}
 
     def train_regression(
@@ -118,13 +127,25 @@ class ModelTrainer:
 
     def _prepare_frames(self, train_df: pd.DataFrame, valid_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
         train = train_df.copy()
-        valid = valid_df.copy()
+        if valid_df.empty:
+            valid = train.copy()
+            self.warnings.append("validation dataset is empty; using train dataset as validation for smoke/training continuity")
+        else:
+            valid = valid_df.copy()
         for frame in [train, valid]:
             for column in CATEGORICAL_FEATURE_COLUMNS:
                 if column in frame.columns:
                     frame[column] = frame[column].astype("category")
         feature_columns = self.extract_feature_columns(train)
         return train, valid, feature_columns
+
+    def _target_frames(self, train_df: pd.DataFrame, valid_df: pd.DataFrame, target_col: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+        train = train_df.dropna(subset=[target_col]).copy()
+        valid = valid_df.dropna(subset=[target_col]).copy()
+        if valid.empty and not train.empty:
+            valid = train.copy()
+            self.warnings.append(f"{target_col}: validation target is empty; using train rows for validation")
+        return train, valid
 
     def _make_regression_model(self) -> Any:
         try:

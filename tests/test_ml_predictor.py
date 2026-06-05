@@ -61,6 +61,8 @@ def _predictor(tmp_path: Path, fake_models: dict) -> FakePredictor:
     model_root = tmp_path / "models" / "ml" / "current"
     model_root.mkdir(parents=True)
     (model_root / "feature_columns.json").write_text(json.dumps(["close", "volume", "missing_feature"]), encoding="utf-8")
+    for filename in fake_models:
+        (model_root / filename).write_text("fake", encoding="utf-8")
     return FakePredictor(
         feature_root=tmp_path / "data" / "ml" / "features",
         model_root=model_root,
@@ -73,8 +75,11 @@ def test_predict_daily_outputs_required_columns_and_score(monkeypatch, tmp_path)
     fake_models = {
         "future_5d_return_regression.joblib": FakeRegressionModel(0.03),
         "future_10d_return_regression.joblib": FakeRegressionModel(0.08),
+        "future_max_return_10d_regression.joblib": FakeRegressionModel(0.12),
+        "future_max_return_20d_regression.joblib": FakeRegressionModel(0.20),
         "upside_10d_classification.joblib": FakeProbabilityModel([0.7, 0.6, 0.5]),
         "bad_entry_10d_classification.joblib": FakeProbabilityModel([0.1, 0.3, 0.5]),
+        "future_swing_success_20d_classification.joblib": FakeProbabilityModel([0.9, 0.8, 0.7]),
     }
     predictor = _predictor(tmp_path, fake_models)
     monkeypatch.setattr(pd, "read_parquet", lambda path: _features())
@@ -88,6 +93,9 @@ def test_predict_daily_outputs_required_columns_and_score(monkeypatch, tmp_path)
         "expected_return_10d",
         "upside_probability_10d",
         "bad_entry_probability_10d",
+        "expected_max_return_10d",
+        "expected_max_return_20d",
+        "swing_success_probability_20d",
         "entry_risk_label",
         "ml_score",
     ]
@@ -100,8 +108,11 @@ def test_predict_daily_aligns_missing_and_extra_features(monkeypatch, tmp_path) 
     fake_models = {
         "future_5d_return_regression.joblib": regression,
         "future_10d_return_regression.joblib": FakeRegressionModel(0.08),
+        "future_max_return_10d_regression.joblib": FakeRegressionModel(0.12),
+        "future_max_return_20d_regression.joblib": FakeRegressionModel(0.20),
         "upside_10d_classification.joblib": FakeProbabilityModel([0.7, 0.6, 0.5]),
         "bad_entry_10d_classification.joblib": FakeProbabilityModel([0.1, 0.3, 0.5]),
+        "future_swing_success_20d_classification.joblib": FakeProbabilityModel([0.9, 0.8, 0.7]),
     }
     predictor = _predictor(tmp_path, fake_models)
     monkeypatch.setattr(pd, "read_parquet", lambda path: _features())
@@ -116,8 +127,11 @@ def test_predict_probability_falls_back_to_predict(monkeypatch, tmp_path) -> Non
     fake_models = {
         "future_5d_return_regression.joblib": FakeRegressionModel(0.03),
         "future_10d_return_regression.joblib": FakeRegressionModel(0.08),
+        "future_max_return_10d_regression.joblib": FakeRegressionModel(0.12),
+        "future_max_return_20d_regression.joblib": FakeRegressionModel(0.20),
         "upside_10d_classification.joblib": FakeProbabilityModel([0.7, 0.6, 0.5]),
         "bad_entry_10d_classification.joblib": FakeProbabilityModel([0.2, 0.2, 0.2], use_proba=False),
+        "future_swing_success_20d_classification.joblib": FakeProbabilityModel([0.9, 0.8, 0.7]),
     }
     predictor = _predictor(tmp_path, fake_models)
     monkeypatch.setattr(pd, "read_parquet", lambda path: _features())

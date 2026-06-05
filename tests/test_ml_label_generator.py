@@ -73,6 +73,31 @@ def test_generate_labels_marks_upside_and_bad_entry_within_10_business_days(tmp_
 
     assert bool(df.loc[0, "upside_10d"]) is True
     assert bool(df.loc[0, "bad_entry_10d"]) is True
+    assert df.loc[0, "future_max_return_10d"] == pytest.approx(0.06)
+
+
+def test_generate_labels_calculates_swing_labels_when_20_business_days_exist(tmp_path) -> None:
+    for day in range(1, 22):
+        high = 112 if day == 21 else 101
+        _write_json(tmp_path / "jquants" / "prices" / f"2026-01-{day:02d}.json", [_price_row(day, open_price=100, close=100, high=high, low=99)])
+    _write_json(tmp_path / "jquants" / "trading_calendar" / "2026-01-01_to_2026-03-01.json", [_calendar_row(day) for day in range(1, 22)])
+
+    df = _generator(tmp_path).generate_labels("2026-01-01")
+
+    assert df.loc[0, "future_max_return_20d"] == pytest.approx(0.12)
+    assert bool(df.loc[0, "future_swing_success_20d"]) is True
+
+
+def test_generate_labels_keeps_10d_labels_when_20d_window_is_missing(tmp_path) -> None:
+    for day in range(1, 12):
+        _write_json(tmp_path / "jquants" / "prices" / f"2026-01-{day:02d}.json", [_price_row(day, open_price=100, close=100, high=101, low=99)])
+    _write_json(tmp_path / "jquants" / "trading_calendar" / "2026-01-01_to_2026-03-01.json", [_calendar_row(day) for day in range(1, 12)])
+
+    df = _generator(tmp_path).generate_labels("2026-01-01")
+
+    assert len(df) == 1
+    assert pd.isna(df.loc[0, "future_max_return_20d"])
+    assert pd.isna(df.loc[0, "future_swing_success_20d"])
 
 
 def test_generate_labels_falls_back_to_price_dates_when_calendar_missing(tmp_path) -> None:

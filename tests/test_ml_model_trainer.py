@@ -54,6 +54,9 @@ def _dataset() -> pd.DataFrame:
                 "future_10d_return": 0.08,
                 "upside_10d": True,
                 "bad_entry_10d": False,
+                "future_max_return_10d": 0.12,
+                "future_max_return_20d": 0.20,
+                "future_swing_success_20d": True,
             },
             {
                 "date": pd.Timestamp("2026-05-02"),
@@ -68,12 +71,15 @@ def _dataset() -> pd.DataFrame:
                 "future_10d_return": -0.06,
                 "upside_10d": False,
                 "bad_entry_10d": True,
+                "future_max_return_10d": 0.02,
+                "future_max_return_20d": 0.04,
+                "future_swing_success_20d": False,
             },
         ]
     )
 
 
-def test_train_all_trains_four_models_and_excludes_label_columns(tmp_path) -> None:
+def test_train_all_trains_seven_models_and_excludes_label_columns(tmp_path) -> None:
     trainer = FakeTrainer(archive_root=tmp_path / "archive", current_root=tmp_path / "current", timestamp="20260501_120000")
     result = trainer.train_all(_dataset(), _dataset())
 
@@ -81,11 +87,16 @@ def test_train_all_trains_four_models_and_excludes_label_columns(tmp_path) -> No
         "bad_entry_10d_classification",
         "future_10d_return_regression",
         "future_5d_return_regression",
+        "future_max_return_10d_regression",
+        "future_max_return_20d_regression",
+        "future_swing_success_20d_classification",
         "upside_10d_classification",
     ]
     assert "date" not in result["feature_columns"]
     assert "code" not in result["feature_columns"]
     assert "future_10d_return" not in result["feature_columns"]
+    assert "future_max_return_20d" not in result["feature_columns"]
+    assert "future_swing_success_20d" not in result["feature_columns"]
     assert "upside_10d" not in result["feature_columns"]
     assert "close" in result["feature_columns"]
 
@@ -99,6 +110,9 @@ def test_save_models_writes_archive_and_current_files(tmp_path) -> None:
     expected_files = {
         "future_5d_return_regression.joblib",
         "future_10d_return_regression.joblib",
+        "future_max_return_10d_regression.joblib",
+        "future_max_return_20d_regression.joblib",
+        "future_swing_success_20d_classification.joblib",
         "upside_10d_classification.joblib",
         "bad_entry_10d_classification.joblib",
         "feature_columns.json",
@@ -114,7 +128,9 @@ def test_metrics_include_regression_and_classification_scores(tmp_path) -> None:
     result = trainer.train_all(_dataset(), _dataset())
 
     assert set(result["metrics"]["future_5d_return_regression"]) == {"rmse", "mae"}
+    assert set(result["metrics"]["future_max_return_20d_regression"]) == {"rmse", "mae"}
     assert set(result["metrics"]["upside_10d_classification"]) == {"auc", "accuracy", "precision", "recall"}
+    assert set(result["metrics"]["future_swing_success_20d_classification"]) == {"auc", "accuracy", "precision", "recall"}
 
 
 def test_category_columns_are_optional_and_converted_when_present(tmp_path) -> None:
@@ -129,6 +145,25 @@ def test_category_columns_are_optional_and_converted_when_present(tmp_path) -> N
     assert str(prepared_train["market"].dtype) == "category"
     assert str(prepared_valid["market"].dtype) == "category"
     assert "market" in feature_columns
+
+
+def test_empty_valid_falls_back_to_train_with_warning(tmp_path) -> None:
+    trainer = FakeTrainer(archive_root=tmp_path / "archive", current_root=tmp_path / "current")
+
+    result = trainer.train_all(_dataset(), _dataset().head(0))
+
+    assert sorted(result["models"]) == [
+        "bad_entry_10d_classification",
+        "future_10d_return_regression",
+        "future_5d_return_regression",
+        "future_max_return_10d_regression",
+        "future_max_return_20d_regression",
+        "future_swing_success_20d_classification",
+        "upside_10d_classification",
+    ]
+    assert result["metrics"]["warnings"] == [
+        "validation dataset is empty; using train dataset as validation for smoke/training continuity"
+    ]
 
 
 def test_load_dataset_reads_parquet(monkeypatch, tmp_path) -> None:

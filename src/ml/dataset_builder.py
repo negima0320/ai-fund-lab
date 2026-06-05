@@ -10,6 +10,7 @@ from ml.config import (
     ML_DATASETS_ROOT,
     ML_FEATURES_ROOT,
     ML_LABELS_ROOT,
+    OPTIONAL_LABEL_COLUMNS,
     REQUIRED_LABEL_COLUMNS,
 )
 
@@ -40,7 +41,9 @@ class DatasetBuilder:
             labels = self._read_frame(label_path)
             if features.empty or labels.empty:
                 continue
-            frames.append(self._join_daily_frames(features, labels))
+            joined = self._join_daily_frames(features, labels)
+            if not joined.empty:
+                frames.append(joined)
 
         if not frames:
             return pd.DataFrame()
@@ -71,9 +74,10 @@ class DatasetBuilder:
     def _join_daily_frames(self, features: pd.DataFrame, labels: pd.DataFrame) -> pd.DataFrame:
         left = self._normalize_keys(features)
         right = self._normalize_keys(labels)
-        label_columns = ["date", "code", "entry_price", *REQUIRED_LABEL_COLUMNS]
-        if any(column not in right.columns for column in label_columns):
+        required_label_columns = ["date", "code", "entry_price", *REQUIRED_LABEL_COLUMNS]
+        if any(column not in right.columns for column in required_label_columns):
             return pd.DataFrame()
+        label_columns = [*required_label_columns, *OPTIONAL_LABEL_COLUMNS]
         available_label_columns = [column for column in label_columns if column in right.columns]
         return left.merge(right[available_label_columns], on=["date", "code"], how="inner")
 
@@ -91,6 +95,8 @@ class DatasetBuilder:
             data["upside_10d"] = data["upside_10d"].astype("boolean")
         if "bad_entry_10d" in data.columns:
             data["bad_entry_10d"] = data["bad_entry_10d"].astype("boolean")
+        if "future_swing_success_20d" in data.columns:
+            data["future_swing_success_20d"] = data["future_swing_success_20d"].astype("boolean")
 
         required = [column for column in DATASET_REQUIRED_COLUMNS if column in data.columns]
         data = data.dropna(subset=required)
@@ -98,6 +104,10 @@ class DatasetBuilder:
             data = data[data["volume"] > 0]
         data = data[data["future_5d_return"].abs() <= self.max_abs_label_return]
         data = data[data["future_10d_return"].abs() <= self.max_abs_label_return]
+        for column in ["future_max_return_10d", "future_max_return_20d"]:
+            if column in data.columns:
+                data[column] = pd.to_numeric(data[column], errors="coerce")
+                data = data[data[column].isna() | (data[column].abs() <= self.max_abs_label_return)]
         return data
 
     def _normalize_keys(self, df: pd.DataFrame) -> pd.DataFrame:

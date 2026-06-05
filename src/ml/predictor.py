@@ -34,10 +34,11 @@ class Predictor:
     def load_current_models(self) -> dict[str, Any]:
         feature_columns_path = self.model_root / "feature_columns.json"
         self.feature_columns = json.loads(feature_columns_path.read_text(encoding="utf-8"))
-        self.models = {
-            name: self._load_model(self.model_root / filename)
-            for name, filename in MODEL_FILENAMES.items()
-        }
+        self.models = {}
+        for name, filename in MODEL_FILENAMES.items():
+            path = self.model_root / filename
+            if path.exists():
+                self.models[name] = self._load_model(path)
         return self.models
 
     def predict_daily(self, target_date: str) -> pd.DataFrame:
@@ -56,6 +57,21 @@ class Predictor:
         output["expected_return_10d"] = self._predict_values(self.models["future_10d_return_regression"], prepared)
         output["upside_probability_10d"] = self._predict_probability(self.models["upside_10d_classification"], prepared)
         output["bad_entry_probability_10d"] = self._predict_probability(self.models["bad_entry_10d_classification"], prepared)
+        output["expected_max_return_10d"] = self._predict_optional_values(
+            "future_max_return_10d_regression",
+            prepared,
+            len(output),
+        )
+        output["expected_max_return_20d"] = self._predict_optional_values(
+            "future_max_return_20d_regression",
+            prepared,
+            len(output),
+        )
+        output["swing_success_probability_20d"] = self._predict_optional_probability(
+            "future_swing_success_20d_classification",
+            prepared,
+            len(output),
+        )
         output["entry_risk_label"] = output["bad_entry_probability_10d"].map(self._risk_label)
         output["ml_score"] = (
             output["expected_return_10d"] * 100
@@ -94,6 +110,12 @@ class Predictor:
     def _predict_values(self, model: Any, features: pd.DataFrame) -> list[float]:
         return [float(value) for value in model.predict(features)]
 
+    def _predict_optional_values(self, model_name: str, features: pd.DataFrame, rows: int) -> list[float | None]:
+        model = self.models.get(model_name)
+        if model is None:
+            return [None for _ in range(rows)]
+        return self._predict_values(model, features)
+
     def _predict_probability(self, model: Any, features: pd.DataFrame) -> list[float]:
         if hasattr(model, "predict_proba"):
             try:
@@ -102,6 +124,12 @@ class Predictor:
             except AttributeError:
                 pass
         return [float(value) for value in model.predict(features)]
+
+    def _predict_optional_probability(self, model_name: str, features: pd.DataFrame, rows: int) -> list[float | None]:
+        model = self.models.get(model_name)
+        if model is None:
+            return [None for _ in range(rows)]
+        return self._predict_probability(model, features)
 
     def _risk_label(self, probability: float) -> str:
         if probability < 0.25:

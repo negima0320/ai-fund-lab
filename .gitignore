@@ -15,10 +15,16 @@ data/raw/unsupported_days_jquants.json
 data/raw/
 data/processed/
 
+# ML generated data and synced cache
+data/ml/
+data/cache/jquants/prices/
+models/ml/
+
 # Generated reports
 reports/*
 !reports/backtests/
 !reports/backtests/**
+reports/ml/
 reports/backtests/preflight_latest.*
 reports/backtests/tachibana_healthcheck_latest.*
 reports/*/backtests/preflight_latest.*

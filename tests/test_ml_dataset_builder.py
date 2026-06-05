@@ -40,6 +40,9 @@ def _label(date: str, code: str, future_5d: float = 0.05, future_10d: float = 0.
         "future_10d_return": future_10d,
         "upside_10d": True,
         "bad_entry_10d": False,
+        "future_max_return_10d": 0.12,
+        "future_max_return_20d": 0.18,
+        "future_swing_success_20d": True,
     }
 
 
@@ -68,6 +71,7 @@ def test_build_dataset_inner_joins_features_and_labels_by_date_code(monkeypatch,
 
     assert df["code"].tolist() == ["1001"]
     assert df.loc[0, "future_10d_return"] == 0.10
+    assert df.loc[0, "future_max_return_20d"] == 0.18
 
 
 def test_build_dataset_filters_invalid_rows(monkeypatch, tmp_path) -> None:
