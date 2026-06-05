@@ -23,7 +23,7 @@ class DailyMLPipeline:
         model_root: str | Path = ML_MODEL_CURRENT_ROOT,
     ) -> None:
         self.feature_builder = feature_builder or FeatureBuilder()
-        self.predictor = predictor or Predictor()
+        self.predictor = predictor or Predictor(model_root=model_root)
         self.label_generator = label_generator or LabelGenerator()
         self.candidate_exporter = candidate_exporter or DailyAICandidateExporter()
         self.model_root = Path(model_root)
@@ -106,8 +106,9 @@ def run_daily_pipeline(
     candidate_top_n: int = 10,
     min_turnover_value: float = 50_000_000,
     max_bad_entry_probability: float | None = None,
+    model_root: str | Path | None = ML_MODEL_CURRENT_ROOT,
 ) -> dict[str, Any]:
-    return DailyMLPipeline().run_daily_pipeline(
+    return DailyMLPipeline(model_root=model_root or ML_MODEL_CURRENT_ROOT).run_daily_pipeline(
         target_date,
         export_candidates=export_candidates,
         candidate_top_n=candidate_top_n,

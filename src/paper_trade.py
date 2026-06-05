@@ -896,6 +896,14 @@ def _technical_snapshot(item: dict[str, Any]) -> dict[str, Any]:
         "total_score": item.get("total_score"),
         "technical_score": item.get("technical_score"),
         "selected_reason": selected_reason,
+        "ml_prediction_found": item.get("ml_prediction_found"),
+        "ml_prediction_source": item.get("ml_prediction_source"),
+        "ml_turnover_filter_pass": item.get("ml_turnover_filter_pass"),
+        "expected_return_10d": item.get("expected_return_10d"),
+        "expected_max_return_20d": item.get("expected_max_return_20d"),
+        "swing_success_probability_20d": item.get("swing_success_probability_20d"),
+        "bad_entry_probability_10d": item.get("bad_entry_probability_10d"),
+        "risk_adjusted_score": item.get("risk_adjusted_score"),
         "sector_name": item.get("sector_name"),
         "section": item.get("section"),
         "market_section": item.get("market_section"),
@@ -1058,6 +1066,14 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "affordable_fallback_reason",
         "affordable_fallback_round_lot_amount",
         "entry_score",
+        "ml_prediction_found",
+        "ml_prediction_source",
+        "ml_turnover_filter_pass",
+        "expected_return_10d",
+        "expected_max_return_20d",
+        "swing_success_probability_20d",
+        "bad_entry_probability_10d",
+        "risk_adjusted_score",
         "holding_signal_status",
         "holding_entry_score",
         "holding_current_score",
@@ -1120,6 +1136,8 @@ def _candidate_entry_price(item: dict[str, Any]) -> float:
     value = item.get("entry_price")
     if value is None:
         value = item.get("close")
+    if value is None:
+        return 0.0
     return float(value)
 
 
@@ -1127,6 +1145,8 @@ def _candidate_market_price(item: dict[str, Any], fallback: float | None = None)
     value = item.get("close")
     if value is None:
         value = fallback
+    if value is None:
+        return 0.0
     return float(value)
 
 

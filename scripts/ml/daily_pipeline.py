@@ -20,6 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-n", type=int, default=10, help="Daily AI candidate count.")
     parser.add_argument("--min-turnover-value", type=float, default=50_000_000)
     parser.add_argument("--max-bad-entry-probability", type=float, default=None)
+    parser.add_argument("--model-dir", default=None, help="Model directory to use for prediction. Defaults to models/ml/current.")
     parser.add_argument("--no-export-candidates", action="store_true", help="Skip daily AI candidate CSV/Markdown export.")
     return parser.parse_args()
 
@@ -32,6 +33,7 @@ def main() -> None:
         candidate_top_n=args.top_n,
         min_turnover_value=args.min_turnover_value,
         max_bad_entry_probability=args.max_bad_entry_probability,
+        model_root=args.model_dir or None,
     )
     print(f"features_path={result['features_path']}")
     print(f"predictions_path={result['predictions_path']}")

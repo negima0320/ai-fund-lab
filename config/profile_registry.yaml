@@ -818,6 +818,34 @@ profiles:
       relaxed_pending_target_exposure: true
       candlestick_score_adjustment: true
 
+  rookie_dealer_02_v2_66_ml_ranked:
+    role: experiment
+    description: v2.65候補をwalk-forward ML risk_adjusted_scoreで順位付けする検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_65
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      score_upper_filter: true
+      ml_backtest_ranked: true
+
+  rookie_dealer_02_v2_67_ml_standalone:
+    role: experiment
+    description: walk-forward ML predictions単体のrisk_adjusted_score上位候補を検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_65
+    features:
+      relative_strength: false
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      ml_backtest_standalone: true
+
   rookie_dealer_02_v2_68:
     role: experiment
     description: v2.65ベース entry_score 58以上のみ除外する高スコア過熱検証

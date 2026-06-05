@@ -76,6 +76,33 @@ FEATURE_COLUMNS = [
     "relative_return_20d",
 ]
 
+TECHNICAL_FEATURE_COLUMNS = [
+    "close",
+    "volume",
+    "turnover_value",
+    "return_1d",
+    "return_3d",
+    "return_5d",
+    "return_10d",
+    "return_20d",
+    "ma5_gap",
+    "ma10_gap",
+    "ma25_gap",
+    "ma75_gap",
+    "ma5_slope",
+    "ma25_slope",
+    "volume_ratio_5d",
+    "volume_ratio_20d",
+    "turnover_ratio_5d",
+    "turnover_ratio_20d",
+    "body_ratio",
+    "upper_shadow_ratio",
+    "lower_shadow_ratio",
+    "close_position",
+    "gap_up_ratio",
+    "daily_range_ratio",
+]
+
 FINANCIAL_FEATURE_COLUMNS = [
     "EPS",
     "BPS",

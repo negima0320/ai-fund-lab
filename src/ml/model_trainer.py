@@ -105,13 +105,15 @@ class ModelTrainer:
         }
         return model, metrics
 
-    def save_models(self, models: dict[str, Any], metrics: dict[str, Any]) -> Path:
+    def save_models(self, models: dict[str, Any], metrics: dict[str, Any], metadata: dict[str, Any] | None = None) -> Path:
         archive_dir = self.archive_root / (self.timestamp or datetime.now().strftime("%Y%m%d_%H%M%S"))
         archive_dir.mkdir(parents=True, exist_ok=True)
         for name, model in models.items():
             self._dump_model(model, archive_dir / f"{name}.joblib")
         self._write_json(archive_dir / "feature_columns.json", self.feature_columns)
         self._write_json(archive_dir / "metrics.json", metrics)
+        if metadata is not None:
+            self._write_json(archive_dir / "model_metadata.json", metadata)
 
         if self.current_root.exists():
             shutil.rmtree(self.current_root)

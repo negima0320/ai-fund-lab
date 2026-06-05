@@ -1,0 +1,101 @@
+# AI Fund Lab profile YAML
+# walk-forward ML predictions から直接候補を作るAI単体検証profileです。
+
+profile_id: rookie_dealer_02_v2_67_ml_standalone
+profile_name: 新人ディーラー2号 v2.67 ML standalone
+description: ML predictions単体のrisk_adjusted_score上位候補をバックテストする検証
+disable_single_order_amount_limit: true
+
+character:
+  role: AI候補ディーラー
+  personality:
+    - データ重視
+    - ML候補を人間確認用に評価
+    - 売買発注はしない
+  catchphrases:
+    - ML候補の実バックテスト適合を検証します
+
+features:
+  market_context: false
+  sector_analysis: false
+  ai_decision: false
+  news: false
+  candlestick_analysis: false
+  relative_strength: false
+  openai_commentary: false
+
+scoring:
+  total_score_formula: ml_risk_adjusted_score
+  use_relative_strength_score: false
+
+ai_decision:
+  enabled: false
+  provider: openai
+  fallback_to_rule_based: true
+  daily_call_limit: 0
+
+ai_commentary:
+  enabled: true
+  provider: rule_based
+  fallback_to_rule_based: true
+
+initial_capital: 1000000
+
+trading:
+  max_positions: 5
+  position_size_ratio: 0.20
+  stop_loss_rate: -0.99
+  take_profit_rate: 9.99
+  max_holding_days: 20
+  use_round_lot: true
+  round_lot_size: 100
+
+execution:
+  stop_loss_execution: intraday_stop
+
+selection:
+  min_score: 0
+  fallback_min_score: 0
+  min_confidence: 0.0
+  allow_top_pick_when_no_selection: false
+  top_pick_min_score: 0
+  max_selected: 10
+  max_rsi_for_new_position: 100
+  reject_overheated_rsi: false
+
+score_upper_filter:
+  enabled: false
+
+market_filter:
+  allow_unknown_market: true
+  risk_off_min_score: 0
+
+volume_filter:
+  enabled: false
+
+capital_utilization_policy:
+  enabled: true
+  target_exposure: 1.0
+  min_cash_buffer: 0
+  buy_lot_size: 100
+  max_position_value_rate: 0.2
+  buy_as_much_as_possible: false
+  allocation_strategy: relaxed_pending_target_exposure
+
+risk_margin:
+  max_daily_buy_amount: 1000000
+  max_single_order_amount: 200000
+  stop_trading_if_daily_loss_rate_exceeds: -1.0
+  stop_trading_if_drawdown_exceeds: -1.0
+
+ml_backtest:
+  enabled: true
+  mode: standalone
+  prediction_root: data/ml/walk_forward_predictions
+  ranking: risk_adjusted_score
+  risk_adjusted_bad_entry_weight: 0.5
+  min_turnover_value: 50000000
+  top_n: 10
+  model_dir: models/ml/current_enriched_v2
+  assumed_exit_rule: close_20d
+  prediction_source_note: walk-forward predictions; no model training or prediction generation during backtest

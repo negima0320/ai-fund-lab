@@ -83,6 +83,7 @@ from jquants_plan import (
     resolve_jquants_plan,
 )
 from market_context import build_market_context, neutral_market_context
+from ml.backtest_integration import ML_BACKTEST_COLUMNS, apply_ml_backtest_overlay
 from market_regime import effective_market_context_for_signal
 from news_provider import build_news_provider
 from paper_trade import execute_paper_trade_day, execute_real_data_paper_trade, initial_live_paper_state, initial_paper_state
@@ -11432,6 +11433,7 @@ def run_backtest(provider_name: str, start_date_text: str, end_date_text: str) -
             screen_step = ensure_screen if RUN_EXPERIMENTS_SHARED_STAGE_ACTIVE else run_screen
             _run_backtest_day_step(index, len(trading_dates), target_date_text, "screen", lambda: screen_step(provider_name, target_date_text), lambda: _backtest_screen_metrics(config, target_date_text))
             scoring_log = _run_backtest_day_step(index, len(trading_dates), target_date_text, "score", lambda: score_for_date(provider_name, target_date_text), lambda: _backtest_score_metrics(config, target_date_text))
+            scoring_log = _run_timed_backtest_phase("ml_backtest_overlay", lambda: apply_ml_backtest_overlay(scoring_log, target_date_text, config, ROOT))
             scoring_log["signal_date"] = target_date_text
             for key in ("scores", "selected"):
                 for row in scoring_log.get(key, []):
@@ -13060,7 +13062,7 @@ def _prepare_execution_candidates(
     price_source = model["entry_price_source"]
     entry_prices = {
         str(item.get("code")): item
-        for item in (load_cached_prime_prices(date.fromisoformat(entry_date_text), config) or [])
+        for item in (_load_cached_prime_prices_compatible(date.fromisoformat(entry_date_text), config) or [])
     }
     prepared: list[dict[str, Any]] = []
     for item in scored_candidates:
@@ -13106,6 +13108,15 @@ def _prepare_execution_candidates(
             )
         prepared.append(row)
     return prepared
+
+
+def _load_cached_prime_prices_compatible(fetch_date: date, config: dict[str, Any]) -> Any:
+    try:
+        return load_cached_prime_prices(fetch_date, config)
+    except TypeError as exc:
+        if "positional" not in str(exc) and "argument" not in str(exc):
+            raise
+        return load_cached_prime_prices(fetch_date)
 
 
 def _backtest_indicator_fetch_lookback_days(config: dict[str, Any]) -> int:
@@ -13509,6 +13520,8 @@ RUNTIME_SCORE_FIELDS = {
     "benchmark_source", "benchmark_return_5d", "benchmark_return_10d", "benchmark_return_20d",
     "relative_strength_5d", "relative_strength_10d", "relative_strength_20d",
     "relative_strength_score", "topix_records_loaded", "topix_api_calls",
+    "ml_prediction_found", "ml_prediction_source", "ml_turnover_filter_pass",
+    "ml_ranked_original_selected", *ML_BACKTEST_COLUMNS,
 }
 
 ANALYSIS_SCORE_FIELDS = RUNTIME_SCORE_FIELDS | {
@@ -13528,6 +13541,8 @@ ANALYSIS_SCORE_FIELDS = RUNTIME_SCORE_FIELDS | {
     "earnings_filter_checked", "earnings_filter_blocked", "earnings_filter_reason",
     "earnings_announcement_date", "earnings_calendar_records_count",
     "earnings_info_found", "earnings_candidate_date", "earnings_days_until_earnings",
+    "ml_prediction_found", "ml_prediction_source", "ml_turnover_filter_pass",
+    "ml_ranked_original_selected", *ML_BACKTEST_COLUMNS,
 }
 
 RUNTIME_TRADE_FIELDS = {
@@ -13558,6 +13573,8 @@ RUNTIME_TRADE_FIELDS = {
     "benchmark_source", "benchmark_return_5d", "benchmark_return_10d", "benchmark_return_20d",
     "relative_strength_5d", "relative_strength_10d", "relative_strength_20d",
     "relative_strength_score", "topix_records_loaded", "topix_api_calls",
+    "ml_prediction_found", "ml_prediction_source", "ml_turnover_filter_pass",
+    *ML_BACKTEST_COLUMNS,
     "config_version",
 }
 
