@@ -63,6 +63,17 @@ FEATURE_COLUMNS = [
     "days_to_earnings",
     "days_after_earnings",
     "is_near_earnings",
+    "market",
+    "sector_name",
+    "scale_category",
+    "margin_category",
+    "credit_category",
+    "topix_return_5d",
+    "topix_return_10d",
+    "topix_return_20d",
+    "relative_return_5d",
+    "relative_return_10d",
+    "relative_return_20d",
 ]
 
 FINANCIAL_FEATURE_COLUMNS = [
@@ -95,6 +106,23 @@ EARNINGS_FEATURE_COLUMNS = [
     "days_to_earnings",
     "days_after_earnings",
     "is_near_earnings",
+]
+
+LISTED_INFO_FEATURE_COLUMNS = [
+    "market",
+    "sector_name",
+    "scale_category",
+    "margin_category",
+    "credit_category",
+]
+
+TOPIX_FEATURE_COLUMNS = [
+    "topix_return_5d",
+    "topix_return_10d",
+    "topix_return_20d",
+    "relative_return_5d",
+    "relative_return_10d",
+    "relative_return_20d",
 ]
 
 LABEL_LOOKAHEAD_DAYS = 20
@@ -169,6 +197,8 @@ CATEGORICAL_FEATURE_COLUMNS = [
     "market",
     "sector_name",
     "scale_category",
+    "margin_category",
+    "credit_category",
 ]
 
 LIGHTGBM_REGRESSION_PARAMS = {
@@ -208,6 +238,11 @@ MODEL_FILENAMES = {
 PREDICTION_COLUMNS = [
     "date",
     "code",
+    "market",
+    "sector_name",
+    "scale_category",
+    "margin_category",
+    "credit_category",
     "expected_return_5d",
     "expected_return_10d",
     "upside_probability_10d",

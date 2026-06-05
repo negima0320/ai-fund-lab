@@ -13,11 +13,12 @@ from ml.data_loader import JQuantsDataLoader
 
 RANKING_COLUMNS = {
     "expected_return_10d": "expected_return_10d",
+    "risk_adjusted_return": "risk_adjusted_score",
     "expected_max_return_20d": "expected_max_return_20d",
     "ml_score": "ml_score",
 }
 
-GRID_RANKINGS = ["expected_return_10d", "expected_max_return_20d", "ml_score"]
+GRID_RANKINGS = ["expected_return_10d", "risk_adjusted_return", "expected_max_return_20d", "ml_score"]
 GRID_MAX_POSITIONS = [5, 10]
 GRID_EXIT_RULES = ["close_10d", "close_20d"]
 GRID_MIN_TURNOVER_VALUES = [50_000_000, 100_000_000]
@@ -54,12 +55,14 @@ class MLRealisticPortfolioSimulator:
         features_root: str | Path = ML_FEATURES_ROOT,
         report_root: str | Path = ML_REPORTS_ROOT,
         data_loader: JQuantsDataLoader | None = None,
+        report_suffix: str = "",
     ) -> None:
         self.predictions_root = Path(predictions_root)
         self.labels_root = Path(labels_root)
         self.features_root = Path(features_root)
         self.report_root = Path(report_root)
         self.data_loader = data_loader or JQuantsDataLoader()
+        self.report_suffix = report_suffix
 
     def simulate_grid(
         self,
@@ -118,21 +121,21 @@ class MLRealisticPortfolioSimulator:
 
     def save_report(self, result: dict[str, Any]) -> Path:
         period = result["period"]
-        path = self.report_root / f"ml_realistic_portfolio_{period['start_date']}_to_{period['end_date']}.md"
+        path = self.report_root / f"ml_realistic_portfolio{self.report_suffix}_{period['start_date']}_to_{period['end_date']}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self.format_markdown(result), encoding="utf-8")
         return path
 
     def save_json(self, result: dict[str, Any]) -> Path:
         period = result["period"]
-        path = self.report_root / f"ml_realistic_portfolio_{period['start_date']}_to_{period['end_date']}.json"
+        path = self.report_root / f"ml_realistic_portfolio{self.report_suffix}_{period['start_date']}_to_{period['end_date']}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return path
 
     def save_trades_csv(self, result: dict[str, Any]) -> Path:
         period = result["period"]
-        path = self.report_root / f"ml_realistic_trades_{period['start_date']}_to_{period['end_date']}.csv"
+        path = self.report_root / f"ml_realistic_trades{self.report_suffix}_{period['start_date']}_to_{period['end_date']}.csv"
         path.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(result.get("trades", [])).to_csv(path, index=False)
         return path
@@ -198,6 +201,11 @@ class MLRealisticPortfolioSimulator:
                 features = self._normalize_keys(pd.read_parquet(feature_path))
                 feature_columns = [column for column in ["date", "code", "turnover_value", "volume", "close"] if column in features.columns]
                 data = data.merge(features[feature_columns], on=["date", "code"], how="left")
+            if {"expected_return_10d", "bad_entry_probability_10d"}.issubset(data.columns):
+                data["risk_adjusted_score"] = (
+                    pd.to_numeric(data["expected_return_10d"], errors="coerce")
+                    - 0.5 * pd.to_numeric(data["bad_entry_probability_10d"], errors="coerce")
+                )
             for column in [*RANKING_COLUMNS.values(), "turnover_value"]:
                 if column in data.columns:
                     data[column] = pd.to_numeric(data[column], errors="coerce")

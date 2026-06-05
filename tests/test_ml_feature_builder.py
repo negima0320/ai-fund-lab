@@ -186,3 +186,53 @@ def test_earnings_calendar_features_are_added(tmp_path) -> None:
     assert df.loc[0, "days_to_earnings"] == 4
     assert df.loc[0, "days_after_earnings"] == 3
     assert bool(df.loc[0, "is_near_earnings"]) is True
+
+
+def test_listed_info_features_use_as_of_snapshot(tmp_path) -> None:
+    _write_price(tmp_path / "jquants" / "prices" / "2026-01-10.json", [_price_row(10)])
+    _write_cache(
+        tmp_path / "jquants" / "listed_info" / "2026-01-09.json",
+        [
+            {
+                "Date": "2026-01-09",
+                "Code": "1001",
+                "MktNm": "プライム",
+                "S33Nm": "情報・通信業",
+                "ScaleCat": "TOPIX Small 1",
+                "MrgnNm": "貸借",
+                "Mrgn": "2",
+            }
+        ],
+    )
+    _write_cache(
+        tmp_path / "jquants" / "listed_info" / "2026-01-11.json",
+        [{"Date": "2026-01-11", "Code": "1001", "MktNm": "未来市場", "S33Nm": "未来業種"}],
+    )
+
+    df = _builder(tmp_path).build_daily_features("2026-01-10")
+
+    assert df.loc[0, "market"] == "プライム"
+    assert df.loc[0, "sector_name"] == "情報・通信業"
+    assert df.loc[0, "scale_category"] == "TOPIX Small 1"
+    assert df.loc[0, "margin_category"] == "貸借"
+    assert df.loc[0, "credit_category"] == "2"
+
+
+def test_topix_relative_features_use_past_prices_only(tmp_path) -> None:
+    for day in range(1, 22):
+        _write_price(tmp_path / "jquants" / "prices" / f"2026-01-{day:02d}.json", [_price_row(day)])
+        _write_cache(
+            tmp_path / "jquants" / "topix_prices" / f"2026-01-{day:02d}_to_2026-01-{day:02d}.json",
+            [{"date": f"2026-01-{day:02d}", "close": float(100 + day)}],
+        )
+    _write_cache(
+        tmp_path / "jquants" / "topix_prices" / "2026-01-22_to_2026-01-22.json",
+        [{"date": "2026-01-22", "close": 9999.0}],
+    )
+
+    df = _builder(tmp_path).build_daily_features("2026-01-21")
+
+    expected_topix_5d = 121 / 116 - 1
+    assert df.loc[0, "topix_return_5d"] == pytest.approx(expected_topix_5d)
+    assert df.loc[0, "relative_return_5d"] == pytest.approx(df.loc[0, "return_5d"] - expected_topix_5d)
+    assert df.loc[0, "topix_return_20d"] == pytest.approx(121 / 101 - 1)

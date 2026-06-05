@@ -18,7 +18,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Simulate realistic report-only ML portfolios.")
     parser.add_argument("--start", required=True, help="Start date in YYYY-MM-DD format.")
     parser.add_argument("--end", required=True, help="End date in YYYY-MM-DD format.")
-    parser.add_argument("--ranking", default="expected_return_10d", choices=["expected_return_10d", "expected_max_return_20d", "ml_score"])
+    parser.add_argument(
+        "--ranking",
+        default="expected_return_10d",
+        choices=["expected_return_10d", "risk_adjusted_return", "expected_max_return_20d", "ml_score"],
+    )
     parser.add_argument("--top-n", type=int, default=10)
     parser.add_argument("--initial-cash", type=float, default=1_000_000)
     parser.add_argument("--position-size", type=float, default=100_000)
@@ -28,12 +32,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--slippage-rate", type=float, default=0.001)
     parser.add_argument("--min-turnover-value", type=float, default=50_000_000)
     parser.add_argument("--grid", action="store_true", help="Run the predefined grid over ranking, max positions, exit rule, and liquidity.")
+    parser.add_argument("--report-suffix", default="", help="Optional suffix inserted after ml_realistic_portfolio/trades.")
+    parser.add_argument("--predictions-root", default=None, help="Prediction parquet root. Defaults to data/ml/predictions.")
+    parser.add_argument("--features-root", default=None, help="Feature parquet root. Defaults to data/ml/features.")
+    parser.add_argument("--labels-root", default=None, help="Label parquet root. Defaults to data/ml/labels.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    simulator = MLRealisticPortfolioSimulator()
+    kwargs = {"report_suffix": args.report_suffix}
+    if args.predictions_root:
+        kwargs["predictions_root"] = args.predictions_root
+    if args.features_root:
+        kwargs["features_root"] = args.features_root
+    if args.labels_root:
+        kwargs["labels_root"] = args.labels_root
+    simulator = MLRealisticPortfolioSimulator(**kwargs)
     if args.grid:
         result = simulator.simulate_grid(
             args.start,

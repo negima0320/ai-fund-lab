@@ -42,6 +42,7 @@ class MLWalkForwardRunner:
         model_root: str | Path = ML_MODELS_ROOT / "walk_forward",
         report_root: str | Path = ML_REPORTS_ROOT,
         data_loader: JQuantsDataLoader | None = None,
+        report_suffix: str = "",
     ) -> None:
         self.feature_root = Path(feature_root)
         self.label_root = Path(label_root)
@@ -49,6 +50,7 @@ class MLWalkForwardRunner:
         self.model_root = Path(model_root)
         self.report_root = Path(report_root)
         self.data_loader = data_loader or JQuantsDataLoader()
+        self.report_suffix = report_suffix
 
     def run(
         self,
@@ -116,13 +118,13 @@ class MLWalkForwardRunner:
         return result
 
     def save_report(self, result: dict[str, Any]) -> Path:
-        path = self.report_root / f"walk_forward_{self._period_slug(result)}.md"
+        path = self.report_root / f"walk_forward{self.report_suffix}_{self._period_slug(result)}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self.format_markdown(result), encoding="utf-8")
         return path
 
     def save_json(self, result: dict[str, Any]) -> Path:
-        path = self.report_root / f"walk_forward_{self._period_slug(result)}.json"
+        path = self.report_root / f"walk_forward{self.report_suffix}_{self._period_slug(result)}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return path

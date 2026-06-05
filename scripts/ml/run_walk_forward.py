@@ -22,12 +22,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ranking", default="expected_return_10d", choices=["expected_return_10d"])
     parser.add_argument("--top-n", type=int, default=10)
     parser.add_argument("--exit-rule", default="close_10d", choices=["close_10d"])
+    parser.add_argument("--report-suffix", default="", help="Optional suffix inserted after walk_forward in report filenames.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    runner = MLWalkForwardRunner()
+    runner = MLWalkForwardRunner(report_suffix=args.report_suffix)
     result = runner.run(
         train_start=args.train_start,
         test_start=args.test_start,

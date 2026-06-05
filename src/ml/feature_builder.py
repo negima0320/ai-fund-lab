@@ -9,9 +9,11 @@ from ml.config import (
     FEATURE_COLUMNS,
     FINANCIAL_FEATURE_COLUMNS,
     FEATURE_HISTORY_DAYS,
+    LISTED_INFO_FEATURE_COLUMNS,
     ML_FEATURES_ROOT,
     MOVING_AVERAGE_WINDOWS,
     RETURN_WINDOWS,
+    TOPIX_FEATURE_COLUMNS,
     TURNOVER_RATIO_WINDOWS,
     VOLUME_RATIO_WINDOWS,
 )
@@ -51,6 +53,8 @@ class FeatureBuilder:
         daily = daily.dropna(subset=["date", "code", "close"])
         daily = self._add_financial_features(daily, target)
         daily = self._add_earnings_features(daily, target)
+        daily = self._add_listed_info_features(daily, target)
+        daily = self._add_topix_features(daily, history_start, target)
         return self._order_feature_columns(daily).reset_index(drop=True)
 
     def save_daily_features(self, df: pd.DataFrame, target_date: str) -> Path:
@@ -218,6 +222,61 @@ class FeatureBuilder:
         output["is_near_earnings"] = output["days_to_earnings"].abs().le(5).fillna(False)
         return output
 
+    def _add_listed_info_features(self, daily: pd.DataFrame, target: pd.Timestamp) -> pd.DataFrame:
+        output = daily.copy()
+        for column in LISTED_INFO_FEATURE_COLUMNS:
+            output[column] = pd.NA
+
+        listed = self.data_loader.load_listed_info(target.strftime("%Y-%m-%d"))
+        if listed.empty or "code" not in listed.columns:
+            return output
+
+        listed = listed.copy()
+        listed["code"] = listed["code"].astype("string")
+        columns = ["code", *[column for column in LISTED_INFO_FEATURE_COLUMNS if column in listed.columns]]
+        if len(columns) == 1:
+            return output
+        listed = listed[columns].drop_duplicates(subset=["code"], keep="last")
+        output["code"] = output["code"].astype("string")
+        output = output.merge(listed, on="code", how="left", suffixes=("", "_listed"))
+        for column in LISTED_INFO_FEATURE_COLUMNS:
+            listed_column = f"{column}_listed"
+            if listed_column in output.columns:
+                output[column] = output[listed_column].combine_first(output[column])
+                output = output.drop(columns=[listed_column])
+        return output
+
+    def _add_topix_features(self, daily: pd.DataFrame, history_start: str, target: pd.Timestamp) -> pd.DataFrame:
+        output = daily.copy()
+        for column in TOPIX_FEATURE_COLUMNS:
+            output[column] = pd.NA
+
+        topix = self.data_loader.load_topix(history_start, target.strftime("%Y-%m-%d"))
+        if topix.empty or not {"date", "close"}.issubset(topix.columns):
+            return output
+
+        topix = topix.copy()
+        topix["date"] = pd.to_datetime(topix["date"], errors="coerce")
+        topix["close"] = pd.to_numeric(topix["close"], errors="coerce")
+        topix = topix[topix["date"] <= target].dropna(subset=["date", "close"]).sort_values("date")
+        if topix.empty:
+            return output
+
+        for window in [5, 10, 20]:
+            topix[f"topix_return_{window}d"] = topix["close"] / topix["close"].shift(window) - 1
+        latest = topix[topix["date"] == target].tail(1)
+        if latest.empty:
+            return output
+
+        latest_row = latest.iloc[0]
+        for window in [5, 10, 20]:
+            topix_column = f"topix_return_{window}d"
+            relative_column = f"relative_return_{window}d"
+            output[topix_column] = latest_row.get(topix_column, pd.NA)
+            if f"return_{window}d" in output.columns:
+                output[relative_column] = output[f"return_{window}d"] - output[topix_column]
+        return output
+
     def _order_feature_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         for column in FINANCIAL_FEATURE_COLUMNS:
@@ -228,5 +287,11 @@ class FeatureBuilder:
                 df[column] = pd.to_numeric(df[column], errors="coerce")
         if "is_near_earnings" in df.columns:
             df["is_near_earnings"] = df["is_near_earnings"].fillna(False).astype(bool)
+        for column in LISTED_INFO_FEATURE_COLUMNS:
+            if column in df.columns:
+                df[column] = df[column].astype("string")
+        for column in TOPIX_FEATURE_COLUMNS:
+            if column in df.columns:
+                df[column] = pd.to_numeric(df[column], errors="coerce")
         columns = [column for column in FEATURE_COLUMNS if column in df.columns]
         return df[columns]

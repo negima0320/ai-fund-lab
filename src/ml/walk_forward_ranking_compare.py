@@ -40,11 +40,13 @@ class WalkForwardRankingComparator:
         label_root: str | Path = ML_LABELS_ROOT,
         report_root: str | Path = ML_REPORTS_ROOT,
         cache_root: str | Path = JQUANTS_CACHE_ROOT,
+        report_suffix: str = "",
     ) -> None:
         self.prediction_root = Path(prediction_root)
         self.label_root = Path(label_root)
         self.report_root = Path(report_root)
         self.data_loader = JQuantsDataLoader(cache_root)
+        self.report_suffix = report_suffix
 
     def compare(
         self,
@@ -85,14 +87,14 @@ class WalkForwardRankingComparator:
 
     def save_report(self, result: dict[str, Any]) -> Path:
         period = result["period"]
-        path = self.report_root / f"walk_forward_ranking_compare_{self._month_slug(period['start_date'])}_to_{self._month_slug(period['end_date'])}.md"
+        path = self.report_root / f"walk_forward_ranking_compare{self.report_suffix}_{self._month_slug(period['start_date'])}_to_{self._month_slug(period['end_date'])}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self.format_markdown(result), encoding="utf-8")
         return path
 
     def save_json(self, result: dict[str, Any]) -> Path:
         period = result["period"]
-        path = self.report_root / f"walk_forward_ranking_compare_{self._month_slug(period['start_date'])}_to_{self._month_slug(period['end_date'])}.json"
+        path = self.report_root / f"walk_forward_ranking_compare{self.report_suffix}_{self._month_slug(period['start_date'])}_to_{self._month_slug(period['end_date'])}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return path
@@ -132,7 +134,9 @@ class WalkForwardRankingComparator:
                 continue
             joined = self._normalize(predictions).merge(self._normalize(labels), on=["date", "code"], how="inner")
             if not info.empty:
-                joined = joined.merge(info, on="code", how="left")
+                info_columns = ["code", *[column for column in ["market", "sector_name"] if column not in joined.columns and column in info.columns]]
+                if len(info_columns) > 1:
+                    joined = joined.merge(info[info_columns], on="code", how="left")
             joined["month"] = joined["date"].dt.strftime("%Y-%m")
             frames.append(joined.dropna(axis=1, how="all"))
         if not frames:

@@ -53,6 +53,17 @@ TRADING_CALENDAR_ALIASES = {
     "HolDiv": "holiday_division",
 }
 
+LISTED_INFO_ALIASES = {
+    **COMMON_ALIASES,
+    "MktNm": "market",
+    "Market": "market",
+    "S33Nm": "sector_name",
+    "SectorName": "sector_name",
+    "ScaleCat": "scale_category",
+    "MrgnNm": "margin_category",
+    "Mrgn": "credit_category",
+}
+
 FINANCIAL_STATEMENT_ALIASES = {
     **COMMON_ALIASES,
     "DiscDate": "date",
@@ -64,9 +75,10 @@ class JQuantsDataLoader:
 
     def __init__(self, cache_root: str | Path = JQUANTS_CACHE_ROOT) -> None:
         self.cache_root = Path(cache_root)
+        self._records_cache: dict[Path, list[dict[str, Any]]] = {}
 
     def load_prices(self, start_date: str, end_date: str) -> pd.DataFrame:
-        df = self._load_endpoint("prices", aliases=PRICE_ALIASES)
+        df = self._load_endpoint("prices", aliases=PRICE_ALIASES, start_date=start_date, end_date=end_date)
         df = self._normalize_date_column(df, "date")
         df = self._normalize_code_column(df)
         df = self._normalize_numeric_columns(df, PRICE_COLUMNS[2:] + ADJUSTED_PRICE_COLUMNS)
@@ -75,7 +87,7 @@ class JQuantsDataLoader:
 
     def load_listed_info(self, as_of_date: str | None = None) -> pd.DataFrame:
         paths = self._listed_info_paths(as_of_date)
-        df = self._records_to_frame(self._read_records_from_paths(paths), COMMON_ALIASES)
+        df = self._records_to_frame(self._read_records_from_paths(paths), LISTED_INFO_ALIASES)
         df = self._normalize_date_column(df, "date")
         df = self._normalize_code_column(df)
         if as_of_date is not None:
@@ -83,21 +95,21 @@ class JQuantsDataLoader:
         return self._order_columns(df, ["date", "code"])
 
     def load_topix(self, start_date: str, end_date: str) -> pd.DataFrame:
-        df = self._load_endpoint("topix_prices", aliases=PRICE_ALIASES)
+        df = self._load_endpoint("topix_prices", aliases=PRICE_ALIASES, start_date=start_date, end_date=end_date)
         df = self._normalize_date_column(df, "date")
         df = self._normalize_numeric_columns(df, ["open", "high", "low", "close"])
         df = self._filter_date_range(df, "date", start_date, end_date)
         return self._order_columns(df, ["date", "open", "high", "low", "close"])
 
     def load_earnings_calendar(self, start_date: str, end_date: str) -> pd.DataFrame:
-        df = self._load_endpoint("earnings_calendar", aliases=COMMON_ALIASES)
+        df = self._load_endpoint("earnings_calendar", aliases=COMMON_ALIASES, start_date=start_date, end_date=end_date)
         df = self._normalize_date_column(df, "date")
         df = self._normalize_code_column(df)
         df = self._filter_date_range(df, "date", start_date, end_date)
         return self._order_columns(df, ["date", "code"])
 
     def load_trading_calendar(self, start_date: str, end_date: str) -> pd.DataFrame:
-        df = self._load_endpoint("trading_calendar", aliases=TRADING_CALENDAR_ALIASES)
+        df = self._load_endpoint("trading_calendar", aliases=TRADING_CALENDAR_ALIASES, start_date=start_date, end_date=end_date)
         df = self._normalize_date_column(df, "date")
         if "holiday_division" in df.columns:
             df["holiday_division"] = df["holiday_division"].astype("string")
@@ -116,16 +128,33 @@ class JQuantsDataLoader:
         return df.sort_values(sort_columns).reset_index(drop=True) if sort_columns else df.reset_index(drop=True)
 
     def load_financial_statements(self, start_date: str, end_date: str) -> pd.DataFrame:
-        df = self._load_endpoint("financial_statements", aliases=FINANCIAL_STATEMENT_ALIASES)
+        df = self._load_endpoint(
+            "financial_statements",
+            aliases=FINANCIAL_STATEMENT_ALIASES,
+            start_date=start_date,
+            end_date=end_date,
+        )
         df = self._normalize_date_column(df, "date")
         df = self._normalize_code_column(df)
         df = self._normalize_numeric_columns(df, FINANCIAL_NUMERIC_COLUMNS)
         df = self._filter_date_range(df, "date", start_date, end_date)
         return self._order_columns(df, ["date", "code"])
 
-    def _load_endpoint(self, endpoint: str, aliases: dict[str, str] | None = None) -> pd.DataFrame:
+    def _load_endpoint(
+        self,
+        endpoint: str,
+        aliases: dict[str, str] | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> pd.DataFrame:
         directory = self.cache_root / JQUANTS_CACHE_DIRS[endpoint]
-        return self._records_to_frame(self._read_records_from_paths(sorted(directory.glob("*.json"))), aliases or {})
+        paths = sorted(directory.glob("*.json"))
+        if start_date is not None or end_date is not None:
+            paths = self._paths_overlapping_range(paths, start_date, end_date)
+        return self._records_to_frame(
+            self._read_records_from_paths(paths, use_cache=endpoint != "prices"),
+            aliases or {},
+        )
 
     def _listed_info_paths(self, as_of_date: str | None) -> list[Path]:
         directory = self.cache_root / JQUANTS_CACHE_DIRS["listed_info"]
@@ -142,13 +171,19 @@ class JQuantsDataLoader:
         candidates = [(path, value) for path, value in dated_paths if value <= as_of]
         return [max(candidates, key=lambda item: item[1])[0]] if candidates else []
 
-    def _read_records_from_paths(self, paths: Iterable[Path]) -> list[dict[str, Any]]:
+    def _read_records_from_paths(self, paths: Iterable[Path], use_cache: bool = False) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         for path in paths:
             if not path.exists():
                 continue
+            if use_cache and path in self._records_cache:
+                records.extend(self._records_cache[path])
+                continue
             with path.open("r", encoding="utf-8") as file:
-                records.extend(self._extract_records(json.load(file)))
+                path_records = self._extract_records(json.load(file))
+            if use_cache:
+                self._records_cache[path] = path_records
+            records.extend(path_records)
         return records
 
     def _extract_records(self, payload: Any) -> list[dict[str, Any]]:
@@ -212,3 +247,18 @@ class JQuantsDataLoader:
         if not match:
             return None
         return pd.Timestamp(match.group(0))
+
+    def _paths_overlapping_range(self, paths: list[Path], start_date: str | None, end_date: str | None) -> list[Path]:
+        start = pd.Timestamp(start_date) if start_date is not None else pd.Timestamp.min
+        end = pd.Timestamp(end_date) if end_date is not None else pd.Timestamp.max
+        filtered = []
+        for path in paths:
+            dates = [pd.Timestamp(value) for value in DATE_RE.findall(path.name)]
+            if not dates:
+                filtered.append(path)
+                continue
+            path_start = min(dates)
+            path_end = max(dates)
+            if path_start <= end and path_end >= start:
+                filtered.append(path)
+        return filtered

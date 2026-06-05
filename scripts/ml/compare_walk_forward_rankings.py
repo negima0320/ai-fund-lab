@@ -20,12 +20,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end", default="2026-05-31")
     parser.add_argument("--top-n", type=int, default=10)
     parser.add_argument("--exit-rule", default="close_10d", choices=["close_10d"])
+    parser.add_argument("--report-suffix", default="", help="Optional suffix inserted after walk_forward_ranking_compare.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    comparator = WalkForwardRankingComparator()
+    comparator = WalkForwardRankingComparator(report_suffix=args.report_suffix)
     result = comparator.compare(args.start, args.end, top_n=args.top_n, exit_rule=args.exit_rule)
     md_path = comparator.save_report(result)
     json_path = comparator.save_json(result)

@@ -53,6 +53,8 @@ class Predictor:
         output = features[["date", "code"]].copy()
         output["date"] = pd.to_datetime(output["date"], errors="coerce")
         output["code"] = output["code"].astype("string")
+        for column in CATEGORICAL_FEATURE_COLUMNS:
+            output[column] = features[column].astype("string") if column in features.columns else pd.NA
         output["expected_return_5d"] = self._predict_values(self.models["future_5d_return_regression"], prepared)
         output["expected_return_10d"] = self._predict_values(self.models["future_10d_return_regression"], prepared)
         output["upside_probability_10d"] = self._predict_probability(self.models["upside_10d_classification"], prepared)

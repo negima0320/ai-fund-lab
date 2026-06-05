@@ -89,6 +89,11 @@ def test_predict_daily_outputs_required_columns_and_score(monkeypatch, tmp_path)
     assert df.columns.tolist() == [
         "date",
         "code",
+        "market",
+        "sector_name",
+        "scale_category",
+        "margin_category",
+        "credit_category",
         "expected_return_5d",
         "expected_return_10d",
         "upside_probability_10d",
@@ -99,6 +104,7 @@ def test_predict_daily_outputs_required_columns_and_score(monkeypatch, tmp_path)
         "entry_risk_label",
         "ml_score",
     ]
+    assert df["market"].isna().all()
     assert df["entry_risk_label"].tolist() == ["safe", "watch", "danger"]
     assert df.loc[0, "ml_score"] == pytest.approx(0.08 * 100 + 0.7 * 10 - 0.1 * 15)
 
