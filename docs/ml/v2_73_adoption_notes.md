@@ -2,6 +2,22 @@
 
 このメモは `rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue` を、今後の検証・運用準備における暫定本命profileとして扱う理由と、監視すべきリスクを整理するものです。
 
+## Status Update
+
+このメモは Capital Allocation Phase 5 時点の採用判断を記録したものです。
+
+その後、Portfolio Manager AI Phase 3-D で
+`rookie_dealer_02_v2_75_pm_ai_high_minus_avoid_sizing` が追加され、
+同一期間の詳細監査で v2_73 を上回りました。
+
+したがって現在の位置づけは以下です。
+
+- v2_73: 監査性の高い安定baseline / fallback reference
+- v2_75: Portfolio Manager AI sizing を加えた現時点の最有力研究候補
+
+v2_73の判断理由は、v2_75を評価するための基準として引き続き有効です。
+最新の流れは `docs/ml/ML_Phase_25_to_Portfolio_Manager_AI_Summary.md` を参照してください。
+
 ## Scope
 
 - 対象profile: `rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue`

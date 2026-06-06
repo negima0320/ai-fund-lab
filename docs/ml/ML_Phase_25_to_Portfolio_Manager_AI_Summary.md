@@ -64,6 +64,7 @@ Important report examples:
 - `reports/ml/ml_exit_ai_backtest_comparison_2023-01_to_2026-05.md`
 - `reports/ml/capital_allocation_phase5_v2_73_comparison_2023-01_to_2026-05.md`
 - `reports/ml/portfolio_manager_phase3d_full_backtest_2023-01_to_2026-05.md`
+- `reports/ml/portfolio_manager_phase3d_detail_audit_2023-01_to_2026-05.md`
 
 ## Phase 25: 5-Year Walk-Forward
 
@@ -556,42 +557,173 @@ are directionally useful inside the actual backtest engine.
 
 ## Phase 3-D Caveats
 
-Important caveats:
+The first Phase 3-D run exposed a logging gap:
 
-- `purchase_audit.csv` contains the PM inference fields and is the primary audit source.
-- The generated `trades.csv` includes PM columns, but in the first Phase 3-D run they were blank on closed SELL rows because the existing sell-row path did not carry purchase PM fields forward.
-- The Phase 3-D report joins SELL trades to `purchase_audit.csv` by `signal_date + entry_date + code` for PM score/multiplier analysis.
-- The requested end date is `2026-05-31`, but price cache ends at `2026-05-29`, so the last candidate date cannot enter the next business day. The backtest emits a coverage warning for this period-end condition.
+- `purchase_audit.csv` contained PM inference fields.
+- closed rows in `trades.csv` did not initially carry the entry-side PM fields.
+
+This was fixed by carrying PM fields from the buy decision into the pending
+position and then into the closed trade row.
+
+Fields now carried into trade logs:
+
+- `pm_high_conviction_proba`
+- `pm_avoid_proba`
+- `pm_score`
+- `pm_multiplier`
+- `pm_model_version`
+- `pm_feature_count`
+- `pm_status`
+- `pm_missing_reason`
+
+Post-fix PM log audit:
+
+| check | result |
+|---|---:|
+| `all_trades` BUY rows with PM values | `549 / 549` |
+| `trades.csv` SELL rows with PM values | `546 / 546` |
+| `purchase_audit.csv` PM match rate | `100%` |
+| `pm_status` | `ok` for all closed trades |
+
+Remaining caveat:
+
+- The requested end date is `2026-05-31`, but price cache ends at
+  `2026-05-29`, so the last candidate date cannot enter the next business day.
+  The backtest emits a coverage warning for this period-end condition.
+
+## Phase 3-D Detail Audit
+
+A dedicated detail audit was added after the PM log carry-forward fix.
+
+Implemented files:
+
+- `src/ml/portfolio_manager_phase3d_detail_audit.py`
+- `scripts/ml/audit_portfolio_manager_phase3d_detail.py`
+- `tests/test_ml_portfolio_manager_phase3d_detail_audit.py`
+
+Outputs:
+
+- `reports/ml/portfolio_manager_phase3d_detail_audit_2023-01_to_2026-05.md`
+- `reports/ml/portfolio_manager_phase3d_detail_audit_2023-01_to_2026-05.json`
+
+Audit scope:
+
+- v2_73 vs v2_75 monthly comparison
+- code concentration
+- 67400 dependency
+- PM multiplier performance
+- PM score band performance
+- skip reason comparison
+- capital utilization comparison
+- promotion judgement
+
+Key audit result:
+
+| item | result |
+|---|---:|
+| promotion checks passed | `7 / 8` |
+| v2_75 net_profit | `2,679,727` |
+| v2_75 PF | `2.2054` |
+| v2_75 DD | `-9.17%` |
+| v2_75 monthly win rate | `70.73%` |
+| v2_75 trades | `546` |
+
+The single failed promotion check was strict monotonicity of absolute
+`pm_score` band profit. This is mostly a trade-count issue: the higher score
+bands clearly improved PF, win rate, and return on buy amount, but absolute
+profit for the `0.20 to 0.40` band was lower than the `0 to 0.20` band because
+it had fewer trades.
+
+Monthly concentration check:
+
+- v2_75 was not only a `2026-03` result.
+- `2026-03` improved versus v2_73, but `2026-05` and `2025-12` also contributed
+  strongly.
+- Weak months remained, especially `2025-03` and `2024-04`.
+
+Code concentration:
+
+| metric | result |
+|---|---:|
+| top1 contribution rate | `25.54%` |
+| top3 contribution rate | `36.91%` |
+| top5 contribution rate | `45.86%` |
+| largest contributor | `67400` |
+| 67400 profit | `539,696` |
+| 67400 contribution to v2_75 net_profit | `20.14%` |
+| v2_75 excluding 67400 profit | `1,573,282` |
+| v2_75 excluding 67400 PF | `1.5670` |
+| v2_75 excluding 67400 DD | `-10.64%` |
+
+Conclusion:
+
+- 67400 is important but does not fully explain the improvement.
+- v2_75 still beats v2_73 net profit after excluding 67400.
+
+PM multiplier result:
+
+| multiplier | trade_count | net_profit | PF | win_rate |
+|---:|---:|---:|---:|---:|
+| `0.60` | `110` | `-136,272` | `0.7795` | `28.18%` |
+| `0.80` | `152` | `244,615` | `1.3123` | `46.05%` |
+| `1.00` | `145` | `512,770` | `1.5592` | `44.83%` |
+| `1.15` | `40` | `363,848` | `3.6735` | `65.00%` |
+| `1.30` | `99` | `1,128,016` | `4.3629` | `72.73%` |
+
+Interpretation:
+
+- `1.30` and `1.15` are strongly positive.
+- `0.60` is clearly weak and may deserve a future "skip instead of reduced buy"
+  experiment.
+- PM sizing did not simply increase risk; v2_75 improved PF and DD at the same
+  time.
+
+Skip reason comparison:
+
+| skip_reason | v2_73 | v2_75 | note |
+|---|---:|---:|---|
+| `insufficient_available_cash` | `330` | `231` | improved |
+| `selected_but_not_affordable` | `550` | `517` | improved |
+| `daily_buy_limit_scaled_below_round_lot` | `3` | `74` | increased due PM downsizing |
+| `max_positions_limit` | `1` | `0` | improved |
+
+Capital utilization audit:
+
+- v2_75 used less average capital than v2_73 in the approximate reconstruction.
+- Average holding count increased.
+- Drawdown improved despite the larger profit.
+
+The capital utilization reconstruction is approximate because it is based on
+closed-trade entry notional and the asset curve, not an exact daily mark-to-
+market exposure ledger.
 
 ## Current Tentative Profile Ranking
 
 | priority | profile | status |
 |---:|---|---|
-| 1 | `rookie_dealer_02_v2_75_pm_ai_high_minus_avoid_sizing` | strongest result so far; needs further robustness audit |
-| 2 | `rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue` | prior tentative main baseline |
+| 1 | `rookie_dealer_02_v2_75_pm_ai_high_minus_avoid_sizing` | strongest result so far; detail audit passed 7/8 promotion checks |
+| 2 | `rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue` | prior tentative main baseline and fallback reference |
 | 3 | `rookie_dealer_02_v2_66_ml_ranked` | simpler ML-ranked baseline |
 | deferred | `v2_74` | higher profit than v2_73 but worse PF/DD |
 | deferred | `v2_72` | too conservative |
 
 ## Recommended Next Steps
 
-Before promoting v2_75 as the new main candidate:
+v2_75 can be treated as the current strongest candidate, with the following
+follow-up checks before any production-like use:
 
-1. Carry PM fields from purchase rows into closed trade rows directly.
-2. Run a v2_75 diagnostics report:
-   - monthly performance
-   - yearly performance
-   - code concentration
-   - sector concentration where safe metadata exists
-   - 67400/top3/top5 contribution
-   - multiplier band by month
-3. Compare v2_75 against v2_73 on adverse periods only.
-4. Run a robustness check with:
+1. Keep v2_73 as a fallback baseline until v2_75 survives more robustness tests.
+2. Compare v2_75 against v2_73 on adverse periods only.
+3. Run a robustness check with:
    - multiplier caps
    - no `1.30` boost
+   - skip instead of `0.60` reduced buy
    - only defensive reduction
    - `high_strong` as a second full backtest if needed
-5. Keep v2_73 as the fallback baseline until v2_75 survives concentration and stability audits.
+4. Track whether `daily_buy_limit_scaled_below_round_lot` keeps increasing in
+   live-like daily runs.
+5. Continue checking top1/top3/top5 contribution so that the profile does not
+   become silently dominated by one ticker.
 
 ## Test Commands
 
@@ -603,12 +735,12 @@ PYTHONPYCACHEPREFIX=/private/tmp/ai-fund-lab-pycache python3 -m pytest -q \
   tests/test_ml_portfolio_manager_trainer.py \
   tests/test_ml_portfolio_manager_data_lineage.py \
   tests/test_ml_portfolio_manager_phase3c.py \
-  tests/test_ml_portfolio_manager_phase3d.py
+  tests/test_ml_portfolio_manager_phase3d.py \
+  tests/test_ml_portfolio_manager_phase3d_detail_audit.py
 ```
 
 Latest result at the time of this document:
 
 ```text
-18 passed, 1 warning
+20 passed, 1 warning
 ```
-
