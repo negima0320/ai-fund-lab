@@ -487,6 +487,55 @@ def test_rookie_dealer_02_v2_69_overheat_risk_on_filter_profile_loads() -> None:
     assert load_profile("rookie_dealer_02_v2.69")["profile_id"] == "rookie_dealer_02_v2_69"
 
 
+def test_rookie_dealer_02_v2_71_scaled_buy_profile_loads() -> None:
+    profile_71 = load_profile("rookie_dealer_02_v2_71")
+    profile_68 = load_profile("rookie_dealer_02_v2_68_ml_ranked_exit_ai_050")
+
+    assert profile_71["profile_id"] == "rookie_dealer_02_v2_71_ml_ranked_exit_ai_050_scaled_buy"
+    assert profile_71["trading"] == profile_68["trading"]
+    assert profile_71["scoring"] == profile_68["scoring"]
+    assert profile_71["capital_utilization_policy"] == profile_68["capital_utilization_policy"]
+    assert profile_71["ml_backtest"]["enabled"] is True
+    assert profile_71["ml_exit_ai"] == profile_68["ml_exit_ai"]
+    assert profile_71["ml_exit_ai"]["threshold"] == 0.50
+    assert profile_71["scaled_buy"]["enabled"] is True
+    assert profile_71["scaled_buy"]["reason"] == "daily_buy_limit"
+    assert load_profile("rookie_dealer_02_v2.71")["profile_id"] == "rookie_dealer_02_v2_71_ml_ranked_exit_ai_050_scaled_buy"
+
+
+def test_rookie_dealer_02_v2_72_ai_purchase_policy_profile_loads() -> None:
+    profile_72 = load_profile("rookie_dealer_02_v2_72")
+    profile_71 = load_profile("rookie_dealer_02_v2_71")
+
+    assert profile_72["profile_id"] == "rookie_dealer_02_v2_72_ml_ranked_exit_ai_scaled_buy_v2"
+    assert profile_72["trading"] == profile_71["trading"]
+    assert profile_72["scoring"] == profile_71["scoring"]
+    assert profile_72["ml_backtest"] == profile_71["ml_backtest"]
+    assert profile_72["ml_exit_ai"] == profile_71["ml_exit_ai"]
+    assert profile_72["scaled_buy"]["enabled"] is True
+    assert profile_72["ai_purchase_policy"]["enabled"] is True
+    assert profile_72["ai_purchase_policy"]["daily_buy_limit"] == 900000
+    assert profile_72["ai_purchase_policy"]["max_position_amount_ratio"] == 0.30
+    assert profile_72["ai_purchase_policy"]["max_position_amount_abs"] == 900000
+    assert load_profile("rookie_dealer_02_v2.72")["profile_id"] == "rookie_dealer_02_v2_72_ml_ranked_exit_ai_scaled_buy_v2"
+
+
+def test_rookie_dealer_02_v2_73_scaled_buy_continue_profile_loads() -> None:
+    profile_73 = load_profile("rookie_dealer_02_v2_73")
+    profile_71 = load_profile("rookie_dealer_02_v2_71")
+
+    assert profile_73["profile_id"] == "rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue"
+    assert profile_73["trading"] == profile_71["trading"]
+    assert profile_73["scoring"] == profile_71["scoring"]
+    assert profile_73["capital_utilization_policy"] == profile_71["capital_utilization_policy"]
+    assert profile_73["ml_backtest"] == profile_71["ml_backtest"]
+    assert profile_73["ml_exit_ai"] == profile_71["ml_exit_ai"]
+    assert profile_73["scaled_buy"]["enabled"] is True
+    assert profile_73["purchase_audit"]["enabled"] is True
+    assert "ai_purchase_policy" not in profile_73
+    assert load_profile("rookie_dealer_02_v2.73")["profile_id"] == "rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue"
+
+
 def test_breakout_rsi_54w_profile_loads() -> None:
     profile = load_profile("breakout_rsi_54w_v1")
 

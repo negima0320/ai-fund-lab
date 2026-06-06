@@ -13489,6 +13489,11 @@ def _storage_save_mode(config: dict[str, Any]) -> str:
     return mode if mode in {"full_debug", "analysis", "compact"} else "analysis"
 
 
+def _execution_requires_full_scored_candidates(config: dict[str, Any]) -> bool:
+    fallback_policy = config.get("affordable_fallback_buy")
+    return bool(isinstance(fallback_policy, dict) and fallback_policy.get("enabled", False))
+
+
 RUNTIME_SCORE_FIELDS = {
     "code", "name", "sector_name", "section", "market_section", "listing_market",
     "date", "open", "high", "low", "close", "volume", "ma5", "ma25", "rsi",
@@ -13553,6 +13558,7 @@ RUNTIME_TRADE_FIELDS = {
     "exit_price", "shares", "amount", "profit", "profit_rate", "exit_reason",
     "result", "score", "entry_score", "total_score", "technical_score", "rsi", "volume_ratio",
     "selected_reason", "reason", "broker_provider", "order_status", "status",
+    "candidate_source", "fallback_rank", "raw_candidate_rank",
     "affordable_fallback_buy_selected", "affordable_fallback_original_code",
     "affordable_fallback_reason", "affordable_fallback_round_lot_amount",
     "affordable_fallback_original_name", "affordable_fallback_attempted",
@@ -13630,7 +13636,7 @@ def _generate_backtest_daily_markdown(config: dict[str, Any]) -> bool:
 
 def _scores_for_storage(scores: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
     mode = _storage_save_mode(config)
-    if mode == "full_debug":
+    if mode == "full_debug" or _execution_requires_full_scored_candidates(config):
         rows = scores
     elif mode == "compact":
         rows = [item for item in scores if item.get("selected") or _is_always_saved_rejected_score(item) or _is_market_expansion_saved_score(item, config)]
@@ -15270,6 +15276,13 @@ def write_backtest_summary(
         _run_timed_backtest_phase("report_write", lambda: write_text(rule_based_90d_report_path, render_rule_based_90d_summary_markdown(summary)))
     _run_timed_backtest_phase("report_write", lambda: write_summary_csv(backtest_dir / "summary.csv", daily_summaries))
     _run_timed_backtest_phase("report_write", lambda: write_trades_csv(backtest_dir / "trades.csv", closed_trades))
+    _run_timed_backtest_phase(
+        "report_write",
+        lambda: write_purchase_audit_csv(
+            backtest_dir / "purchase_audit.csv",
+            [trade for trade in all_trades if trade.get("action") == "PURCHASE_AUDIT"],
+        ),
+    )
     return summary
 
 
@@ -21248,6 +21261,12 @@ def write_trades_csv(path: Path, trades: list[dict[str, Any]]) -> None:
         "exit_ai_threshold",
         "exit_ai_prediction_joined",
         "exit_ai_warning",
+        "scaled_buy_triggered",
+        "original_planned_shares",
+        "scaled_shares",
+        "original_amount",
+        "scaled_amount",
+        "scale_reason",
         "result",
         "score",
         "entry_score",
@@ -21288,6 +21307,9 @@ def write_trades_csv(path: Path, trades: list[dict[str, Any]]) -> None:
         "earnings_announcement_date",
         "selected_reason",
         "reason",
+        "candidate_source",
+        "fallback_rank",
+        "raw_candidate_rank",
         "affordable_fallback_buy_selected",
         "affordable_fallback_original_code",
         "affordable_fallback_original_name",
@@ -21332,6 +21354,52 @@ def write_trades_csv(path: Path, trades: list[dict[str, Any]]) -> None:
     try:
         rows = [{field: trade.get(field, "") for field in fieldnames} for trade in trades]
         write_csv(path, fieldnames, rows)
+    finally:
+        _record_backtest_phase_time("csv_read_write_total", time.perf_counter() - started)
+
+
+def write_purchase_audit_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    started = time.perf_counter()
+    fieldnames = [
+        "trade_id",
+        "profile_id",
+        "profile_name",
+        "signal_date",
+        "entry_date",
+        "code",
+        "name",
+        "candidate_source",
+        "fallback_rank",
+        "raw_candidate_rank",
+        "candidate_rank",
+        "score_rank",
+        "risk_adjusted_score",
+        "expected_return_10d",
+        "bad_entry_probability_10d",
+        "cash_before",
+        "cash_after",
+        "daily_buy_limit_remaining_before",
+        "daily_buy_limit_remaining_after",
+        "daily_buy_limit_type",
+        "daily_buy_limit_ratio",
+        "daily_buy_limit_applied",
+        "max_positions_remaining_before",
+        "planned_shares",
+        "planned_amount",
+        "scaled_shares",
+        "scaled_amount",
+        "final_shares",
+        "final_amount",
+        "decision",
+        "skip_reason",
+        "reject_reason",
+        "scale_reason",
+        "allocation_limit",
+        "allocation_reason",
+    ]
+    try:
+        output_rows = [{field: row.get(field, "") for field in fieldnames} for row in rows]
+        write_csv(path, fieldnames, output_rows)
     finally:
         _record_backtest_phase_time("csv_read_write_total", time.perf_counter() - started)
 

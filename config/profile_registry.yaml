@@ -897,6 +897,82 @@ profiles:
       ml_backtest_ranked: true
       ml_exit_ai: true
 
+  rookie_dealer_02_v2_71_ml_ranked_exit_ai_050_scaled_buy:
+    role: experiment
+    description: v2.68に日次買付上限超過時の縮小買付を追加する検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_68_ml_ranked_exit_ai_050
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      score_upper_filter: true
+      ml_backtest_ranked: true
+      ml_exit_ai: true
+      scaled_buy: true
+
+  rookie_dealer_02_v2_72_ml_ranked_exit_ai_scaled_buy_v2:
+    role: experiment
+    description: v2.71にAI順位別の買付上限と候補単位の購入監査を追加する検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_71_ml_ranked_exit_ai_050_scaled_buy
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      score_upper_filter: true
+      ml_backtest_ranked: true
+      ml_exit_ai: true
+      scaled_buy: true
+      ai_purchase_policy: true
+
+  rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue:
+    role: experiment
+    description: v2.71の買付強度を維持し、縮小買付後の候補継続と購入監査を検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_71_ml_ranked_exit_ai_050_scaled_buy
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      score_upper_filter: true
+      ml_backtest_ranked: true
+      ml_exit_ai: true
+      scaled_buy: true
+      purchase_audit: true
+
+  rookie_dealer_02_v2_74_ml_ranked_exit_ai_affordable_fallback:
+    role: experiment
+    description: v2.73にaffordability-aware fallbackを追加し、買付可能な下位ML候補で資金利用率改善を検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      score_upper_filter: true
+      ml_backtest_ranked: true
+      ml_exit_ai: true
+      scaled_buy: true
+      purchase_audit: true
+      affordable_fallback_buy: true
+
   rookie_dealer_02_v2_68:
     role: experiment
     description: v2.65ベース entry_score 58以上のみ除外する高スコア過熱検証

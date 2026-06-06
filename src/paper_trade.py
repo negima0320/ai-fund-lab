@@ -471,6 +471,207 @@ def _calculate_buy_shares(price: float, allocation: float, config: dict[str, Any
     return shares, ""
 
 
+def _scaled_buy_policy(config: dict[str, Any]) -> dict[str, Any]:
+    policy = config.get("scaled_buy")
+    return policy if isinstance(policy, dict) else {}
+
+
+def _scaled_buy_enabled(config: dict[str, Any]) -> bool:
+    return bool(_scaled_buy_policy(config).get("enabled", False))
+
+
+def _ai_purchase_policy(config: dict[str, Any]) -> dict[str, Any]:
+    policy = config.get("ai_purchase_policy")
+    return policy if isinstance(policy, dict) else {}
+
+
+def _ai_purchase_enabled(config: dict[str, Any]) -> bool:
+    return bool(_ai_purchase_policy(config).get("enabled", False))
+
+
+def _purchase_audit_policy(config: dict[str, Any]) -> dict[str, Any]:
+    policy = config.get("purchase_audit")
+    return policy if isinstance(policy, dict) else {}
+
+
+def _purchase_audit_enabled(config: dict[str, Any]) -> bool:
+    return bool(_purchase_audit_policy(config).get("enabled", False) or _ai_purchase_enabled(config))
+
+
+def _daily_buy_limit_info(config: dict[str, Any], total_assets: float | None = None) -> dict[str, Any]:
+    scaled_policy = _scaled_buy_policy(config)
+    mode = str(scaled_policy.get("limit_mode") or "fixed")
+    if mode == "unlimited":
+        return {"limit": 0.0, "type": "unlimited", "ratio": None}
+    if mode == "asset_ratio":
+        ratio = float(scaled_policy.get("daily_buy_limit_ratio", 0) or 0)
+        if ratio <= 0:
+            return {"limit": 0.0, "type": "unlimited", "ratio": ratio}
+        assets = float(total_assets or 0)
+        return {"limit": max(0.0, assets * ratio), "type": "asset_ratio", "ratio": ratio}
+    policy = _ai_purchase_policy(config)
+    value = scaled_policy.get("daily_buy_limit")
+    if value is None:
+        value = policy.get("daily_buy_limit")
+    if value is None:
+        value = config.get("safety", {}).get("max_daily_buy_amount")
+    return {"limit": float(value or 0), "type": "fixed", "ratio": None}
+
+
+def _configured_daily_buy_limit(config: dict[str, Any], total_assets: float | None = None) -> float:
+    return float(_daily_buy_limit_info(config, total_assets).get("limit") or 0)
+
+
+def _daily_buy_amount_used(today_orders: list[dict[str, Any]]) -> float:
+    return sum(
+        float(order.get("amount") or order.get("notional") or 0)
+        for order in today_orders
+        if str(order.get("action") or order.get("side") or "").upper() == "BUY" and not order.get("rejected")
+    )
+
+
+def _daily_buy_limit_remaining(config: dict[str, Any], today_orders: list[dict[str, Any]], total_assets: float | None = None) -> float:
+    limit = _configured_daily_buy_limit(config, total_assets)
+    if limit <= 0:
+        return float("inf")
+    return max(0.0, limit - _daily_buy_amount_used(today_orders))
+
+
+def _scale_buy_to_daily_limit(
+    *,
+    shares: int,
+    price: float,
+    config: dict[str, Any],
+    today_orders: list[dict[str, Any]],
+    total_assets: float | None = None,
+) -> tuple[int, dict[str, Any]]:
+    if not _scaled_buy_enabled(config) or shares <= 0 or price <= 0:
+        return shares, {}
+    limit_info = _daily_buy_limit_info(config, total_assets)
+    max_daily_buy = float(limit_info.get("limit") or 0)
+    if max_daily_buy <= 0:
+        return shares, {}
+    already_planned = _daily_buy_amount_used(today_orders)
+    available_daily_buy = max(0.0, max_daily_buy - already_planned)
+    original_amount = shares * price
+    if original_amount <= available_daily_buy:
+        return shares, {}
+    lot_size = _round_lot_size(config) if _use_round_lot(config) else 1
+    scaled_lots = int(available_daily_buy // (price * lot_size))
+    scaled_shares = scaled_lots * lot_size
+    if scaled_shares <= 0:
+        return 0, {
+            "scaled_buy_triggered": True,
+            "original_planned_shares": shares,
+            "scaled_shares": 0,
+            "original_amount": round(original_amount, 2),
+            "scaled_amount": 0.0,
+            "scale_reason": "daily_buy_limit",
+            "daily_buy_limit_type": limit_info.get("type"),
+            "daily_buy_limit_ratio": limit_info.get("ratio"),
+            "daily_buy_limit_applied": round(max_daily_buy, 2),
+        }
+    return scaled_shares, {
+        "scaled_buy_triggered": True,
+        "original_planned_shares": shares,
+        "scaled_shares": scaled_shares,
+        "original_amount": round(original_amount, 2),
+        "scaled_amount": round(scaled_shares * price, 2),
+        "scale_reason": "daily_buy_limit",
+        "daily_buy_limit_type": limit_info.get("type"),
+        "daily_buy_limit_ratio": limit_info.get("ratio"),
+        "daily_buy_limit_applied": round(max_daily_buy, 2),
+    }
+
+
+def _candidate_rank_value(item: dict[str, Any], fallback: int | None = None) -> int:
+    value = item.get("daily_score_rank")
+    if value in {None, ""}:
+        value = item.get("rank")
+    try:
+        rank = int(value)
+    except (TypeError, ValueError):
+        rank = int(fallback or 999999)
+    return rank if rank > 0 else int(fallback or 999999)
+
+
+def _candidate_risk_adjusted_score(item: dict[str, Any]) -> float:
+    value = item.get("risk_adjusted_score")
+    if value is not None and value != "":
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+    expected = item.get("expected_return_10d")
+    bad_entry = item.get("bad_entry_probability_10d")
+    try:
+        expected_value = float(expected)
+        bad_entry_value = float(bad_entry)
+    except (TypeError, ValueError):
+        return float(item.get("total_score") or item.get("score") or 0)
+    return expected_value - 0.5 * bad_entry_value
+
+
+def _ai_rank_position_ratio(config: dict[str, Any], rank: int) -> float:
+    policy = _ai_purchase_policy(config)
+    tiers = policy.get("rank_position_ratio_tiers")
+    if isinstance(tiers, list):
+        for tier in tiers:
+            if not isinstance(tier, dict):
+                continue
+            max_rank = tier.get("max_rank")
+            ratio = tier.get("ratio")
+            if ratio is None:
+                continue
+            if max_rank in {None, ""} or rank <= int(max_rank):
+                return float(ratio)
+    ratios = policy.get("rank_position_ratios")
+    if isinstance(ratios, dict):
+        if rank <= 1 and ratios.get("rank1") is not None:
+            return float(ratios["rank1"])
+        if rank <= 3 and ratios.get("rank2_3") is not None:
+            return float(ratios["rank2_3"])
+        if ratios.get("rank4_plus") is not None:
+            return float(ratios["rank4_plus"])
+    return float(policy.get("max_position_amount_ratio", 0.3) or 0.3)
+
+
+def _ai_purchase_allocation(
+    *,
+    cash: float,
+    initial_cash: float,
+    state: dict[str, Any],
+    config: dict[str, Any],
+    today_orders: list[dict[str, Any]],
+    rank: int,
+) -> tuple[float, str, dict[str, Any]]:
+    policy = _ai_purchase_policy(config)
+    if not _ai_purchase_enabled(config):
+        return 0.0, "", {}
+    daily_remaining = _daily_buy_limit_remaining(config, today_orders)
+    total_assets = float(state.get("total_assets") or (cash + _current_market_exposure(state)) or initial_cash)
+    rank_ratio = _ai_rank_position_ratio(config, rank)
+    max_position_ratio = float(policy.get("max_position_amount_ratio", rank_ratio) or rank_ratio)
+    max_position_abs = float(policy.get("max_position_amount_abs", 0) or 0)
+    caps = [
+        max(0.0, cash),
+        daily_remaining if _configured_daily_buy_limit(config) > 0 else max(0.0, cash),
+        max(0.0, total_assets * rank_ratio),
+        max(0.0, total_assets * max_position_ratio),
+    ]
+    if max_position_abs > 0:
+        caps.append(max_position_abs)
+    allocation = max(0.0, min(caps))
+    return allocation, "ai_purchase_policy", {
+        "ai_purchase_enabled": True,
+        "ai_purchase_rank_ratio": rank_ratio,
+        "ai_purchase_max_position_amount_ratio": max_position_ratio,
+        "ai_purchase_max_position_amount_abs": max_position_abs,
+        "ai_purchase_total_assets": round(total_assets, 2),
+        "daily_buy_limit_remaining_before": round(daily_remaining, 2),
+    }
+
+
 def _capital_utilization_policy(config: dict[str, Any]) -> dict[str, Any]:
     policy = config.get("capital_utilization_policy")
     return policy if isinstance(policy, dict) else {}
@@ -570,6 +771,27 @@ def _affordable_fallback_surplus_enabled(config: dict[str, Any]) -> bool:
     return bool(_affordable_fallback_policy(config).get("surplus_after_selection", False))
 
 
+def _affordable_fallback_max_buys_per_day(config: dict[str, Any]) -> int:
+    policy = _affordable_fallback_policy(config)
+    value = policy.get("max_fallback_buys_per_day", 999999)
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 999999
+
+
+def _affordable_fallback_float_setting(policy: dict[str, Any], *names: str) -> float | None:
+    for name in names:
+        value = policy.get(name)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def _dynamic_exposure_regime(item: dict[str, Any]) -> str:
     existing = str(item.get("dynamic_exposure_regime") or item.get("classified_market_regime") or "")
     if existing:
@@ -642,8 +864,27 @@ def _find_affordable_fallback_candidate(
     fallback_min_score = float(selection.get("fallback_min_score", selection.get("top_pick_min_score", regular_min_score)) or 0)
     configured_min_score = policy.get("min_total_score")
     configured_min_score = float(configured_min_score) if configured_min_score is not None else None
+    configured_min_risk_adjusted = _affordable_fallback_float_setting(
+        policy,
+        "min_risk_adjusted_score",
+        "fallback_min_risk_adjusted_score",
+    )
+    configured_min_expected_return = _affordable_fallback_float_setting(
+        policy,
+        "min_expected_return_10d",
+        "fallback_min_expected_return_10d",
+    )
+    configured_max_bad_entry = _affordable_fallback_float_setting(
+        policy,
+        "max_bad_entry_probability_10d",
+        "fallback_max_bad_entry_probability",
+    )
     max_rank_in_day = policy.get("max_rank_in_day")
     max_rank_in_day = int(max_rank_in_day) if max_rank_in_day is not None else None
+    fallback_top_k = int(policy.get("fallback_top_k", 50) or 50)
+    min_turnover_value = float(policy.get("min_turnover_value", config.get("ml_backtest", {}).get("min_turnover_value", 0)) or 0)
+    require_prediction = bool(policy.get("require_walk_forward_prediction", False))
+    sort_key = str(policy.get("ranking") or config.get("ml_backtest", {}).get("ranking") or "risk_adjusted_score")
     min_confidence = float(selection.get("min_confidence", config.get("scoring", {}).get("confidence_min_for_buy", 0.0)) or 0)
     signal_date = str(original.get("signal_date") or original.get("date") or "")
     available_cash = _available_cash_after_buffer(cash, pending_buy_amount, config)
@@ -657,6 +898,19 @@ def _find_affordable_fallback_candidate(
             continue
         candidate_signal_date = str(candidate.get("signal_date") or candidate.get("date") or "")
         if signal_date and candidate_signal_date != signal_date:
+            continue
+        if require_prediction and not candidate.get("ml_prediction_found", False):
+            if diagnostics is not None:
+                diagnostics["fallback_missing_prediction_count"] = diagnostics.get("fallback_missing_prediction_count", 0) + 1
+            continue
+        turnover = candidate.get("turnover_value")
+        try:
+            turnover_value = float(turnover)
+        except (TypeError, ValueError):
+            turnover_value = 0.0
+        if min_turnover_value and turnover_value < min_turnover_value:
+            if diagnostics is not None:
+                diagnostics["fallback_low_turnover_count"] = diagnostics.get("fallback_low_turnover_count", 0) + 1
             continue
         if not market_section_allowed(candidate, config):
             continue
@@ -676,15 +930,53 @@ def _find_affordable_fallback_candidate(
         confidence = float(candidate.get("confidence") or 0)
         if confidence < min_confidence or score < fallback_min_score:
             continue
+        risk_adjusted = _candidate_risk_adjusted_score(candidate)
+        if configured_min_risk_adjusted is not None and risk_adjusted < configured_min_risk_adjusted:
+            if diagnostics is not None:
+                diagnostics["fallback_risk_adjusted_below_min_count"] = diagnostics.get("fallback_risk_adjusted_below_min_count", 0) + 1
+            continue
+        expected_return = candidate.get("expected_return_10d")
+        try:
+            expected_return_value = float(expected_return)
+        except (TypeError, ValueError):
+            expected_return_value = None
+        if configured_min_expected_return is not None and (
+            expected_return_value is None or expected_return_value < configured_min_expected_return
+        ):
+            if diagnostics is not None:
+                diagnostics["fallback_expected_return_below_min_count"] = diagnostics.get("fallback_expected_return_below_min_count", 0) + 1
+            continue
+        bad_entry = candidate.get("bad_entry_probability_10d")
+        try:
+            bad_entry_value = float(bad_entry)
+        except (TypeError, ValueError):
+            bad_entry_value = None
+        if configured_max_bad_entry is not None and (bad_entry_value is None or bad_entry_value > configured_max_bad_entry):
+            if diagnostics is not None:
+                diagnostics["fallback_bad_entry_above_max_count"] = diagnostics.get("fallback_bad_entry_above_max_count", 0) + 1
+            continue
         round_lot_amount = _candidate_round_lot_amount(candidate, config)
         if round_lot_amount <= 0 or round_lot_amount > allocation_limit or round_lot_amount > available_cash:
             continue
         regular_priority = 0 if score >= regular_min_score else 1
-        candidates.append((regular_priority, -score, round_lot_amount, code, candidate))
+        rank_sort = rank if rank is not None else 999999
+        primary_sort = -risk_adjusted if sort_key == "risk_adjusted_score" else -score
+        candidates.append((regular_priority, primary_sort, rank_sort, round_lot_amount, code, candidate))
     if not candidates:
         return None
-    candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
-    return dict(candidates[0][4])
+    candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4]))
+    fallback_rank = 0
+    selected_candidate = None
+    for fallback_rank, candidate_tuple in enumerate(candidates[:fallback_top_k], start=1):
+        selected_candidate = dict(candidate_tuple[5])
+        break
+    if selected_candidate is None:
+        return None
+    selected_candidate["candidate_source"] = "fallback"
+    selected_candidate["selection_source"] = "affordable_fallback_buy"
+    selected_candidate["fallback_rank"] = fallback_rank
+    selected_candidate["raw_candidate_rank"] = _candidate_rank_value(original)
+    return selected_candidate
 
 
 def _find_surplus_affordable_fallback_candidate(
@@ -708,8 +1000,27 @@ def _find_surplus_affordable_fallback_candidate(
     regular_min_score = float(selection.get("min_score", 0) or 0)
     configured_min_score = policy.get("min_total_score")
     min_score = float(configured_min_score) if configured_min_score is not None else regular_min_score
+    configured_min_risk_adjusted = _affordable_fallback_float_setting(
+        policy,
+        "min_risk_adjusted_score",
+        "fallback_min_risk_adjusted_score",
+    )
+    configured_min_expected_return = _affordable_fallback_float_setting(
+        policy,
+        "min_expected_return_10d",
+        "fallback_min_expected_return_10d",
+    )
+    configured_max_bad_entry = _affordable_fallback_float_setting(
+        policy,
+        "max_bad_entry_probability_10d",
+        "fallback_max_bad_entry_probability",
+    )
     max_rank_in_day = policy.get("max_rank_in_day")
     max_rank_in_day = int(max_rank_in_day) if max_rank_in_day is not None else None
+    fallback_top_k = int(policy.get("fallback_top_k", 50) or 50)
+    min_turnover_value = float(policy.get("min_turnover_value", config.get("ml_backtest", {}).get("min_turnover_value", 0)) or 0)
+    require_prediction = bool(policy.get("require_walk_forward_prediction", False))
+    sort_key = str(policy.get("ranking") or config.get("ml_backtest", {}).get("ranking") or "risk_adjusted_score")
     min_confidence = float(selection.get("min_confidence", config.get("scoring", {}).get("confidence_min_for_buy", 0.0)) or 0)
     available_cash = _available_cash_after_buffer(cash, pending_buy_amount, config)
     blocked_codes = set(held_codes) | set(pending_buy_codes) | set(same_day_regular_selected_codes)
@@ -721,6 +1032,19 @@ def _find_surplus_affordable_fallback_candidate(
         if not code or code in blocked_codes:
             continue
         if candidate.get("selected"):
+            continue
+        if require_prediction and not candidate.get("ml_prediction_found", False):
+            if diagnostics is not None:
+                diagnostics["missing_prediction"] = diagnostics.get("missing_prediction", 0) + 1
+            continue
+        turnover = candidate.get("turnover_value")
+        try:
+            turnover_value = float(turnover)
+        except (TypeError, ValueError):
+            turnover_value = 0.0
+        if min_turnover_value and turnover_value < min_turnover_value:
+            if diagnostics is not None:
+                diagnostics["low_turnover"] = diagnostics.get("low_turnover", 0) + 1
             continue
         if not market_section_allowed(candidate, config):
             if diagnostics is not None:
@@ -740,6 +1064,31 @@ def _find_surplus_affordable_fallback_candidate(
             if diagnostics is not None:
                 diagnostics["confidence_below_min"] = diagnostics.get("confidence_below_min", 0) + 1
             continue
+        risk_adjusted = _candidate_risk_adjusted_score(candidate)
+        if configured_min_risk_adjusted is not None and risk_adjusted < configured_min_risk_adjusted:
+            if diagnostics is not None:
+                diagnostics["risk_adjusted_below_min"] = diagnostics.get("risk_adjusted_below_min", 0) + 1
+            continue
+        expected_return = candidate.get("expected_return_10d")
+        try:
+            expected_return_value = float(expected_return)
+        except (TypeError, ValueError):
+            expected_return_value = None
+        if configured_min_expected_return is not None and (
+            expected_return_value is None or expected_return_value < configured_min_expected_return
+        ):
+            if diagnostics is not None:
+                diagnostics["expected_return_below_min"] = diagnostics.get("expected_return_below_min", 0) + 1
+            continue
+        bad_entry = candidate.get("bad_entry_probability_10d")
+        try:
+            bad_entry_value = float(bad_entry)
+        except (TypeError, ValueError):
+            bad_entry_value = None
+        if configured_max_bad_entry is not None and (bad_entry_value is None or bad_entry_value > configured_max_bad_entry):
+            if diagnostics is not None:
+                diagnostics["bad_entry_above_max"] = diagnostics.get("bad_entry_above_max", 0) + 1
+            continue
         rank_value = candidate.get("daily_score_rank") if candidate.get("daily_score_rank") is not None else candidate.get("rank")
         rank = int(rank_value) if rank_value not in {None, ""} else None
         if max_rank_in_day is not None and (rank is None or rank > max_rank_in_day):
@@ -752,16 +1101,31 @@ def _find_surplus_affordable_fallback_candidate(
                 diagnostics["not_affordable"] = diagnostics.get("not_affordable", 0) + 1
             continue
         rank_sort = rank if rank is not None else 999999
-        candidates.append((rank_sort, -score, round_lot_amount, code, candidate))
+        primary_sort = -risk_adjusted if sort_key == "risk_adjusted_score" else -score
+        candidates.append((primary_sort, rank_sort, round_lot_amount, code, candidate))
     if diagnostics is not None:
         diagnostics["candidate_count"] = len(candidates)
-    if not candidates:
+    if not candidates or fallback_top_k <= 0:
         return None
     candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
-    return dict(candidates[0][4])
+    selected_candidate = dict(candidates[:fallback_top_k][0][4])
+    selected_candidate["candidate_source"] = "fallback"
+    selected_candidate["selection_source"] = "affordable_fallback_buy"
+    selected_candidate["fallback_rank"] = 1
+    selected_candidate["raw_candidate_rank"] = ""
+    return selected_candidate
 
 
 def _sort_selected_candidates(selected: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
+    if _ai_purchase_enabled(config):
+        return sorted(
+            selected,
+            key=lambda item: (
+                _candidate_rank_value(item),
+                -_candidate_risk_adjusted_score(item),
+                str(item.get("code") or ""),
+            ),
+        )
     strategy = _allocation_strategy(config)
     if strategy != "round_lot_priority_near_score":
         return sorted(selected, key=lambda item: (float(item["total_score"]), float(item["confidence"])), reverse=True)
@@ -789,6 +1153,80 @@ def _sort_selected_candidates(selected: list[dict[str, Any]], config: dict[str, 
         return -1 if left_code < right_code else 1
 
     return sorted(selected, key=cmp_to_key(compare))
+
+
+def _purchase_audit_event(
+    *,
+    item: dict[str, Any],
+    trade_date: str,
+    config: dict[str, Any],
+    cash_before: float,
+    cash_after: float,
+    daily_buy_limit_remaining_before: float,
+    daily_buy_limit_remaining_after: float,
+    max_positions_remaining_before: int,
+    planned_shares: int = 0,
+    planned_amount: float = 0.0,
+    scaled_shares: int = 0,
+    scaled_amount: float = 0.0,
+    final_shares: int = 0,
+    final_amount: float = 0.0,
+    decision: str = "SKIP",
+    skip_reason: str = "",
+    reject_reason: str = "",
+    scale_reason: str = "",
+    allocation_limit: float = 0.0,
+    allocation_reason: str = "",
+    daily_buy_limit_type: str = "",
+    daily_buy_limit_ratio: float | None = None,
+    daily_buy_limit_applied: float | None = None,
+) -> dict[str, Any]:
+    rank = _candidate_rank_value(item)
+    score_rank = item.get("daily_score_rank") if item.get("daily_score_rank") not in {None, ""} else item.get("rank")
+    expected_return = item.get("expected_return_10d")
+    bad_entry = item.get("bad_entry_probability_10d")
+    risk_adjusted = item.get("risk_adjusted_score")
+    if risk_adjusted in {None, ""}:
+        risk_adjusted = _candidate_risk_adjusted_score(item)
+    candidate_source = item.get("candidate_source") or ("fallback" if item.get("affordable_fallback_buy_selected") else "selected")
+    return {
+        "trade_id": f"{trade_date}_{item.get('code')}_PURCHASE_AUDIT",
+        "action": "PURCHASE_AUDIT",
+        "profile_id": config.get("profile_id", ""),
+        "profile_name": config.get("profile_name", ""),
+        "signal_date": item.get("signal_date") or item.get("date") or trade_date,
+        "entry_date": trade_date,
+        "code": item.get("code"),
+        "name": item.get("name", ""),
+        "candidate_source": candidate_source,
+        "fallback_rank": item.get("fallback_rank", ""),
+        "raw_candidate_rank": item.get("raw_candidate_rank", ""),
+        "candidate_rank": rank,
+        "score_rank": score_rank if score_rank is not None else rank,
+        "risk_adjusted_score": risk_adjusted,
+        "expected_return_10d": expected_return,
+        "bad_entry_probability_10d": bad_entry,
+        "cash_before": round(cash_before, 2),
+        "cash_after": round(cash_after, 2),
+        "daily_buy_limit_remaining_before": round(daily_buy_limit_remaining_before, 2),
+        "daily_buy_limit_remaining_after": round(daily_buy_limit_remaining_after, 2),
+        "daily_buy_limit_type": daily_buy_limit_type,
+        "daily_buy_limit_ratio": daily_buy_limit_ratio,
+        "daily_buy_limit_applied": round(daily_buy_limit_applied, 2) if daily_buy_limit_applied is not None else "",
+        "max_positions_remaining_before": max_positions_remaining_before,
+        "planned_shares": planned_shares,
+        "planned_amount": round(planned_amount, 2),
+        "scaled_shares": scaled_shares,
+        "scaled_amount": round(scaled_amount, 2),
+        "final_shares": final_shares,
+        "final_amount": round(final_amount, 2),
+        "decision": decision,
+        "skip_reason": skip_reason,
+        "reject_reason": reject_reason,
+        "scale_reason": scale_reason,
+        "allocation_limit": round(allocation_limit, 2),
+        "allocation_reason": allocation_reason,
+    }
 
 
 def _eligible_same_day_buy_candidates(
@@ -972,6 +1410,9 @@ def _technical_snapshot(item: dict[str, Any]) -> dict[str, Any]:
         "dynamic_exposure_source_fallback_used": item.get("dynamic_exposure_source_fallback_used"),
         "dynamic_exposure_same_day_context_used": item.get("dynamic_exposure_same_day_context_used"),
         "affordable_fallback_buy_selected": item.get("affordable_fallback_buy_selected", False),
+        "candidate_source": item.get("candidate_source") or ("fallback" if item.get("affordable_fallback_buy_selected") else "selected"),
+        "fallback_rank": item.get("fallback_rank"),
+        "raw_candidate_rank": item.get("raw_candidate_rank"),
         "affordable_fallback_original_code": item.get("affordable_fallback_original_code"),
         "affordable_fallback_original_name": item.get("affordable_fallback_original_name"),
         "affordable_fallback_reason": item.get("affordable_fallback_reason"),
@@ -1061,6 +1502,9 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "dynamic_exposure_source_lag_days",
         "dynamic_exposure_source_fallback_used",
         "dynamic_exposure_same_day_context_used",
+        "candidate_source",
+        "fallback_rank",
+        "raw_candidate_rank",
         "affordable_fallback_buy_selected",
         "affordable_fallback_original_code",
         "affordable_fallback_original_name",
@@ -1107,6 +1551,12 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "earnings_info_found",
         "earnings_candidate_date",
         "earnings_days_until_earnings",
+        "scaled_buy_triggered",
+        "original_planned_shares",
+        "scaled_shares",
+        "original_amount",
+        "scaled_amount",
+        "scale_reason",
     ]
     snapshot = {key: position.get(key) for key in keys if key in position}
     if "relative_strength_score" in snapshot and snapshot["relative_strength_score"] is None:
@@ -1201,6 +1651,28 @@ def execute_real_data_paper_trade(
         market = price_by_code.get(pending["code"], {})
         executed_price = _execution_price(market, pending)
         if pending["action"] == "BUY":
+            scaled_shares, scaled_buy_fields = _scale_buy_to_daily_limit(
+                shares=int(pending["shares"]),
+                price=executed_price,
+                config=config,
+                today_orders=trades,
+                total_assets=float(state.get("total_assets") or initial_cash),
+            )
+            if scaled_buy_fields:
+                pending = {**pending, **scaled_buy_fields, "shares": scaled_shares}
+            if scaled_shares <= 0:
+                rejected = {
+                    **pending,
+                    "action": "SKIP_BUY",
+                    "entry_date": trade_date,
+                    "entry_price": executed_price,
+                    "executed_price": executed_price,
+                    "amount": 0,
+                    "skipped_reason": "日次買付上限内で単元株を買えないため見送り",
+                    "order_status": "REJECTED",
+                }
+                trades.append(rejected)
+                continue
             amount = int(pending["shares"]) * executed_price
             buy_commission = _calculate_commission(amount, config)
             if cash < amount + buy_commission:
@@ -1252,6 +1724,7 @@ def execute_real_data_paper_trade(
                     "entry_gap_rate": pending.get("entry_gap_rate"),
                     "current_price": executed_price,
                     "shares": int(pending["shares"]),
+                    **scaled_buy_fields,
                     "market_value": round(amount, 2),
                     "buy_commission": buy_commission,
                     "holding_days": 1,
@@ -1449,9 +1922,19 @@ def execute_real_data_paper_trade(
         max_positions,
     )
     buy_candidates = []
-    for item in selected:
+    ai_purchase_active = _ai_purchase_enabled(config)
+    purchase_audit_active = _purchase_audit_enabled(config)
+    fallback_buys_today = 0
+    max_fallback_buys_per_day = _affordable_fallback_max_buys_per_day(config)
+    for item_index, item in enumerate(selected, start=1):
         dynamic_exposure_fields = _dynamic_exposure_log_fields(config, item)
         item.update(dynamic_exposure_fields)
+        candidate_rank = _candidate_rank_value(item, item_index)
+        current_total_assets = float(state.get("total_assets") or (cash + _current_market_exposure({"positions": next_positions})) or initial_cash)
+        daily_limit_info = _daily_buy_limit_info(config, current_total_assets)
+        daily_remaining_before = _daily_buy_limit_remaining(config, trades, current_total_assets)
+        max_positions_remaining_before = max(0, max_positions - len(next_positions) - len(pending_buy_codes))
+        cash_before_candidate = cash
         if not market_section_allowed(item, config):
             trades.append(
                 _skipped_buy_attempt(
@@ -1470,6 +1953,25 @@ def execute_real_data_paper_trade(
                     extra_fields=dynamic_exposure_fields,
                 )
             )
+            if purchase_audit_active:
+                trades.append(
+                    _purchase_audit_event(
+                        item=item,
+                        trade_date=trade_date,
+                        config=config,
+                        cash_before=cash_before_candidate,
+                        cash_after=cash,
+                        daily_buy_limit_remaining_before=daily_remaining_before,
+                        daily_buy_limit_remaining_after=_daily_buy_limit_remaining(config, trades, current_total_assets),
+                        daily_buy_limit_type=str(daily_limit_info.get("type") or ""),
+                        daily_buy_limit_ratio=daily_limit_info.get("ratio"),
+                        daily_buy_limit_applied=float(daily_limit_info.get("limit") or 0),
+                        max_positions_remaining_before=max_positions_remaining_before,
+                        decision="SKIP",
+                        skip_reason="market_filter_excluded",
+                        allocation_reason="market_filter_excluded",
+                    )
+                )
             continue
         if len(next_positions) + len(pending_buy_codes) >= max_positions:
             trades.append(
@@ -1489,8 +1991,46 @@ def execute_real_data_paper_trade(
                     extra_fields=dynamic_exposure_fields,
                 )
             )
+            if purchase_audit_active:
+                trades.append(
+                    _purchase_audit_event(
+                        item=item,
+                        trade_date=trade_date,
+                        config=config,
+                        cash_before=cash_before_candidate,
+                        cash_after=cash,
+                        daily_buy_limit_remaining_before=daily_remaining_before,
+                        daily_buy_limit_remaining_after=_daily_buy_limit_remaining(config, trades, current_total_assets),
+                        daily_buy_limit_type=str(daily_limit_info.get("type") or ""),
+                        daily_buy_limit_ratio=daily_limit_info.get("ratio"),
+                        daily_buy_limit_applied=float(daily_limit_info.get("limit") or 0),
+                        max_positions_remaining_before=max_positions_remaining_before,
+                        decision="SKIP",
+                        skip_reason="max_positions_limit",
+                        allocation_reason="max_positions_limit",
+                    )
+                )
             continue
         if item["code"] in held_codes or item["code"] in pending_buy_codes:
+            if purchase_audit_active:
+                trades.append(
+                    _purchase_audit_event(
+                        item=item,
+                        trade_date=trade_date,
+                        config=config,
+                        cash_before=cash_before_candidate,
+                        cash_after=cash,
+                        daily_buy_limit_remaining_before=daily_remaining_before,
+                        daily_buy_limit_remaining_after=_daily_buy_limit_remaining(config, trades, current_total_assets),
+                        daily_buy_limit_type=str(daily_limit_info.get("type") or ""),
+                        daily_buy_limit_ratio=daily_limit_info.get("ratio"),
+                        daily_buy_limit_applied=float(daily_limit_info.get("limit") or 0),
+                        max_positions_remaining_before=max_positions_remaining_before,
+                        decision="SKIP",
+                        skip_reason="duplicate_holding",
+                        allocation_reason="duplicate_holding",
+                    )
+                )
             continue
         if item.get("entry_price_available") is False:
             trades.append(
@@ -1510,29 +2050,67 @@ def execute_real_data_paper_trade(
                     extra_fields=dynamic_exposure_fields,
                 )
             )
+            if purchase_audit_active:
+                trades.append(
+                    _purchase_audit_event(
+                        item=item,
+                        trade_date=trade_date,
+                        config=config,
+                        cash_before=cash_before_candidate,
+                        cash_after=cash,
+                        daily_buy_limit_remaining_before=daily_remaining_before,
+                        daily_buy_limit_remaining_after=_daily_buy_limit_remaining(config, trades, current_total_assets),
+                        daily_buy_limit_type=str(daily_limit_info.get("type") or ""),
+                        daily_buy_limit_ratio=daily_limit_info.get("ratio"),
+                        daily_buy_limit_applied=float(daily_limit_info.get("limit") or 0),
+                        max_positions_remaining_before=max_positions_remaining_before,
+                        decision="SKIP",
+                        skip_reason="next_day_entry_missing",
+                        allocation_reason="next_day_entry_missing",
+                    )
+                )
             continue
-        allocation_budget = same_day_allocation_budgets.get(str(item.get("code") or ""))
-        pending_buy_amount = 0.0 if allocation_budget is not None else sum(float(order.get("estimated_amount") or order.get("amount") or 0) for order in buy_candidates)
-        allocation, allocation_reason = _available_buy_budget(
-            cash,
-            initial_cash,
-            state,
-            config,
-            pending_buy_amount=pending_buy_amount,
-            allocation_budget=allocation_budget,
-            market_context=item,
-        )
+        if ai_purchase_active:
+            allocation, allocation_reason, ai_purchase_fields = _ai_purchase_allocation(
+                cash=cash,
+                initial_cash=initial_cash,
+                state=state,
+                config=config,
+                today_orders=trades,
+                rank=candidate_rank,
+            )
+            pending_buy_amount = 0.0
+        else:
+            allocation_budget = same_day_allocation_budgets.get(str(item.get("code") or ""))
+            pending_buy_amount = 0.0 if allocation_budget is not None else sum(float(order.get("estimated_amount") or order.get("amount") or 0) for order in buy_candidates)
+            allocation, allocation_reason = _available_buy_budget(
+                cash,
+                initial_cash,
+                state,
+                config,
+                pending_buy_amount=pending_buy_amount,
+                allocation_budget=allocation_budget,
+                market_context=item,
+            )
+            ai_purchase_fields = {}
         entry_price = _candidate_entry_price(item)
         current_price = _candidate_market_price(item, entry_price)
         shares, skipped_reason = _calculate_buy_shares(entry_price, allocation, config)
+        planned_shares = shares
+        planned_amount = shares * entry_price if shares > 0 else 0.0
+        scaled_buy_fields: dict[str, Any] = {}
         if shares <= 0 and allocation_reason in {"insufficient_available_cash", "target_exposure_limit"}:
             skipped_reason = allocation_reason
-        elif shares <= 0 and _capital_utilization_enabled(config):
+        elif shares <= 0 and _capital_utilization_enabled(config) and not ai_purchase_active:
             skipped_reason = "selected_but_not_affordable"
         if shares <= 0:
             fallback_item = None
             fallback_diagnostics: dict[str, int] = {}
-            if _is_affordable_fallback_skip_reason(skipped_reason) and _affordable_fallback_replace_enabled(config):
+            if (
+                _is_affordable_fallback_skip_reason(skipped_reason)
+                and _affordable_fallback_replace_enabled(config)
+                and fallback_buys_today < max_fallback_buys_per_day
+            ):
                 fallback_item = _find_affordable_fallback_candidate(
                     scored_candidates,
                     item,
@@ -1618,7 +2196,39 @@ def execute_real_data_paper_trade(
                         extra_fields=no_fallback_extra,
                     )
                 )
+                if purchase_audit_active:
+                    trades.append(
+                        _purchase_audit_event(
+                            item=item,
+                            trade_date=trade_date,
+                            config=config,
+                            cash_before=cash_before_candidate,
+                            cash_after=cash,
+                            daily_buy_limit_remaining_before=daily_remaining_before,
+                            daily_buy_limit_remaining_after=_daily_buy_limit_remaining(config, trades, current_total_assets),
+                            daily_buy_limit_type=str(daily_limit_info.get("type") or ""),
+                            daily_buy_limit_ratio=daily_limit_info.get("ratio"),
+                            daily_buy_limit_applied=float(daily_limit_info.get("limit") or 0),
+                            max_positions_remaining_before=max_positions_remaining_before,
+                            planned_shares=planned_shares,
+                            planned_amount=planned_amount,
+                            decision="SKIP",
+                            skip_reason=skipped_reason,
+                            allocation_limit=allocation,
+                            allocation_reason=allocation_reason,
+                        )
+                    )
                 continue
+        if shares > 0:
+            shares, scaled_buy_fields = _scale_buy_to_daily_limit(
+                shares=shares,
+                price=entry_price,
+                config=config,
+                today_orders=trades,
+                total_assets=current_total_assets,
+            )
+            if shares <= 0:
+                skipped_reason = "daily_buy_limit_scaled_below_round_lot"
         if shares <= 0:
             trades.append(
                 _skipped_buy_attempt(
@@ -1637,6 +2247,31 @@ def execute_real_data_paper_trade(
                     extra_fields=dynamic_exposure_fields,
                 )
             )
+            if purchase_audit_active:
+                trades.append(
+                    _purchase_audit_event(
+                        item=item,
+                        trade_date=trade_date,
+                        config=config,
+                        cash_before=cash_before_candidate,
+                        cash_after=cash,
+                        daily_buy_limit_remaining_before=daily_remaining_before,
+                        daily_buy_limit_remaining_after=_daily_buy_limit_remaining(config, trades, current_total_assets),
+                        daily_buy_limit_type=str(daily_limit_info.get("type") or ""),
+                        daily_buy_limit_ratio=daily_limit_info.get("ratio"),
+                        daily_buy_limit_applied=float(daily_limit_info.get("limit") or 0),
+                        max_positions_remaining_before=max_positions_remaining_before,
+                        planned_shares=planned_shares,
+                        planned_amount=planned_amount,
+                        scaled_shares=int(scaled_buy_fields.get("scaled_shares") or 0),
+                        scaled_amount=float(scaled_buy_fields.get("scaled_amount") or 0),
+                        decision="SKIP",
+                        skip_reason=skipped_reason,
+                        scale_reason=str(scaled_buy_fields.get("scale_reason") or ""),
+                        allocation_limit=allocation,
+                        allocation_reason=allocation_reason,
+                    )
+                )
             continue
         amount = shares * entry_price
         buy_commission = _calculate_commission(amount, config)
@@ -1659,6 +2294,8 @@ def execute_real_data_paper_trade(
             "score": item["total_score"],
             "entry_score": item["total_score"],
             "reason": item.get("selection_reason") or item.get("selected_reason") or item["reason"],
+            **scaled_buy_fields,
+            **ai_purchase_fields,
             **_technical_snapshot(item),
             "unrealized_profit": round(shares * (current_price - entry_price), 2),
             "unrealized_profit_rate": round((current_price - entry_price) / entry_price, 4) if entry_price else 0.0,
@@ -1678,6 +2315,8 @@ def execute_real_data_paper_trade(
             "allocation_reason": allocation_reason,
             "allocation_strategy": _allocation_strategy(config),
             "buy_commission": buy_commission,
+            **scaled_buy_fields,
+            **ai_purchase_fields,
             "score": item["total_score"],
             "entry_score": item["total_score"],
             "rank": item.get("rank"),
@@ -1695,9 +2334,38 @@ def execute_real_data_paper_trade(
             event = safety_event(trade_date, buy_log, validation)
             safety_events.append(event)
             trades.append(_safety_rejected_order(buy_log, validation))
+            if purchase_audit_active:
+                trades.append(
+                    _purchase_audit_event(
+                        item=item,
+                        trade_date=trade_date,
+                        config=config,
+                        cash_before=cash_before_candidate,
+                        cash_after=cash,
+                        daily_buy_limit_remaining_before=daily_remaining_before,
+                        daily_buy_limit_remaining_after=_daily_buy_limit_remaining(config, trades, current_total_assets),
+                        daily_buy_limit_type=str(daily_limit_info.get("type") or ""),
+                        daily_buy_limit_ratio=daily_limit_info.get("ratio"),
+                        daily_buy_limit_applied=float(daily_limit_info.get("limit") or 0),
+                        max_positions_remaining_before=max_positions_remaining_before,
+                        planned_shares=planned_shares,
+                        planned_amount=planned_amount,
+                        scaled_shares=int(scaled_buy_fields.get("scaled_shares") or shares),
+                        scaled_amount=float(scaled_buy_fields.get("scaled_amount") or amount),
+                        final_shares=0,
+                        final_amount=0.0,
+                        decision="SKIP",
+                        reject_reason=str(validation.get("reason") or validation.get("message") or "safety_rejected"),
+                        scale_reason=str(scaled_buy_fields.get("scale_reason") or ""),
+                        allocation_limit=allocation,
+                        allocation_reason=allocation_reason,
+                    )
+                )
             continue
         held_codes.add(item["code"])
         pending_buy_codes.add(item["code"])
+        if item.get("affordable_fallback_buy_selected"):
+            fallback_buys_today += 1
         if next_day_execution:
             pending_buy = _pending_order_from_trade(buy_log, trade_date, action="BUY")
             future_pending.append(pending_buy)
@@ -1709,8 +2377,39 @@ def execute_real_data_paper_trade(
             filled = broker.place_buy_order(buy_log)
             trades.append(filled)
             buy_candidates.append(filled)
+        if purchase_audit_active:
+            decision = "SCALED_BUY" if scaled_buy_fields else "BUY"
+            trades.append(
+                _purchase_audit_event(
+                    item=item,
+                    trade_date=trade_date,
+                    config=config,
+                    cash_before=cash_before_candidate,
+                    cash_after=cash,
+                    daily_buy_limit_remaining_before=daily_remaining_before,
+                    daily_buy_limit_remaining_after=_daily_buy_limit_remaining(config, trades, current_total_assets),
+                    daily_buy_limit_type=str(daily_limit_info.get("type") or ""),
+                    daily_buy_limit_ratio=daily_limit_info.get("ratio"),
+                    daily_buy_limit_applied=float(daily_limit_info.get("limit") or 0),
+                    max_positions_remaining_before=max_positions_remaining_before,
+                    planned_shares=planned_shares,
+                    planned_amount=planned_amount,
+                    scaled_shares=int(scaled_buy_fields.get("scaled_shares") or shares),
+                    scaled_amount=float(scaled_buy_fields.get("scaled_amount") or amount),
+                    final_shares=shares,
+                    final_amount=amount,
+                    decision=decision,
+                    scale_reason=str(scaled_buy_fields.get("scale_reason") or ""),
+                    allocation_limit=allocation,
+                    allocation_reason=allocation_reason,
+                )
+            )
 
-    while _affordable_fallback_surplus_enabled(config) and len(next_positions) + len(pending_buy_codes) < max_positions:
+    while (
+        _affordable_fallback_surplus_enabled(config)
+        and fallback_buys_today < max_fallback_buys_per_day
+        and len(next_positions) + len(pending_buy_codes) < max_positions
+    ):
         pending_buy_amount = (
             sum(float(order.get("estimated_amount") or order.get("amount") or 0) for order in buy_candidates)
             if next_day_execution
@@ -1755,6 +2454,24 @@ def execute_real_data_paper_trade(
         entry_price = _candidate_entry_price(fallback_item)
         current_price = _candidate_market_price(fallback_item, entry_price)
         shares, skipped_reason = _calculate_buy_shares(entry_price, allocation, config)
+        scaled_buy_fields = {}
+        current_total_assets = float(state.get("total_assets") or (cash + _current_market_exposure({"positions": next_positions})) or initial_cash)
+        daily_limit_info = _daily_buy_limit_info(config, current_total_assets)
+        daily_remaining_before = _daily_buy_limit_remaining(config, trades, current_total_assets)
+        cash_before_candidate = cash
+        planned_shares = shares
+        planned_amount = shares * entry_price if shares > 0 else 0.0
+        max_positions_remaining_before = max(0, max_positions - len(next_positions) - len(pending_buy_codes))
+        if shares > 0:
+            shares, scaled_buy_fields = _scale_buy_to_daily_limit(
+                shares=shares,
+                price=entry_price,
+                config=config,
+                today_orders=trades,
+                total_assets=current_total_assets,
+            )
+            if shares <= 0:
+                skipped_reason = "daily_buy_limit_scaled_below_round_lot"
         if shares <= 0:
             break
         amount = shares * entry_price
@@ -1777,6 +2494,7 @@ def execute_real_data_paper_trade(
             "holding_days": 1,
             "score": fallback_item["total_score"],
             "reason": fallback_item.get("selection_reason") or fallback_item.get("selected_reason") or fallback_item["reason"],
+            **scaled_buy_fields,
             **_technical_snapshot(fallback_item),
             "unrealized_profit": round(shares * (current_price - entry_price), 2),
             "unrealized_profit_rate": round((current_price - entry_price) / entry_price, 4) if entry_price else 0.0,
@@ -1796,6 +2514,7 @@ def execute_real_data_paper_trade(
             "allocation_reason": allocation_reason,
             "allocation_strategy": _allocation_strategy(config),
             "buy_commission": buy_commission,
+            **scaled_buy_fields,
             "score": fallback_item["total_score"],
             "rank": fallback_item.get("rank"),
             "daily_score_rank": fallback_item.get("daily_score_rank") or fallback_item.get("rank"),
@@ -1812,9 +2531,37 @@ def execute_real_data_paper_trade(
             event = safety_event(trade_date, buy_log, validation)
             safety_events.append(event)
             trades.append(_safety_rejected_order(buy_log, validation))
+            if purchase_audit_active:
+                trades.append(
+                    _purchase_audit_event(
+                        item=fallback_item,
+                        trade_date=trade_date,
+                        config=config,
+                        cash_before=cash_before_candidate,
+                        cash_after=cash,
+                        daily_buy_limit_remaining_before=daily_remaining_before,
+                        daily_buy_limit_remaining_after=_daily_buy_limit_remaining(config, trades, current_total_assets),
+                        daily_buy_limit_type=str(daily_limit_info.get("type") or ""),
+                        daily_buy_limit_ratio=daily_limit_info.get("ratio"),
+                        daily_buy_limit_applied=float(daily_limit_info.get("limit") or 0),
+                        max_positions_remaining_before=max_positions_remaining_before,
+                        planned_shares=planned_shares,
+                        planned_amount=planned_amount,
+                        scaled_shares=int(scaled_buy_fields.get("scaled_shares") or shares),
+                        scaled_amount=float(scaled_buy_fields.get("scaled_amount") or amount),
+                        final_shares=0,
+                        final_amount=0.0,
+                        decision="SKIP",
+                        reject_reason=str(validation.get("reason") or validation.get("message") or "safety_rejected"),
+                        scale_reason=str(scaled_buy_fields.get("scale_reason") or ""),
+                        allocation_limit=allocation,
+                        allocation_reason=allocation_reason,
+                    )
+                )
             break
         held_codes.add(fallback_item["code"])
         pending_buy_codes.add(fallback_item["code"])
+        fallback_buys_today += 1
         same_day_regular_selected_codes.add(str(fallback_item.get("code") or ""))
         if next_day_execution:
             pending_buy = _pending_order_from_trade(buy_log, trade_date, action="BUY")
@@ -1827,6 +2574,33 @@ def execute_real_data_paper_trade(
             filled = broker.place_buy_order(buy_log)
             trades.append(filled)
             buy_candidates.append(filled)
+        if purchase_audit_active:
+            decision = "SCALED_BUY" if scaled_buy_fields else "BUY"
+            trades.append(
+                _purchase_audit_event(
+                    item=fallback_item,
+                    trade_date=trade_date,
+                    config=config,
+                    cash_before=cash_before_candidate,
+                    cash_after=cash,
+                    daily_buy_limit_remaining_before=daily_remaining_before,
+                    daily_buy_limit_remaining_after=_daily_buy_limit_remaining(config, trades, current_total_assets),
+                    daily_buy_limit_type=str(daily_limit_info.get("type") or ""),
+                    daily_buy_limit_ratio=daily_limit_info.get("ratio"),
+                    daily_buy_limit_applied=float(daily_limit_info.get("limit") or 0),
+                    max_positions_remaining_before=max_positions_remaining_before,
+                    planned_shares=planned_shares,
+                    planned_amount=planned_amount,
+                    scaled_shares=int(scaled_buy_fields.get("scaled_shares") or shares),
+                    scaled_amount=float(scaled_buy_fields.get("scaled_amount") or amount),
+                    final_shares=shares,
+                    final_amount=amount,
+                    decision=decision,
+                    scale_reason=str(scaled_buy_fields.get("scale_reason") or ""),
+                    allocation_limit=allocation,
+                    allocation_reason=allocation_reason,
+                )
+            )
 
     if not selected:
         no_trade_reason = "本日は買付対象なし"
