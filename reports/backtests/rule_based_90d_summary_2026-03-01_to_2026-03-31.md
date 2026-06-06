@@ -54,17 +54,17 @@
 ### Hardcoded Date Audit
 
 - target: 2026-03-06
-- match_count: 681
+- match_count: 686
 - warning: 2026-03-06 remains in config/src/docs/reports/README
 
 ### Processed Data Audit
 
 - indicators_last_date: 2026-05-29
 - candidates_last_date: 2026-05-29
-- scored_candidates_last_date: 2026-03-31
+- scored_candidates_last_date: 2026-05-29
 - indicators_count: 1221
 - candidates_file_count: 1221
-- scored_candidates_file_count: 21
+- scored_candidates_file_count: 831
 - dates_with_indicators_but_no_candidates: 0
 - dates_with_candidates_but_no_scored: 0
 - match: config/provider.yaml

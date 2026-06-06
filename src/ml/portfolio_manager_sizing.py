@@ -39,8 +39,15 @@ class PortfolioManagerSizingDecision:
     warning: str = ""
 
     def as_fields(self) -> dict[str, Any]:
+        status = "ok"
+        missing_reason = ""
+        if self.warning:
+            missing_reason = self.warning
+            status = "missing" if not self.feature_found else "warning"
         return {
             "pm_ai_enabled": True,
+            "pm_status": status,
+            "pm_missing_reason": missing_reason,
             "pm_feature_count": self.feature_count,
             "pm_high_conviction_proba": self.high_conviction_proba,
             "pm_avoid_proba": self.avoid_proba,
@@ -180,4 +187,3 @@ def multiplier_from_high_minus_avoid(high_proba: float | None, avoid_proba: floa
 def _looks_forbidden(column: str) -> bool:
     lowered = column.lower()
     return any(fragment in lowered for fragment in FORBIDDEN_FEATURE_FRAGMENTS)
-

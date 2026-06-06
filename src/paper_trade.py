@@ -552,6 +552,8 @@ def _apply_portfolio_manager_sizing(
         fields.update(
             {
                 "pm_ai_enabled": True,
+                "pm_status": "missing",
+                "pm_missing_reason": "pm_no_base_shares",
                 "pm_feature_count": "",
                 "pm_high_conviction_proba": None,
                 "pm_avoid_proba": None,
@@ -572,6 +574,8 @@ def _apply_portfolio_manager_sizing(
         fields.update(
             {
                 "pm_ai_enabled": True,
+                "pm_status": "error",
+                "pm_missing_reason": f"pm_sizing_error:{type(exc).__name__}",
                 "pm_feature_count": "",
                 "pm_high_conviction_proba": None,
                 "pm_avoid_proba": None,
@@ -596,6 +600,30 @@ def _apply_portfolio_manager_sizing(
     )
     item.update(fields)
     return resized_shares, fields
+
+
+def _portfolio_manager_trade_fields(source: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "pm_ai_enabled",
+        "pm_status",
+        "pm_missing_reason",
+        "pm_feature_count",
+        "pm_high_conviction_proba",
+        "pm_avoid_proba",
+        "pm_score",
+        "pm_multiplier",
+        "pm_model_version",
+        "pm_feature_found",
+        "pm_warning",
+        "pm_base_planned_shares",
+        "pm_base_planned_amount",
+        "pm_target_amount",
+        "pm_cash_capped_target_amount",
+        "pm_resized_shares",
+        "pm_resized_amount",
+        "pm_resize_reason",
+    ]
+    return {key: source.get(key) for key in keys if key in source}
 
 
 def _daily_buy_limit_info(config: dict[str, Any], total_assets: float | None = None) -> dict[str, Any]:
@@ -1329,6 +1357,8 @@ def _purchase_audit_event(
     }
     for key in [
         "pm_ai_enabled",
+        "pm_status",
+        "pm_missing_reason",
         "pm_feature_count",
         "pm_high_conviction_proba",
         "pm_avoid_proba",
@@ -1546,6 +1576,7 @@ def _technical_snapshot(item: dict[str, Any]) -> dict[str, Any]:
         "earnings_info_found": item.get("earnings_info_found", False),
         "earnings_candidate_date": item.get("earnings_candidate_date"),
         "earnings_days_until_earnings": item.get("earnings_days_until_earnings"),
+        **_portfolio_manager_trade_fields(item),
     }
 
 
@@ -1677,6 +1708,24 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "original_amount",
         "scaled_amount",
         "scale_reason",
+        "pm_ai_enabled",
+        "pm_status",
+        "pm_missing_reason",
+        "pm_feature_count",
+        "pm_high_conviction_proba",
+        "pm_avoid_proba",
+        "pm_score",
+        "pm_multiplier",
+        "pm_model_version",
+        "pm_feature_found",
+        "pm_warning",
+        "pm_base_planned_shares",
+        "pm_base_planned_amount",
+        "pm_target_amount",
+        "pm_cash_capped_target_amount",
+        "pm_resized_shares",
+        "pm_resized_amount",
+        "pm_resize_reason",
     ]
     snapshot = {key: position.get(key) for key in keys if key in position}
     if "relative_strength_score" in snapshot and snapshot["relative_strength_score"] is None:
