@@ -1,70 +1,70 @@
-# Rule-based 90d Backtest Summary 2023-01-01 to 2026-05-31
+# Rule-based 90d Backtest Summary 2026-05-15 to 2026-05-20
 
 ## 実行条件
 
-- 期間: 2023-01-01 〜 2026-05-31
-- profile: rookie_dealer_02_v2_69_ml_ranked_exit_ai_055 新人ディーラー2号 v2.69 ML ranked + Exit AI 0.55
+- 期間: 2026-05-15 〜 2026-05-20
+- profile: rookie_dealer_02_v2_68_ml_ranked_exit_ai_050 新人ディーラー2号 v2.68 ML ranked + Exit AI 0.50
 - provider: jquants
 - ChatGPT/OpenAI: disabled
 - broker: paper
-- config_version: cfg_43d1bcd
+- config_version: cfg_13bd34d
 
 ## Backtest Date Range Audit
 
-- requested_start_date: 2023-01-01
-- requested_end_date: 2026-05-31
-- effective_trade_start_date: 2023-01-01
-- effective_trade_end_date: 2026-05-31
-- indicator_fetch_start_date: 2022-07-05
-- price_fetch_requested_start: 2022-07-05
-- price_fetch_clamped_start: 2022-07-05
+- requested_start_date: 2026-05-15
+- requested_end_date: 2026-05-20
+- effective_trade_start_date: 2026-05-15
+- effective_trade_end_date: 2026-05-20
+- indicator_fetch_start_date: 2025-11-16
+- price_fetch_requested_start: 2025-11-16
+- price_fetch_clamped_start: 2025-11-16
 - first_fetch_attempt_date: None
-- raw_price_first_date: 2022-07-05
-- raw_price_last_date: 2026-05-29
-- first_price_date: 2022-07-05
-- last_price_date: 2026-05-29
-- first_trading_day: 2023-01-04
-- last_trading_day: 2026-05-29
-- target_trading_days: 890
+- raw_price_first_date: 2025-11-17
+- raw_price_last_date: 2026-05-20
+- first_price_date: 2025-11-17
+- last_price_date: 2026-05-20
+- first_trading_day: 2026-05-15
+- last_trading_day: 2026-05-20
+- target_trading_days: 4
 - target_trading_days_source: raw_price_cache
-- processed_first_date: 2023-01-04
-- processed_last_date: 2026-05-28
+- processed_first_date: 2026-05-15
+- processed_last_date: 2026-05-19
 - missing_processed_dates_count: 1
-- first_missing_processed_date: 2026-05-29
-- last_missing_processed_date: 2026-05-29
-- processed_days: 830
+- first_missing_processed_date: 2026-05-20
+- last_missing_processed_date: 2026-05-20
+- processed_days: 3
 - skipped_days: 1
-- last_processed_day: 2026-05-28
-- first_trade_date: 2023-01-05
-- last_trade_date: 2026-05-29
+- last_processed_day: 2026-05-19
+- first_trade_date: 2026-05-18
+- last_trade_date: 2026-05-20
 
 ### Data Coverage Audit
 
-- prices.requested_end_date: 2026-05-31
-- prices.latest_available_price_date: 2026-05-29
-- prices.coverage_ok: false
-- prices.warning: price data ends before requested_end_date; backtest can only process cached/fetched price dates
+- prices.requested_end_date: 2026-05-20
+- prices.latest_available_price_date: 2026-05-20
+- prices.coverage_ok: true
+- prices.warning: -
 
 ### Requested vs Effective Period
 
-- requested_period: 2023-01-01 to 2026-05-31
-- effective_period: 2023-01-04 to 2026-05-28
+- requested_period: 2026-05-15 to 2026-05-20
+- effective_period: 2026-05-15 to 2026-05-19
 - effective_range_warning: processed days end before requested_end_date; check latest_available_price_date and fetch-period-prices logs
 
 ### Hardcoded Date Audit
 
 - target: 2026-03-06
-- match_count: 760
+- match_count: 756
 - warning: 2026-03-06 remains in config/src/docs/reports/README
 
 ### Processed Data Audit
 
 - indicators_last_date: 2026-05-29
 - candidates_last_date: 2026-05-29
-- scored_candidates_last_date: 2026-05-29
-- indicators_count: 1221
+- scored_candidates_last_date: 2026-05-20
+- indicators_count: 1060
 - candidates_file_count: 1221
-- scored_candidates_file_count: 831
+- scored_candidates_file_count: 4
 - dates_with_indicators_but_no_candidates: 0
 - dates_with_candidates_but_no_scored: 0
 - match: config/provider.yaml
@@ -81,23 +81,23 @@
 ## 結果サマリ
 
 - 初期資金: 1,000,000円
-- 最終資産: 2,117,547円
-- 税引前損益: 1,130,547円
-- 税引後損益: 900,877円
-- 税引後損益率: 90.09%
-- 勝率: 44.06%
-- profit factor: 1.47
-- 最大ドローダウン: -16.15%
-- 総取引数: 463
-- 利確回数: 63
-- 損切り回数: 189
-- 最大保有期間売却回数: 186
-- no trade日数: 276
-- selected_count合計: 1375
+- 最終資産: 1,013,300円
+- 税引前損益: 0円
+- 税引後損益: 0円
+- 税引後損益率: 0.00%
+- 勝率: N/A
+- profit factor: N/A
+- 最大ドローダウン: 0.00%
+- 総取引数: 0
+- 利確回数: 0
+- 損切り回数: 0
+- 最大保有期間売却回数: 0
+- no trade日数: 1
+- selected_count合計: 5
 
 ## 新人ディーラー1号コメント
 
-検証期間では初期資金を上回りました。感情は考慮せず、同じ条件で再現性を確認します。
+売却済み取引がないため、勝率や売却ルールの評価はまだ保留します。ルールに従い、検証期間を広げます。
 
 ## 次に見るべき改善ポイント
 

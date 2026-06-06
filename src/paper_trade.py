@@ -10,6 +10,7 @@ from broker import build_broker
 from commentary import generate_buy_comment, generate_no_trade_comment, generate_sell_comment
 from market_sections import market_section_allowed
 from market_regime import classify_market_regime, dynamic_exposure_policy, dynamic_exposure_target
+from ml.backtest_exit_ai import apply_exit_ai_to_plan, exit_ai_trade_fields, get_exit_ai_advisor, update_unrealized_extrema
 from safety import can_trade, safety_event
 from tax import calculate_period_profit_summary
 
@@ -1176,6 +1177,7 @@ def execute_real_data_paper_trade(
     broker = build_broker(state, config)
     next_day_execution = bool(config.get("execution", {}).get("use_next_day_open_execution", False))
     stop_loss_execution = str(config.get("execution", {}).get("stop_loss_execution", "next_day_open"))
+    exit_ai_advisor = get_exit_ai_advisor(config)
 
     trades = []
     safety_events = []
@@ -1253,6 +1255,8 @@ def execute_real_data_paper_trade(
                     "market_value": round(amount, 2),
                     "buy_commission": buy_commission,
                     "holding_days": 1,
+                    "max_unrealized_return_so_far": 0.0,
+                    "min_unrealized_return_so_far": 0.0,
                     "score": pending.get("score"),
                     "entry_score": pending.get("entry_score") or pending.get("score"),
                     "reason": pending.get("reason", ""),
@@ -1345,9 +1349,19 @@ def execute_real_data_paper_trade(
             current_price,
             holding_days,
         )
+        exit_plan = apply_exit_ai_to_plan(
+            exit_plan,
+            exit_ai_advisor if market else None,
+            position=position,
+            market=market or {},
+            trade_date=trade_date,
+            current_price=current_price,
+            holding_days=holding_days,
+        )
         profit_rate = exit_plan["mark_profit_rate"]
         exit_reason = exit_plan["exit_reason"]
         planned_exit_price = float(exit_plan["exit_price"] or current_price)
+        max_unrealized_return_so_far, min_unrealized_return_so_far = update_unrealized_extrema(position, profit_rate)
         updated_position = {
             **position,
             "current_price": current_price,
@@ -1355,6 +1369,9 @@ def execute_real_data_paper_trade(
             "holding_days": holding_days,
             "unrealized_profit": round(int(position["shares"]) * (current_price - float(position["entry_price"])), 2),
             "unrealized_profit_rate": round(profit_rate, 4),
+            "max_unrealized_return_so_far": max_unrealized_return_so_far,
+            "min_unrealized_return_so_far": min_unrealized_return_so_far,
+            "drawdown_from_peak": profit_rate - max_unrealized_return_so_far if max_unrealized_return_so_far is not None else None,
             **holding_signal,
         }
         if exit_reason and position["code"] not in pending_sell_codes:
@@ -1385,6 +1402,7 @@ def execute_real_data_paper_trade(
                     **_position_feature_snapshot(position),
                     **holding_signal,
                     **_stop_loss_trade_fields(exit_plan, planned_exit_price),
+                    **exit_ai_trade_fields(exit_plan),
                 },
                 entry_notional,
                 proceeds,

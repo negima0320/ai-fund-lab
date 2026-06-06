@@ -846,6 +846,57 @@ profiles:
       earnings_filter: false
       ml_backtest_standalone: true
 
+  rookie_dealer_02_v2_68_ml_ranked_exit_ai_050:
+    role: experiment
+    description: v2.66 ML rankedにExit AI avoid_loss_5d閾値0.50を追加する検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_66_ml_ranked
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      score_upper_filter: true
+      ml_backtest_ranked: true
+      ml_exit_ai: true
+
+  rookie_dealer_02_v2_69_ml_ranked_exit_ai_055:
+    role: experiment
+    description: v2.66 ML rankedにExit AI avoid_loss_5d閾値0.55を追加する検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_66_ml_ranked
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      score_upper_filter: true
+      ml_backtest_ranked: true
+      ml_exit_ai: true
+
+  rookie_dealer_02_v2_70_ml_ranked_exit_ai_060:
+    role: experiment
+    description: v2.66 ML rankedにExit AI avoid_loss_5d閾値0.60を追加する検証
+    required_plan: light
+    compare_to: rookie_dealer_02_v2_66_ml_ranked
+    features:
+      relative_strength: true
+      investor_context: false
+      financial_context: false
+      earnings_filter: false
+      capital_utilization: true
+      allocation_strategy: true
+      relaxed_pending_target_exposure: true
+      score_upper_filter: true
+      ml_backtest_ranked: true
+      ml_exit_ai: true
+
   rookie_dealer_02_v2_68:
     role: experiment
     description: v2.65ベース entry_score 58以上のみ除外する高スコア過熱検証
