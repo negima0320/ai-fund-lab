@@ -11,8 +11,17 @@ from commentary import generate_buy_comment, generate_no_trade_comment, generate
 from market_sections import market_section_allowed
 from market_regime import classify_market_regime, dynamic_exposure_policy, dynamic_exposure_target
 from ml.backtest_exit_ai import apply_exit_ai_to_plan, exit_ai_trade_fields, get_exit_ai_advisor, update_unrealized_extrema
+from ml.portfolio_manager_sizing import (
+    DEFAULT_PM_DATASET,
+    DEFAULT_PM_MODEL_DIR,
+    EXPECTED_CLEAN_FEATURE_COUNT,
+    PortfolioManagerSizingAdvisor,
+)
 from safety import can_trade, safety_event
 from tax import calculate_period_profit_summary
+
+
+_PM_SIZING_ADVISOR_CACHE: dict[tuple[str, str, int], PortfolioManagerSizingAdvisor] = {}
 
 
 def execute_paper_trades(
@@ -496,6 +505,97 @@ def _purchase_audit_policy(config: dict[str, Any]) -> dict[str, Any]:
 
 def _purchase_audit_enabled(config: dict[str, Any]) -> bool:
     return bool(_purchase_audit_policy(config).get("enabled", False) or _ai_purchase_enabled(config))
+
+
+def _portfolio_manager_sizing_policy(config: dict[str, Any]) -> dict[str, Any]:
+    policy = config.get("portfolio_manager_ai_sizing")
+    return policy if isinstance(policy, dict) else {}
+
+
+def _portfolio_manager_sizing_enabled(config: dict[str, Any]) -> bool:
+    return bool(_portfolio_manager_sizing_policy(config).get("enabled", False))
+
+
+def _portfolio_manager_sizing_advisor(config: dict[str, Any]) -> PortfolioManagerSizingAdvisor:
+    policy = _portfolio_manager_sizing_policy(config)
+    model_dir = str(policy.get("model_dir") or DEFAULT_PM_MODEL_DIR)
+    dataset_path = str(policy.get("dataset_path") or DEFAULT_PM_DATASET)
+    expected_feature_count = int(policy.get("expected_feature_count") or EXPECTED_CLEAN_FEATURE_COUNT)
+    key = (model_dir, dataset_path, expected_feature_count)
+    if key not in _PM_SIZING_ADVISOR_CACHE:
+        _PM_SIZING_ADVISOR_CACHE[key] = PortfolioManagerSizingAdvisor(
+            model_dir=model_dir,
+            dataset_path=dataset_path,
+            expected_feature_count=expected_feature_count,
+        )
+    return _PM_SIZING_ADVISOR_CACHE[key]
+
+
+def _apply_portfolio_manager_sizing(
+    *,
+    item: dict[str, Any],
+    trade_date: str,
+    shares: int,
+    entry_price: float,
+    cash: float,
+    config: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    if not _portfolio_manager_sizing_enabled(config):
+        return shares, {}
+    base_shares = int(shares or 0)
+    base_amount = max(0.0, base_shares * float(entry_price or 0))
+    fields: dict[str, Any] = {
+        "pm_base_planned_shares": base_shares,
+        "pm_base_planned_amount": round(base_amount, 2),
+    }
+    if base_shares <= 0 or entry_price <= 0:
+        fields.update(
+            {
+                "pm_ai_enabled": True,
+                "pm_feature_count": "",
+                "pm_high_conviction_proba": None,
+                "pm_avoid_proba": None,
+                "pm_score": 0.0,
+                "pm_multiplier": 1.0,
+                "pm_model_version": "",
+                "pm_feature_found": False,
+                "pm_warning": "pm_no_base_shares",
+            }
+        )
+        item.update(fields)
+        return shares, fields
+    try:
+        advisor = _portfolio_manager_sizing_advisor(config)
+        decision = advisor.decision_for(str(item.get("signal_date") or item.get("date") or trade_date), str(item.get("code") or ""))
+        fields.update(decision.as_fields())
+    except Exception as exc:  # Defensive: PM sizing must not break the base trading engine.
+        fields.update(
+            {
+                "pm_ai_enabled": True,
+                "pm_feature_count": "",
+                "pm_high_conviction_proba": None,
+                "pm_avoid_proba": None,
+                "pm_score": 0.0,
+                "pm_multiplier": 1.0,
+                "pm_model_version": "",
+                "pm_feature_found": False,
+                "pm_warning": f"pm_sizing_error:{type(exc).__name__}",
+            }
+        )
+    multiplier = float(fields.get("pm_multiplier") or 1.0)
+    target_amount = max(0.0, min(float(cash or 0), base_amount * multiplier))
+    resized_shares, resize_reason = _calculate_buy_shares(entry_price, target_amount, config)
+    fields.update(
+        {
+            "pm_target_amount": round(base_amount * multiplier, 2),
+            "pm_cash_capped_target_amount": round(target_amount, 2),
+            "pm_resized_shares": resized_shares,
+            "pm_resized_amount": round(resized_shares * entry_price, 2),
+            "pm_resize_reason": resize_reason,
+        }
+    )
+    item.update(fields)
+    return resized_shares, fields
 
 
 def _daily_buy_limit_info(config: dict[str, Any], total_assets: float | None = None) -> dict[str, Any]:
@@ -1189,7 +1289,7 @@ def _purchase_audit_event(
     if risk_adjusted in {None, ""}:
         risk_adjusted = _candidate_risk_adjusted_score(item)
     candidate_source = item.get("candidate_source") or ("fallback" if item.get("affordable_fallback_buy_selected") else "selected")
-    return {
+    event = {
         "trade_id": f"{trade_date}_{item.get('code')}_PURCHASE_AUDIT",
         "action": "PURCHASE_AUDIT",
         "profile_id": config.get("profile_id", ""),
@@ -1227,6 +1327,26 @@ def _purchase_audit_event(
         "allocation_limit": round(allocation_limit, 2),
         "allocation_reason": allocation_reason,
     }
+    for key in [
+        "pm_ai_enabled",
+        "pm_feature_count",
+        "pm_high_conviction_proba",
+        "pm_avoid_proba",
+        "pm_score",
+        "pm_multiplier",
+        "pm_model_version",
+        "pm_feature_found",
+        "pm_warning",
+        "pm_base_planned_shares",
+        "pm_base_planned_amount",
+        "pm_target_amount",
+        "pm_cash_capped_target_amount",
+        "pm_resized_shares",
+        "pm_resized_amount",
+        "pm_resize_reason",
+    ]:
+        event[key] = item.get(key, "")
+    return event
 
 
 def _eligible_same_day_buy_candidates(
@@ -2098,6 +2218,18 @@ def execute_real_data_paper_trade(
         shares, skipped_reason = _calculate_buy_shares(entry_price, allocation, config)
         planned_shares = shares
         planned_amount = shares * entry_price if shares > 0 else 0.0
+        pm_sizing_fields: dict[str, Any] = {}
+        if shares > 0:
+            shares, pm_sizing_fields = _apply_portfolio_manager_sizing(
+                item=item,
+                trade_date=trade_date,
+                shares=shares,
+                entry_price=entry_price,
+                cash=cash,
+                config=config,
+            )
+            if shares <= 0:
+                skipped_reason = "pm_sizing_scaled_below_round_lot"
         scaled_buy_fields: dict[str, Any] = {}
         if shares <= 0 and allocation_reason in {"insufficient_available_cash", "target_exposure_limit"}:
             skipped_reason = allocation_reason
@@ -2140,6 +2272,7 @@ def execute_real_data_paper_trade(
                         allocation_reason=allocation_reason,
                         extra_fields={
                             **dynamic_exposure_fields,
+                            **pm_sizing_fields,
                             "affordable_fallback_attempted": True,
                             "affordable_fallback_replaced_by_code": fallback_item.get("code"),
                             "affordable_fallback_replaced_by_name": fallback_item.get("name"),
@@ -2166,6 +2299,18 @@ def execute_real_data_paper_trade(
                 entry_price = _candidate_entry_price(item)
                 current_price = _candidate_market_price(item, entry_price)
                 shares, skipped_reason = _calculate_buy_shares(entry_price, allocation, config)
+                pm_sizing_fields = {}
+                if shares > 0:
+                    shares, pm_sizing_fields = _apply_portfolio_manager_sizing(
+                        item=item,
+                        trade_date=trade_date,
+                        shares=shares,
+                        entry_price=entry_price,
+                        cash=cash,
+                        config=config,
+                    )
+                    if shares <= 0:
+                        skipped_reason = "pm_sizing_scaled_below_round_lot"
                 if shares <= 0:
                     fallback_item = None
             if fallback_item:
@@ -2173,6 +2318,7 @@ def execute_real_data_paper_trade(
             else:
                 no_fallback_extra = {
                     **dynamic_exposure_fields,
+                    **pm_sizing_fields,
                     "affordable_fallback_attempted": _is_affordable_fallback_skip_reason(skipped_reason)
                     and _affordable_fallback_enabled(config),
                     "affordable_fallback_no_candidate": _is_affordable_fallback_skip_reason(skipped_reason)
@@ -2244,7 +2390,7 @@ def execute_real_data_paper_trade(
                     skipped_reason=skipped_reason,
                     config=config,
                     allocation_reason=allocation_reason,
-                    extra_fields=dynamic_exposure_fields,
+                    extra_fields={**dynamic_exposure_fields, **pm_sizing_fields},
                 )
             )
             if purchase_audit_active:
@@ -2296,6 +2442,7 @@ def execute_real_data_paper_trade(
             "reason": item.get("selection_reason") or item.get("selected_reason") or item["reason"],
             **scaled_buy_fields,
             **ai_purchase_fields,
+            **pm_sizing_fields,
             **_technical_snapshot(item),
             "unrealized_profit": round(shares * (current_price - entry_price), 2),
             "unrealized_profit_rate": round((current_price - entry_price) / entry_price, 4) if entry_price else 0.0,
@@ -2317,6 +2464,7 @@ def execute_real_data_paper_trade(
             "buy_commission": buy_commission,
             **scaled_buy_fields,
             **ai_purchase_fields,
+            **pm_sizing_fields,
             "score": item["total_score"],
             "entry_score": item["total_score"],
             "rank": item.get("rank"),
@@ -2461,6 +2609,18 @@ def execute_real_data_paper_trade(
         cash_before_candidate = cash
         planned_shares = shares
         planned_amount = shares * entry_price if shares > 0 else 0.0
+        pm_sizing_fields: dict[str, Any] = {}
+        if shares > 0:
+            shares, pm_sizing_fields = _apply_portfolio_manager_sizing(
+                item=fallback_item,
+                trade_date=trade_date,
+                shares=shares,
+                entry_price=entry_price,
+                cash=cash,
+                config=config,
+            )
+            if shares <= 0:
+                skipped_reason = "pm_sizing_scaled_below_round_lot"
         max_positions_remaining_before = max(0, max_positions - len(next_positions) - len(pending_buy_codes))
         if shares > 0:
             shares, scaled_buy_fields = _scale_buy_to_daily_limit(
@@ -2495,6 +2655,7 @@ def execute_real_data_paper_trade(
             "score": fallback_item["total_score"],
             "reason": fallback_item.get("selection_reason") or fallback_item.get("selected_reason") or fallback_item["reason"],
             **scaled_buy_fields,
+            **pm_sizing_fields,
             **_technical_snapshot(fallback_item),
             "unrealized_profit": round(shares * (current_price - entry_price), 2),
             "unrealized_profit_rate": round((current_price - entry_price) / entry_price, 4) if entry_price else 0.0,
@@ -2515,6 +2676,7 @@ def execute_real_data_paper_trade(
             "allocation_strategy": _allocation_strategy(config),
             "buy_commission": buy_commission,
             **scaled_buy_fields,
+            **pm_sizing_fields,
             "score": fallback_item["total_score"],
             "rank": fallback_item.get("rank"),
             "daily_score_rank": fallback_item.get("daily_score_rank") or fallback_item.get("rank"),
