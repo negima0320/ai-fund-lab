@@ -1,0 +1,146 @@
+# AI Fund Lab profile YAML
+# v2_75 をベースに、Portfolio Manager AI の低score候補を縮小買付ではなく見送る派生profileです。
+
+profile_id: rookie_dealer_02_v2_76_pm_ai_low_score_skip
+profile_name: 新人ディーラー2号 v2.76 PM AI low score skip
+description: v2.75のPM AI sizingを維持し、pm_score < -0.20 の候補を買付見送り
+disable_single_order_amount_limit: true
+
+character:
+  role: 新人ディーラー
+  personality:
+    - 教科書通り
+    - データ重視
+    - 損切り最優先
+    - 過熱銘柄を追わない
+    - 出来高確認を重視
+    - リスク管理重視
+  catchphrases:
+    - 過熱した銘柄は追いません
+    - 出来高2倍以上を確認します
+    - ML順位付け、Exit AI、PM AI low score skipを検証します
+
+features:
+  market_context: true
+  sector_analysis: true
+  ai_decision: false
+  news: false
+  candlestick_analysis: true
+  relative_strength: true
+  openai_commentary: false
+
+scoring:
+  total_score_formula: technical_plus_relative_strength_market_penalty
+  use_relative_strength_score: true
+  relative_strength_score_weight: 10
+  relative_strength:
+    benchmark: topix
+    windows: [5, 10, 20]
+    score_rules:
+      rs_5d_gt: 0.03
+      rs_5d_points: 3
+      rs_10d_gt: 0.05
+      rs_10d_points: 4
+      rs_20d_gt: 0.08
+      rs_20d_points: 3
+
+ai_decision:
+  enabled: false
+  provider: openai
+  fallback_to_rule_based: true
+  daily_call_limit: 3
+
+ai_commentary:
+  enabled: true
+  provider: rule_based
+  fallback_to_rule_based: true
+
+initial_capital: 1000000
+
+trading:
+  max_positions: 10
+  position_size_ratio: 0.20
+  stop_loss_rate: -0.03
+  take_profit_rate: 0.06
+  max_holding_days: 5
+  use_round_lot: true
+  round_lot_size: 100
+
+execution:
+  stop_loss_execution: intraday_stop
+
+selection:
+  min_score: 45
+  fallback_min_score: 40
+  min_confidence: 0.70
+  allow_top_pick_when_no_selection: true
+  top_pick_min_score: 40
+  max_selected: 10
+  max_rsi_for_new_position: 65
+  reject_overheated_rsi: true
+
+score_upper_filter:
+  enabled: true
+  max_entry_score: 55
+  rejected_reason: score_upper_filter
+
+market_filter:
+  risk_off_min_score: 50
+
+volume_filter:
+  enabled: true
+  min_volume_ratio: 2.0
+
+capital_utilization_policy:
+  enabled: true
+  target_exposure: 0.9
+  min_cash_buffer: 50000
+  buy_lot_size: 100
+  max_position_value_rate: 0.5
+  buy_as_much_as_possible: true
+  allocation_strategy: relaxed_pending_target_exposure
+
+scaled_buy:
+  enabled: true
+  reason: daily_buy_limit
+
+purchase_audit:
+  enabled: true
+  note: v2_75 sizing is preserved except pm_score below threshold is skipped; PM AI fields are recorded as pm_* fields.
+
+portfolio_manager_ai_sizing:
+  enabled: true
+  model_dir: models/ml/portfolio_manager/current_v2_73_phase3b_clean
+  dataset_path: data/ml/portfolio_manager/portfolio_manager_dataset_v2_73_clean_2023-01_to_2026-05.parquet
+  rule: high_minus_avoid
+  low_score_skip_enabled: true
+  low_score_skip_threshold: -0.20
+  expected_feature_count: 68
+  selected_count_in_day_forbidden: true
+  data_lineage_audit_status: PASS
+  note: uses audited Phase 3-B clean feature store; no actual/decision/audit/cash/final columns and no selected_count_in_day
+
+risk_margin:
+  max_daily_buy_amount: 900000
+  max_single_order_amount: 500000
+  stop_trading_if_daily_loss_rate_exceeds: -0.05
+  stop_trading_if_drawdown_exceeds: -0.15
+
+ml_backtest:
+  enabled: true
+  mode: ranked
+  prediction_root: data/ml/walk_forward_predictions
+  ranking: risk_adjusted_score
+  risk_adjusted_bad_entry_weight: 0.5
+  min_turnover_value: 50000000
+  missing_prediction_policy: lower_rank
+  prediction_source_note: walk-forward predictions; no model training or prediction generation during backtest
+
+ml_exit_ai:
+  enabled: true
+  model_dir: models/ml/exit/current_v2_66
+  prediction_root: data/ml/walk_forward_predictions
+  model_name: avoid_loss_5d_classification
+  threshold: 0.50
+  risk_adjusted_bad_entry_weight: 0.5
+  note: walk-forward predictions only; no current buy model and no retraining during backtest

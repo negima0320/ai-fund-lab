@@ -516,6 +516,13 @@ def _portfolio_manager_sizing_enabled(config: dict[str, Any]) -> bool:
     return bool(_portfolio_manager_sizing_policy(config).get("enabled", False))
 
 
+def _portfolio_manager_low_score_skip_policy(config: dict[str, Any]) -> tuple[bool, float]:
+    policy = _portfolio_manager_sizing_policy(config)
+    enabled = bool(policy.get("low_score_skip_enabled", False))
+    threshold = float(policy.get("low_score_skip_threshold", -0.20))
+    return enabled, threshold
+
+
 def _portfolio_manager_sizing_advisor(config: dict[str, Any]) -> PortfolioManagerSizingAdvisor:
     policy = _portfolio_manager_sizing_policy(config)
     model_dir = str(policy.get("model_dir") or DEFAULT_PM_MODEL_DIR)
@@ -586,6 +593,25 @@ def _apply_portfolio_manager_sizing(
                 "pm_warning": f"pm_sizing_error:{type(exc).__name__}",
             }
         )
+    low_score_skip_enabled, low_score_skip_threshold = _portfolio_manager_low_score_skip_policy(config)
+    if (
+        low_score_skip_enabled
+        and bool(fields.get("pm_feature_found"))
+        and float(fields.get("pm_score") or 0.0) < low_score_skip_threshold
+    ):
+        fields.update(
+            {
+                "pm_status": "skipped",
+                "pm_missing_reason": "",
+                "pm_target_amount": 0.0,
+                "pm_cash_capped_target_amount": 0.0,
+                "pm_resized_shares": 0,
+                "pm_resized_amount": 0.0,
+                "pm_resize_reason": "pm_low_score_skip",
+            }
+        )
+        item.update(fields)
+        return 0, fields
     multiplier = float(fields.get("pm_multiplier") or 1.0)
     target_amount = max(0.0, min(float(cash or 0), base_amount * multiplier))
     resized_shares, resize_reason = _calculate_buy_shares(entry_price, target_amount, config)
@@ -2278,11 +2304,16 @@ def execute_real_data_paper_trade(
                 config=config,
             )
             if shares <= 0:
-                skipped_reason = "pm_sizing_scaled_below_round_lot"
+                skipped_reason = str(pm_sizing_fields.get("pm_resize_reason") or "pm_sizing_scaled_below_round_lot")
         scaled_buy_fields: dict[str, Any] = {}
         if shares <= 0 and allocation_reason in {"insufficient_available_cash", "target_exposure_limit"}:
             skipped_reason = allocation_reason
-        elif shares <= 0 and _capital_utilization_enabled(config) and not ai_purchase_active:
+        elif (
+            shares <= 0
+            and _capital_utilization_enabled(config)
+            and not ai_purchase_active
+            and skipped_reason not in {"pm_low_score_skip", "pm_sizing_scaled_below_round_lot"}
+        ):
             skipped_reason = "selected_but_not_affordable"
         if shares <= 0:
             fallback_item = None
@@ -2359,7 +2390,7 @@ def execute_real_data_paper_trade(
                         config=config,
                     )
                     if shares <= 0:
-                        skipped_reason = "pm_sizing_scaled_below_round_lot"
+                        skipped_reason = str(pm_sizing_fields.get("pm_resize_reason") or "pm_sizing_scaled_below_round_lot")
                 if shares <= 0:
                     fallback_item = None
             if fallback_item:
@@ -2669,7 +2700,7 @@ def execute_real_data_paper_trade(
                 config=config,
             )
             if shares <= 0:
-                skipped_reason = "pm_sizing_scaled_below_round_lot"
+                skipped_reason = str(pm_sizing_fields.get("pm_resize_reason") or "pm_sizing_scaled_below_round_lot")
         max_positions_remaining_before = max(0, max_positions - len(next_positions) - len(pending_buy_codes))
         if shares > 0:
             shares, scaled_buy_fields = _scale_buy_to_daily_limit(
