@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import random
 from functools import cmp_to_key
+from pathlib import Path
 from typing import Any
+
+import pandas as pd
 
 from broker import build_broker
 from commentary import generate_buy_comment, generate_no_trade_comment, generate_sell_comment
 from market_sections import market_section_allowed
 from market_regime import classify_market_regime, dynamic_exposure_policy, dynamic_exposure_target
 from ml.backtest_exit_ai import apply_exit_ai_to_plan, exit_ai_trade_fields, get_exit_ai_advisor, update_unrealized_extrema
+from ml.data_loader import JQuantsDataLoader
 from ml.portfolio_manager_sizing import (
     DEFAULT_PM_DATASET,
     DEFAULT_PM_MODEL_DIR,
@@ -22,6 +27,8 @@ from tax import calculate_period_profit_summary
 
 
 _PM_SIZING_ADVISOR_CACHE: dict[tuple[str, str, int], PortfolioManagerSizingAdvisor] = {}
+_EXIT_AI_V2_GATE_ADVISOR_CACHE: dict[tuple[str, str, str], "ExitAIV2GateAdvisor"] = {}
+_BEAR_PM_BOOSTER_REGIME_CACHE: dict[str, dict[str, str]] = {}
 
 
 def execute_paper_trades(
@@ -570,6 +577,311 @@ def _high_pm_min_hold_trade_fields(source: dict[str, Any]) -> dict[str, Any]:
     return {key: source.get(key) for key in keys if key in source}
 
 
+def _bear_pm_booster_policy(config: dict[str, Any]) -> dict[str, Any]:
+    policy = config.get("bear_pm_booster", {}) if isinstance(config, dict) else {}
+    return {
+        "enabled": bool(policy.get("bear_pm_booster_enabled", policy.get("enabled", False))),
+        "min_pm_multiplier": float(policy.get("min_pm_multiplier", 1.15) or 1.15),
+        "booster_multiplier": float(policy.get("booster_multiplier", 1.5) or 1.5),
+    }
+
+
+def _bear_pm_booster_regime_for_date(trade_date: str, config: dict[str, Any]) -> str:
+    if not _bear_pm_booster_policy(config)["enabled"]:
+        return ""
+    profile_id = str(config.get("profile_id") or "")
+    cache_key = f"{profile_id}:2022-01-01:2026-12-31"
+    if cache_key not in _BEAR_PM_BOOSTER_REGIME_CACHE:
+        _BEAR_PM_BOOSTER_REGIME_CACHE[cache_key] = _load_topix_ma_regime_map("2022-01-01", "2026-12-31")
+    return _BEAR_PM_BOOSTER_REGIME_CACHE.get(cache_key, {}).get(str(trade_date), "Unknown")
+
+
+def _load_topix_ma_regime_map(start_date: str, end_date: str) -> dict[str, str]:
+    try:
+        cache_root = Path(__file__).resolve().parents[1] / "data" / "cache" / "jquants"
+        topix = JQuantsDataLoader(cache_root).load_topix(start_date, end_date)
+    except Exception:
+        return {}
+    if topix.empty or not {"date", "close"}.issubset(topix.columns):
+        return {}
+    frame = topix.copy().dropna(subset=["date", "close"]).sort_values("date")
+    frame = frame.drop_duplicates("date", keep="last")
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+    frame = frame.dropna(subset=["date", "close"]).sort_values("date")
+    if frame.empty:
+        return {}
+    frame["ma25"] = frame["close"].rolling(25, min_periods=1).mean()
+    frame["ma75"] = frame["close"].rolling(75, min_periods=1).mean()
+    frame["market_regime"] = frame.apply(_classify_topix_ma_regime_row, axis=1)
+    frame["date"] = frame["date"].dt.strftime("%Y-%m-%d")
+    return dict(zip(frame["date"], frame["market_regime"]))
+
+
+def _classify_topix_ma_regime_row(row: pd.Series) -> str:
+    close = pd.to_numeric(pd.Series([row.get("close")]), errors="coerce").iloc[0]
+    ma25 = pd.to_numeric(pd.Series([row.get("ma25")]), errors="coerce").iloc[0]
+    ma75 = pd.to_numeric(pd.Series([row.get("ma75")]), errors="coerce").iloc[0]
+    if pd.isna(close) or pd.isna(ma25) or pd.isna(ma75):
+        return "Unknown"
+    if close < ma75 and ma25 < ma75:
+        return "Bear"
+    if close > ma75 and ma25 > ma75:
+        return "Bull"
+    return "Neutral"
+
+
+def _bear_pm_booster_trade_fields(source: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "market_regime",
+        "bear_pm_booster_enabled",
+        "bear_pm_booster_applied",
+        "bear_pm_booster_multiplier",
+        "bear_pm_booster_reason",
+        "bear_pm_booster_before_amount",
+        "bear_pm_booster_after_amount",
+        "bear_pm_booster_limited_by",
+        "bear_pm_booster_pm_multiplier",
+        "bear_pm_booster_pm_score",
+    ]
+    return {key: source.get(key) for key in keys if key in source}
+
+
+def _exit_ai_v2_gate_policy(config: dict[str, Any]) -> dict[str, Any]:
+    policy = config.get("ml_exit_ai_v2_gate", {}) if isinstance(config, dict) else {}
+    return {
+        "enabled": bool(policy.get("enabled", False)),
+        "model_dir": str(policy.get("model_dir") or "models/ml/exit_ai_v2/candidate_v2_api_only"),
+        "dataset_path": str(policy.get("dataset_path") or "data/ml/exit_ai_v2/exit_ai_v2_dataset_api_only_2021-06_to_2026-05.parquet"),
+        "score_threshold": float(policy.get("score_threshold", 0.20) or 0.20),
+        "high_pm_safe_mode": bool(policy.get("high_pm_safe_mode", False)),
+        "high_pm_min_multiplier": float(policy.get("high_pm_min_multiplier", 1.15) or 1.15),
+        "high_pm_score_threshold": float(policy.get("high_pm_score_threshold", 0.25) or 0.25),
+        "model_version": str(policy.get("model_version") or "exit_ai_v2_candidate_v2_api_only"),
+        "selected_count_in_day_forbidden": bool(policy.get("selected_count_in_day_forbidden", True)),
+    }
+
+
+def _exit_ai_v2_gate_trade_fields(source: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "exit_ai_v2_enabled",
+        "exit_ai_v2_prediction_available",
+        "exit_ai_v2_score",
+        "exit_ai_v2_threshold",
+        "exit_ai_v2_gate_signal",
+        "exit_ai_v2_gate_reason",
+        "exit_ai_v2_feature_missing_count",
+        "exit_ai_v2_model_version",
+        "exit_ai_v2_used_as_exit_trigger",
+        "exit_ai_v2_high_pm_safe_mode",
+        "exit_ai_v2_high_pm_threshold",
+    ]
+    return {key: source.get(key) for key in keys if key in source}
+
+
+def _repo_path(path: str | Path) -> Path:
+    value = Path(path)
+    if value.is_absolute():
+        return value
+    return Path(__file__).resolve().parents[1] / value
+
+
+def _normalize_stock_code(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    return text
+
+
+class ExitAIV2GateAdvisor:
+    """Read-only scorer for the Phase 5-F candidate Exit AI v2 model."""
+
+    def __init__(
+        self,
+        *,
+        model_dir: str | Path,
+        dataset_path: str | Path,
+        score_threshold: float,
+        high_pm_safe_mode: bool,
+        high_pm_min_multiplier: float,
+        high_pm_score_threshold: float,
+        model_version: str,
+        selected_count_in_day_forbidden: bool = True,
+    ) -> None:
+        self.model_dir = _repo_path(model_dir)
+        self.dataset_path = _repo_path(dataset_path)
+        self.score_threshold = float(score_threshold)
+        self.high_pm_safe_mode = bool(high_pm_safe_mode)
+        self.high_pm_min_multiplier = float(high_pm_min_multiplier)
+        self.high_pm_score_threshold = float(high_pm_score_threshold)
+        self.model_version = model_version
+        self.selected_count_in_day_forbidden = bool(selected_count_in_day_forbidden)
+        self.model: Any | None = None
+        self.metadata: dict[str, Any] = {}
+        self.preprocess: dict[str, Any] = {}
+        self.feature_columns: list[str] = []
+        self.dataset: pd.DataFrame | None = None
+        self.available = False
+        self.unavailable_reason = ""
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            import joblib
+
+            metadata_path = self.model_dir / "model_metadata.json"
+            preprocess_path = self.model_dir / "preprocess.json"
+            model_path = self.model_dir / "exit_quality_top_decile_classifier.joblib"
+            if not metadata_path.exists() or not preprocess_path.exists() or not model_path.exists():
+                self.unavailable_reason = "model_bundle_missing"
+                return
+            self.metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.preprocess = json.loads(preprocess_path.read_text(encoding="utf-8"))
+            metadata_features = self.metadata.get("feature_columns")
+            preprocess_features = self.preprocess.get("feature_columns")
+            if not isinstance(metadata_features, list) or not isinstance(preprocess_features, list):
+                self.unavailable_reason = "feature_schema_missing"
+                return
+            if metadata_features != preprocess_features:
+                self.unavailable_reason = "feature_schema_mismatch"
+                return
+            if self.selected_count_in_day_forbidden and "selected_count_in_day" in metadata_features:
+                self.unavailable_reason = "selected_count_in_day_forbidden"
+                return
+            self.feature_columns = [str(column) for column in metadata_features]
+            columns = ["code", "as_of_date", *self.feature_columns]
+            self.dataset = pd.read_parquet(self.dataset_path, columns=columns)
+            self.dataset["code"] = self.dataset["code"].map(_normalize_stock_code)
+            self.dataset["as_of_date"] = pd.to_datetime(self.dataset["as_of_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+            self.dataset = self.dataset.dropna(subset=["code", "as_of_date"]).set_index(["code", "as_of_date"], drop=False)
+            self.model = joblib.load(model_path)
+            self.available = True
+        except Exception as exc:  # pragma: no cover - defensive fallback for backtest safety
+            self.unavailable_reason = f"load_failed:{type(exc).__name__}"
+            self.available = False
+
+    def decision_for(self, *, code: Any, trade_date: str, pm_multiplier: Any) -> dict[str, Any]:
+        fields = {
+            "exit_ai_v2_enabled": True,
+            "exit_ai_v2_prediction_available": False,
+            "exit_ai_v2_score": None,
+            "exit_ai_v2_threshold": self.score_threshold,
+            "exit_ai_v2_gate_signal": False,
+            "exit_ai_v2_gate_reason": self.unavailable_reason,
+            "exit_ai_v2_feature_missing_count": None,
+            "exit_ai_v2_model_version": self.model_version,
+            "exit_ai_v2_used_as_exit_trigger": False,
+            "exit_ai_v2_high_pm_safe_mode": self.high_pm_safe_mode,
+            "exit_ai_v2_high_pm_threshold": self.high_pm_score_threshold if self.high_pm_safe_mode else None,
+        }
+        if not self.available or self.model is None or self.dataset is None:
+            return fields
+        key = (_normalize_stock_code(code), str(trade_date))
+        if key not in self.dataset.index:
+            fields["exit_ai_v2_gate_reason"] = "dataset_row_missing"
+            return fields
+        row = self.dataset.loc[key]
+        if isinstance(row, pd.DataFrame):
+            row = row.iloc[0]
+        feature_row = pd.DataFrame([row[self.feature_columns].to_dict()])
+        missing_count = int(feature_row.isna().sum(axis=1).iloc[0])
+        transformed = self._transform(feature_row)
+        score = float(self.model.predict_proba(transformed)[:, 1][0])
+        pm_value = _optional_float(pm_multiplier)
+        threshold = self.score_threshold
+        if self.high_pm_safe_mode and pm_value is not None and pm_value >= self.high_pm_min_multiplier:
+            threshold = self.high_pm_score_threshold
+        fields.update(
+            {
+                "exit_ai_v2_prediction_available": True,
+                "exit_ai_v2_score": score,
+                "exit_ai_v2_threshold": threshold,
+                "exit_ai_v2_gate_signal": score >= threshold,
+                "exit_ai_v2_gate_reason": "score_above_threshold" if score >= threshold else "score_below_threshold",
+                "exit_ai_v2_feature_missing_count": missing_count,
+            }
+        )
+        return fields
+
+    def _transform(self, frame: pd.DataFrame) -> pd.DataFrame:
+        transformed: dict[str, Any] = {}
+        medians = self.preprocess.get("medians", {})
+        modes = self.preprocess.get("modes", {})
+        for column in self.preprocess.get("numeric_columns", []):
+            transformed[column] = pd.to_numeric(frame[column], errors="coerce").fillna(medians.get(column, 0.0))
+        for column in self.preprocess.get("categorical_columns", []):
+            filled = frame[column].fillna(modes.get(column, "")).astype("category")
+            transformed[column] = filled.cat.codes.astype(float)
+        output = pd.DataFrame(transformed, index=frame.index)
+        for column in self.preprocess.get("missing_indicator_columns", []):
+            output[f"{column}_missing"] = frame[column].isna().astype(int)
+        return output
+
+
+def _exit_ai_v2_gate_advisor(config: dict[str, Any]) -> ExitAIV2GateAdvisor | None:
+    policy = _exit_ai_v2_gate_policy(config)
+    if not policy["enabled"]:
+        return None
+    key = (policy["model_dir"], policy["dataset_path"], str(policy))
+    if key not in _EXIT_AI_V2_GATE_ADVISOR_CACHE:
+        _EXIT_AI_V2_GATE_ADVISOR_CACHE[key] = ExitAIV2GateAdvisor(
+            model_dir=policy["model_dir"],
+            dataset_path=policy["dataset_path"],
+            score_threshold=policy["score_threshold"],
+            high_pm_safe_mode=policy["high_pm_safe_mode"],
+            high_pm_min_multiplier=policy["high_pm_min_multiplier"],
+            high_pm_score_threshold=policy["high_pm_score_threshold"],
+            model_version=policy["model_version"],
+            selected_count_in_day_forbidden=policy["selected_count_in_day_forbidden"],
+        )
+    return _EXIT_AI_V2_GATE_ADVISOR_CACHE[key]
+
+
+def _apply_exit_ai_v2_gate_to_plan(
+    exit_plan: dict[str, Any],
+    advisor: Any | None,
+    *,
+    position: dict[str, Any],
+    trade_date: str,
+    current_price: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if advisor is None:
+        fields = {
+            "exit_ai_v2_enabled": False,
+            "exit_ai_v2_prediction_available": False,
+            "exit_ai_v2_score": None,
+            "exit_ai_v2_threshold": None,
+            "exit_ai_v2_gate_signal": False,
+            "exit_ai_v2_gate_reason": "disabled",
+            "exit_ai_v2_feature_missing_count": None,
+            "exit_ai_v2_model_version": None,
+            "exit_ai_v2_used_as_exit_trigger": False,
+            "exit_ai_v2_high_pm_safe_mode": False,
+            "exit_ai_v2_high_pm_threshold": None,
+        }
+        return exit_plan, fields
+    fields = advisor.decision_for(
+        code=position.get("code"),
+        trade_date=trade_date,
+        pm_multiplier=position.get("pm_multiplier"),
+    )
+    if exit_plan.get("exit_reason"):
+        return exit_plan, fields
+    if not fields.get("exit_ai_v2_gate_signal"):
+        return exit_plan, fields
+    updated = dict(exit_plan)
+    updated.update(
+        {
+            "exit_reason": "exit_ai_v2_gate",
+            "exit_price": current_price,
+            "intended_exit_price": current_price,
+            "execute_now": True,
+        }
+    )
+    fields["exit_ai_v2_used_as_exit_trigger"] = True
+    return updated, fields
+
+
 def _apply_high_pm_min_hold_exit_guard(
     exit_plan: dict[str, Any],
     position: dict[str, Any],
@@ -759,6 +1071,82 @@ def _apply_portfolio_manager_sizing(
     return resized_shares, fields
 
 
+def _apply_bear_pm_booster(
+    *,
+    item: dict[str, Any],
+    trade_date: str,
+    shares: int,
+    entry_price: float,
+    cash: float,
+    config: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    policy = _bear_pm_booster_policy(config)
+    before_amount = max(0.0, int(shares or 0) * float(entry_price or 0))
+    pm_multiplier = _optional_float(item.get("pm_multiplier"))
+    pm_score = _optional_float(item.get("pm_score"))
+    market_regime = _bear_pm_booster_regime_for_date(trade_date, config) if policy["enabled"] else ""
+    fields: dict[str, Any] = {
+        "market_regime": market_regime,
+        "bear_pm_booster_enabled": bool(policy["enabled"]),
+        "bear_pm_booster_applied": False,
+        "bear_pm_booster_multiplier": policy["booster_multiplier"] if policy["enabled"] else "",
+        "bear_pm_booster_reason": "",
+        "bear_pm_booster_before_amount": round(before_amount, 2),
+        "bear_pm_booster_after_amount": round(before_amount, 2),
+        "bear_pm_booster_limited_by": "",
+        "bear_pm_booster_pm_multiplier": pm_multiplier,
+        "bear_pm_booster_pm_score": pm_score,
+    }
+    if not policy["enabled"]:
+        fields["bear_pm_booster_reason"] = "disabled"
+        item.update(fields)
+        return shares, fields
+    if shares <= 0 or entry_price <= 0:
+        fields["bear_pm_booster_reason"] = "no_positive_shares"
+        item.update(fields)
+        return shares, fields
+    if market_regime != "Bear":
+        fields["bear_pm_booster_reason"] = "not_bear" if market_regime else "regime_unknown"
+        item.update(fields)
+        return shares, fields
+    if pm_multiplier is None or pm_multiplier < policy["min_pm_multiplier"]:
+        fields["bear_pm_booster_reason"] = "pm_multiplier_below_threshold"
+        item.update(fields)
+        return shares, fields
+
+    desired_amount = before_amount * policy["booster_multiplier"]
+    target_amount = min(max(0.0, float(cash or 0)), desired_amount)
+    boosted_shares, resize_reason = _calculate_buy_shares(entry_price, target_amount, config)
+    after_amount = max(0.0, boosted_shares * float(entry_price or 0))
+    limited_by: list[str] = []
+    if target_amount < desired_amount:
+        limited_by.append("available_cash")
+    if after_amount < desired_amount:
+        limited_by.append("round_lot")
+    fields.update(
+        {
+            "bear_pm_booster_applied": boosted_shares > shares,
+            "bear_pm_booster_reason": "applied" if boosted_shares > shares else resize_reason or "not_increased_after_round_lot",
+            "bear_pm_booster_after_amount": round(after_amount, 2),
+            "bear_pm_booster_limited_by": ",".join(dict.fromkeys(limited_by)),
+        }
+    )
+    item.update(fields)
+    return max(shares, boosted_shares), fields
+
+
+def _mark_bear_pm_booster_limited_by(item: dict[str, Any], fields: dict[str, Any], reason: str) -> dict[str, Any]:
+    if not fields or not fields.get("bear_pm_booster_enabled"):
+        return fields
+    existing = str(fields.get("bear_pm_booster_limited_by") or "")
+    parts = [part for part in existing.split(",") if part]
+    if reason and reason not in parts:
+        parts.append(reason)
+    fields["bear_pm_booster_limited_by"] = ",".join(parts)
+    item["bear_pm_booster_limited_by"] = fields["bear_pm_booster_limited_by"]
+    return fields
+
+
 def _portfolio_manager_trade_fields(source: dict[str, Any]) -> dict[str, Any]:
     keys = [
         "pm_ai_enabled",
@@ -807,6 +1195,7 @@ def _portfolio_manager_trade_fields(source: dict[str, Any]) -> dict[str, Any]:
     ]
     fields = {key: source.get(key) for key in keys if key in source}
     fields.update(_high_pm_min_hold_trade_fields(source))
+    fields.update(_bear_pm_booster_trade_fields(source))
     return fields
 
 
@@ -1764,6 +2153,15 @@ def _purchase_audit_event(
         "pm_per_code_cap_reduced",
         "pm_per_code_cap_skip",
         "pm_per_code_cap_reason",
+        "bear_pm_booster_enabled",
+        "bear_pm_booster_applied",
+        "bear_pm_booster_multiplier",
+        "bear_pm_booster_reason",
+        "bear_pm_booster_before_amount",
+        "bear_pm_booster_after_amount",
+        "bear_pm_booster_limited_by",
+        "bear_pm_booster_pm_multiplier",
+        "bear_pm_booster_pm_score",
     ]:
         event[key] = item.get(key, "")
     return event
@@ -2128,6 +2526,15 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "pm_per_code_cap_reduced",
         "pm_per_code_cap_skip",
         "pm_per_code_cap_reason",
+        "bear_pm_booster_enabled",
+        "bear_pm_booster_applied",
+        "bear_pm_booster_multiplier",
+        "bear_pm_booster_reason",
+        "bear_pm_booster_before_amount",
+        "bear_pm_booster_after_amount",
+        "bear_pm_booster_limited_by",
+        "bear_pm_booster_pm_multiplier",
+        "bear_pm_booster_pm_score",
         "high_pm_min_hold_enabled",
         "high_pm_min_hold_days",
         "high_pm_min_hold_applied",
@@ -2207,6 +2614,7 @@ def execute_real_data_paper_trade(
     next_day_execution = bool(config.get("execution", {}).get("use_next_day_open_execution", False))
     stop_loss_execution = str(config.get("execution", {}).get("stop_loss_execution", "next_day_open"))
     exit_ai_advisor = get_exit_ai_advisor(config)
+    exit_ai_v2_gate_advisor = _exit_ai_v2_gate_advisor(config)
 
     trades = []
     safety_events = []
@@ -2410,6 +2818,13 @@ def execute_real_data_paper_trade(
             current_price=current_price,
             holding_days=holding_days,
         )
+        exit_plan, exit_ai_v2_gate_fields = _apply_exit_ai_v2_gate_to_plan(
+            exit_plan,
+            exit_ai_v2_gate_advisor if market else None,
+            position=position,
+            trade_date=trade_date,
+            current_price=current_price,
+        )
         exit_plan, high_pm_min_hold_fields = _apply_high_pm_min_hold_exit_guard(
             exit_plan,
             position,
@@ -2432,6 +2847,7 @@ def execute_real_data_paper_trade(
             "min_unrealized_return_so_far": min_unrealized_return_so_far,
             "drawdown_from_peak": profit_rate - max_unrealized_return_so_far if max_unrealized_return_so_far is not None else None,
             **holding_signal,
+            **exit_ai_v2_gate_fields,
             **high_pm_min_hold_fields,
         }
         if exit_reason and position["code"] not in pending_sell_codes:
@@ -2461,9 +2877,11 @@ def execute_real_data_paper_trade(
                     "buy_reason": position.get("reason", ""),
                     **_position_feature_snapshot(position),
                     **holding_signal,
+                    **exit_ai_v2_gate_fields,
                     **high_pm_min_hold_fields,
                     **_stop_loss_trade_fields(exit_plan, planned_exit_price),
                     **exit_ai_trade_fields(exit_plan),
+                    **_exit_ai_v2_gate_trade_fields(exit_ai_v2_gate_fields),
                 },
                 entry_notional,
                 proceeds,
@@ -2740,6 +3158,7 @@ def execute_real_data_paper_trade(
         planned_shares = shares
         planned_amount = shares * entry_price if shares > 0 else 0.0
         pm_sizing_fields: dict[str, Any] = {}
+        bear_pm_booster_fields: dict[str, Any] = {}
         per_code_cap_fields: dict[str, Any] = {}
         if shares > 0:
             shares, pm_sizing_fields = _apply_portfolio_manager_sizing(
@@ -2753,6 +3172,15 @@ def execute_real_data_paper_trade(
             if shares <= 0:
                 skipped_reason = str(pm_sizing_fields.get("pm_resize_reason") or "pm_sizing_scaled_below_round_lot")
         if shares > 0:
+            shares, bear_pm_booster_fields = _apply_bear_pm_booster(
+                item=item,
+                trade_date=trade_date,
+                shares=shares,
+                entry_price=entry_price,
+                cash=cash,
+                config=config,
+            )
+        if shares > 0:
             shares, per_code_cap_fields = _apply_per_code_exposure_cap(
                 item=item,
                 shares=shares,
@@ -2761,6 +3189,8 @@ def execute_real_data_paper_trade(
                 total_assets=current_total_assets,
                 config=config,
             )
+            if per_code_cap_fields.get("pm_per_code_cap_reduced"):
+                _mark_bear_pm_booster_limited_by(item, bear_pm_booster_fields, "per_code_exposure_cap")
             if shares <= 0:
                 skipped_reason = str(per_code_cap_fields.get("pm_per_code_cap_reason") or "per_code_exposure_cap")
         scaled_buy_fields: dict[str, Any] = {}
@@ -2811,6 +3241,7 @@ def execute_real_data_paper_trade(
                         extra_fields={
                             **dynamic_exposure_fields,
                             **pm_sizing_fields,
+                            **bear_pm_booster_fields,
                             **per_code_cap_fields,
                             "affordable_fallback_attempted": True,
                             "affordable_fallback_replaced_by_code": fallback_item.get("code"),
@@ -2839,6 +3270,7 @@ def execute_real_data_paper_trade(
                 current_price = _candidate_market_price(item, entry_price)
                 shares, skipped_reason = _calculate_buy_shares(entry_price, allocation, config)
                 pm_sizing_fields = {}
+                bear_pm_booster_fields = {}
                 per_code_cap_fields = {}
                 if shares > 0:
                     shares, pm_sizing_fields = _apply_portfolio_manager_sizing(
@@ -2852,6 +3284,15 @@ def execute_real_data_paper_trade(
                     if shares <= 0:
                         skipped_reason = str(pm_sizing_fields.get("pm_resize_reason") or "pm_sizing_scaled_below_round_lot")
                 if shares > 0:
+                    shares, bear_pm_booster_fields = _apply_bear_pm_booster(
+                        item=item,
+                        trade_date=trade_date,
+                        shares=shares,
+                        entry_price=entry_price,
+                        cash=cash,
+                        config=config,
+                    )
+                if shares > 0:
                     shares, per_code_cap_fields = _apply_per_code_exposure_cap(
                         item=item,
                         shares=shares,
@@ -2860,6 +3301,8 @@ def execute_real_data_paper_trade(
                         total_assets=current_total_assets,
                         config=config,
                     )
+                    if per_code_cap_fields.get("pm_per_code_cap_reduced"):
+                        _mark_bear_pm_booster_limited_by(item, bear_pm_booster_fields, "per_code_exposure_cap")
                     if shares <= 0:
                         skipped_reason = str(per_code_cap_fields.get("pm_per_code_cap_reason") or "per_code_exposure_cap")
                 if shares <= 0:
@@ -2870,6 +3313,7 @@ def execute_real_data_paper_trade(
                 no_fallback_extra = {
                     **dynamic_exposure_fields,
                     **pm_sizing_fields,
+                    **bear_pm_booster_fields,
                     **per_code_cap_fields,
                     "affordable_fallback_attempted": _is_affordable_fallback_skip_reason(skipped_reason)
                     and _affordable_fallback_enabled(config),
@@ -2929,6 +3373,8 @@ def execute_real_data_paper_trade(
             )
             if shares <= 0:
                 skipped_reason = "daily_buy_limit_scaled_below_round_lot"
+            if scaled_buy_fields.get("scaled_buy_triggered"):
+                _mark_bear_pm_booster_limited_by(item, bear_pm_booster_fields, "daily_buy_limit")
         if shares <= 0:
             trades.append(
                 _skipped_buy_attempt(
@@ -2944,7 +3390,7 @@ def execute_real_data_paper_trade(
                     skipped_reason=skipped_reason,
                     config=config,
                     allocation_reason=allocation_reason,
-                    extra_fields={**dynamic_exposure_fields, **pm_sizing_fields, **per_code_cap_fields},
+                    extra_fields={**dynamic_exposure_fields, **pm_sizing_fields, **bear_pm_booster_fields, **per_code_cap_fields},
                 )
             )
             if purchase_audit_active:
@@ -2999,6 +3445,7 @@ def execute_real_data_paper_trade(
             **scaled_buy_fields,
             **ai_purchase_fields,
             **pm_sizing_fields,
+            **bear_pm_booster_fields,
             **per_code_cap_fields,
             **_technical_snapshot(item),
             "unrealized_profit": round(shares * (current_price - entry_price), 2),
@@ -3022,6 +3469,7 @@ def execute_real_data_paper_trade(
             **scaled_buy_fields,
             **ai_purchase_fields,
             **pm_sizing_fields,
+            **bear_pm_booster_fields,
             **per_code_cap_fields,
             "score": item["total_score"],
             "entry_score": item["total_score"],
@@ -3170,6 +3618,7 @@ def execute_real_data_paper_trade(
         planned_shares = shares
         planned_amount = shares * entry_price if shares > 0 else 0.0
         pm_sizing_fields: dict[str, Any] = {}
+        bear_pm_booster_fields: dict[str, Any] = {}
         per_code_cap_fields: dict[str, Any] = {}
         if shares > 0:
             shares, pm_sizing_fields = _apply_portfolio_manager_sizing(
@@ -3183,6 +3632,15 @@ def execute_real_data_paper_trade(
             if shares <= 0:
                 skipped_reason = str(pm_sizing_fields.get("pm_resize_reason") or "pm_sizing_scaled_below_round_lot")
         if shares > 0:
+            shares, bear_pm_booster_fields = _apply_bear_pm_booster(
+                item=fallback_item,
+                trade_date=trade_date,
+                shares=shares,
+                entry_price=entry_price,
+                cash=cash,
+                config=config,
+            )
+        if shares > 0:
             shares, per_code_cap_fields = _apply_per_code_exposure_cap(
                 item=fallback_item,
                 shares=shares,
@@ -3191,6 +3649,8 @@ def execute_real_data_paper_trade(
                 total_assets=current_total_assets,
                 config=config,
             )
+            if per_code_cap_fields.get("pm_per_code_cap_reduced"):
+                _mark_bear_pm_booster_limited_by(fallback_item, bear_pm_booster_fields, "per_code_exposure_cap")
             if shares <= 0:
                 skipped_reason = str(per_code_cap_fields.get("pm_per_code_cap_reason") or "per_code_exposure_cap")
         max_positions_remaining_before = max(0, max_positions - len(next_positions) - len(pending_buy_codes))
@@ -3204,6 +3664,8 @@ def execute_real_data_paper_trade(
             )
             if shares <= 0:
                 skipped_reason = "daily_buy_limit_scaled_below_round_lot"
+            if scaled_buy_fields.get("scaled_buy_triggered"):
+                _mark_bear_pm_booster_limited_by(fallback_item, bear_pm_booster_fields, "daily_buy_limit")
         if shares <= 0:
             break
         amount = shares * entry_price
@@ -3228,6 +3690,7 @@ def execute_real_data_paper_trade(
             "reason": fallback_item.get("selection_reason") or fallback_item.get("selected_reason") or fallback_item["reason"],
             **scaled_buy_fields,
             **pm_sizing_fields,
+            **bear_pm_booster_fields,
             **per_code_cap_fields,
             **_technical_snapshot(fallback_item),
             "unrealized_profit": round(shares * (current_price - entry_price), 2),
@@ -3250,6 +3713,7 @@ def execute_real_data_paper_trade(
             "buy_commission": buy_commission,
             **scaled_buy_fields,
             **pm_sizing_fields,
+            **bear_pm_booster_fields,
             **per_code_cap_fields,
             "score": fallback_item["total_score"],
             "rank": fallback_item.get("rank"),
