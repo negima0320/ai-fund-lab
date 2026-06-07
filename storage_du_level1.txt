@@ -1,0 +1,17 @@
+ 40G	.
+ 35G	./data
+1.4G	./storage
+1.0G	./logs
+628M	./analysis_logs
+491M	./.git
+435M	./.venv
+326M	./reports
+216M	./models
+ 11M	./articles
+3.3M	./src
+1.1M	./tests
+472K	./config
+344K	./scripts
+316K	./docs
+ 24K	./.pytest_cache
+4.0K	./.github

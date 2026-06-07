@@ -530,6 +530,103 @@ def _portfolio_manager_per_code_exposure_cap_policy(config: dict[str, Any]) -> t
     return enabled and rate > 0, rate
 
 
+def _portfolio_manager_buy_ordering_policy(config: dict[str, Any]) -> dict[str, Any]:
+    policy = _portfolio_manager_sizing_policy(config)
+    mode = str(policy.get("buy_ordering_mode") or "default")
+    return {
+        "mode": mode,
+        "pm_order_weight": float(policy.get("pm_order_weight", 0.0) or 0.0),
+        "fallback_to_next_affordable_selected": bool(policy.get("fallback_to_next_affordable_selected", False)),
+        "fallback_min_pm_score": float(policy.get("fallback_min_pm_score", 0.0) or 0.0),
+        "fallback_min_pm_multiplier": float(policy.get("fallback_min_pm_multiplier", 1.0) or 1.0),
+    }
+
+
+def _portfolio_manager_pm_aware_ordering_enabled(config: dict[str, Any]) -> bool:
+    policy = _portfolio_manager_buy_ordering_policy(config)
+    return _portfolio_manager_sizing_enabled(config) and policy["mode"] == "pm_aware"
+
+
+def _high_pm_min_hold_policy(config: dict[str, Any]) -> dict[str, Any]:
+    policy = _portfolio_manager_sizing_policy(config)
+    return {
+        "enabled": bool(policy.get("high_pm_min_hold_enabled", False)),
+        "minimum_hold_days": int(policy.get("high_pm_min_hold_days", 0) or 0),
+        "min_pm_multiplier": float(policy.get("high_pm_min_hold_min_multiplier", 1.15) or 1.15),
+    }
+
+
+def _high_pm_min_hold_trade_fields(source: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "high_pm_min_hold_enabled",
+        "high_pm_min_hold_days",
+        "high_pm_min_hold_applied",
+        "high_pm_min_hold_blocked_exit",
+        "high_pm_min_hold_blocked_exit_count",
+        "high_pm_min_hold_exit_reason_original",
+        "high_pm_min_hold_release_date",
+        "holding_days_at_exit_signal",
+    ]
+    return {key: source.get(key) for key in keys if key in source}
+
+
+def _apply_high_pm_min_hold_exit_guard(
+    exit_plan: dict[str, Any],
+    position: dict[str, Any],
+    config: dict[str, Any],
+    trade_date: str,
+    holding_days: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    policy = _high_pm_min_hold_policy(config)
+    fields: dict[str, Any] = {
+        "high_pm_min_hold_enabled": policy["enabled"],
+        "high_pm_min_hold_days": policy["minimum_hold_days"] if policy["enabled"] else None,
+        "high_pm_min_hold_applied": False,
+        "high_pm_min_hold_blocked_exit": False,
+        "high_pm_min_hold_blocked_exit_count": int(float(position.get("high_pm_min_hold_blocked_exit_count") or 0)),
+        "high_pm_min_hold_exit_reason_original": "",
+        "high_pm_min_hold_release_date": "",
+        "holding_days_at_exit_signal": holding_days if exit_plan.get("exit_reason") else None,
+    }
+    if not policy["enabled"] or policy["minimum_hold_days"] <= 0:
+        return exit_plan, fields
+    pm_multiplier = _optional_float(position.get("pm_multiplier"))
+    high_pm = pm_multiplier is not None and pm_multiplier >= policy["min_pm_multiplier"]
+    fields["high_pm_min_hold_applied"] = high_pm
+    if not high_pm:
+        return exit_plan, fields
+    fields["high_pm_min_hold_release_date"] = _business_date_after_entry(str(position.get("entry_date") or ""), policy["minimum_hold_days"])
+    if holding_days >= policy["minimum_hold_days"]:
+        return exit_plan, fields
+    if not bool(exit_plan.get("exit_ai_triggered")):
+        return exit_plan, fields
+    original_reason = str(exit_plan.get("exit_reason") or "")
+    updated = dict(exit_plan)
+    updated.update(
+        {
+            "exit_reason": "",
+            "exit_price": None,
+            "intended_exit_price": None,
+            "execute_now": False,
+            "exit_ai_triggered": False,
+            "exit_ai_warning": (
+                f"{str(exit_plan.get('exit_ai_warning') or '')};high_pm_min_hold_blocked"
+                if exit_plan.get("exit_ai_warning")
+                else "high_pm_min_hold_blocked"
+            ),
+        }
+    )
+    fields.update(
+        {
+            "high_pm_min_hold_blocked_exit": True,
+            "high_pm_min_hold_blocked_exit_count": int(float(position.get("high_pm_min_hold_blocked_exit_count") or 0)) + 1,
+            "high_pm_min_hold_exit_reason_original": original_reason,
+            "holding_days_at_exit_signal": holding_days,
+        }
+    )
+    return updated, fields
+
+
 def _portfolio_manager_sizing_advisor(config: dict[str, Any]) -> PortfolioManagerSizingAdvisor:
     policy = _portfolio_manager_sizing_policy(config)
     model_dir = str(policy.get("model_dir") or DEFAULT_PM_MODEL_DIR)
@@ -543,6 +640,33 @@ def _portfolio_manager_sizing_advisor(config: dict[str, Any]) -> PortfolioManage
             expected_feature_count=expected_feature_count,
         )
     return _PM_SIZING_ADVISOR_CACHE[key]
+
+
+def _ensure_portfolio_manager_decision_fields(item: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    if not _portfolio_manager_sizing_enabled(config):
+        return {}
+    if "pm_score" in item and "pm_multiplier" in item and "pm_feature_found" in item:
+        return _portfolio_manager_trade_fields(item)
+    try:
+        advisor = _portfolio_manager_sizing_advisor(config)
+        decision = advisor.decision_for(str(item.get("signal_date") or item.get("date") or ""), str(item.get("code") or ""))
+        fields = decision.as_fields()
+    except Exception as exc:
+        fields = {
+            "pm_ai_enabled": True,
+            "pm_status": "error",
+            "pm_missing_reason": f"pm_decision_error:{type(exc).__name__}",
+            "pm_feature_count": "",
+            "pm_high_conviction_proba": None,
+            "pm_avoid_proba": None,
+            "pm_score": 0.0,
+            "pm_multiplier": 1.0,
+            "pm_model_version": "",
+            "pm_feature_found": False,
+            "pm_warning": f"pm_decision_error:{type(exc).__name__}",
+        }
+    item.update(fields)
+    return fields
 
 
 def _apply_portfolio_manager_sizing(
@@ -667,8 +791,23 @@ def _portfolio_manager_trade_fields(source: dict[str, Any]) -> dict[str, Any]:
         "pm_per_code_cap_reduced",
         "pm_per_code_cap_skip",
         "pm_per_code_cap_reason",
+        "buy_ordering_mode",
+        "original_candidate_order",
+        "pm_aware_candidate_order",
+        "buy_priority_score",
+        "fallback_enabled",
+        "fallback_triggered",
+        "fallback_from_code",
+        "fallback_to_code",
+        "fallback_from_reason",
+        "fallback_to_pm_score",
+        "fallback_to_pm_multiplier",
+        "fallback_to_order",
+        "skipped_by_fallback_quality_filter",
     ]
-    return {key: source.get(key) for key in keys if key in source}
+    fields = {key: source.get(key) for key in keys if key in source}
+    fields.update(_high_pm_min_hold_trade_fields(source))
+    return fields
 
 
 def _position_market_value(position: dict[str, Any]) -> float:
@@ -1099,7 +1238,59 @@ def _is_affordable_fallback_skip_reason(reason: str) -> bool:
         "round_lot_unaffordable",
         "insufficient_available_cash",
         "target_exposure_limit",
+        "daily_buy_limit_scaled_below_round_lot",
+        "per_code_exposure_cap_scaled_below_round_lot",
+        "below_round_lot_after_pm_sizing",
+        "pm_sizing_scaled_below_round_lot",
     }
+
+
+def _phase3l_selected_fallback_enabled(config: dict[str, Any]) -> bool:
+    return bool(_portfolio_manager_buy_ordering_policy(config)["fallback_to_next_affordable_selected"])
+
+
+def _phase3l_apply_selected_fallback_fields(
+    item: dict[str, Any],
+    config: dict[str, Any],
+    pending: dict[str, Any] | None,
+) -> dict[str, Any]:
+    enabled = _phase3l_selected_fallback_enabled(config)
+    item["fallback_enabled"] = enabled
+    if not pending:
+        item.setdefault("fallback_triggered", False)
+        item.setdefault("skipped_by_fallback_quality_filter", False)
+        return {}
+    _ensure_portfolio_manager_decision_fields(item, config)
+    fields = {
+        "fallback_enabled": enabled,
+        "fallback_triggered": True,
+        "fallback_from_code": pending.get("from_code", ""),
+        "fallback_to_code": item.get("code", ""),
+        "fallback_from_reason": pending.get("from_reason", ""),
+        "fallback_to_pm_score": item.get("pm_score"),
+        "fallback_to_pm_multiplier": item.get("pm_multiplier"),
+        "fallback_to_order": item.get("pm_aware_candidate_order") or item.get("original_candidate_order") or _candidate_rank_value(item),
+        "skipped_by_fallback_quality_filter": False,
+    }
+    item.update(fields)
+    return fields
+
+
+def _phase3l_selected_fallback_quality_allowed(item: dict[str, Any], config: dict[str, Any]) -> bool:
+    policy = _portfolio_manager_buy_ordering_policy(config)
+    pm_score = item.get("pm_score")
+    pm_multiplier = item.get("pm_multiplier")
+    try:
+        if pm_score is not None and float(pm_score) >= float(policy["fallback_min_pm_score"]):
+            return True
+    except (TypeError, ValueError):
+        pass
+    try:
+        if pm_multiplier is not None and float(pm_multiplier) >= float(policy["fallback_min_pm_multiplier"]):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return False
 
 
 def _find_affordable_fallback_candidate(
@@ -1377,6 +1568,8 @@ def _find_surplus_affordable_fallback_candidate(
 
 def _sort_selected_candidates(selected: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
     if _ai_purchase_enabled(config):
+        if _portfolio_manager_pm_aware_ordering_enabled(config):
+            return _sort_selected_candidates_pm_aware(selected, config)
         return sorted(
             selected,
             key=lambda item: (
@@ -1412,6 +1605,44 @@ def _sort_selected_candidates(selected: list[dict[str, Any]], config: dict[str, 
         return -1 if left_code < right_code else 1
 
     return sorted(selected, key=cmp_to_key(compare))
+
+
+def _sort_selected_candidates_pm_aware(selected: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
+    policy = _portfolio_manager_buy_ordering_policy(config)
+    weight = float(policy["pm_order_weight"])
+    items = [dict(item) for item in selected]
+    for index, item in enumerate(items, start=1):
+        original_order = _candidate_rank_value(item, index)
+        item["buy_ordering_mode"] = "pm_aware"
+        item["original_candidate_order"] = original_order
+        _ensure_portfolio_manager_decision_fields(item, config)
+    risk_values = [_candidate_risk_adjusted_score(item) for item in items]
+    pm_values = [float(item.get("pm_score") or 0.0) for item in items]
+
+    def normalize(value: float, values: list[float]) -> float:
+        if not values:
+            return 0.0
+        low = min(values)
+        high = max(values)
+        if high == low:
+            return 0.0
+        return (value - low) / (high - low)
+
+    for item in items:
+        risk_norm = normalize(_candidate_risk_adjusted_score(item), risk_values)
+        pm_norm = normalize(float(item.get("pm_score") or 0.0), pm_values)
+        item["buy_priority_score"] = round(risk_norm + weight * pm_norm, 8)
+    ordered = sorted(
+        items,
+        key=lambda item: (
+            -float(item.get("buy_priority_score") or 0.0),
+            _candidate_rank_value(item),
+            str(item.get("code") or ""),
+        ),
+    )
+    for index, item in enumerate(ordered, start=1):
+        item["pm_aware_candidate_order"] = index
+    return ordered
 
 
 def _purchase_audit_event(
@@ -1486,6 +1717,22 @@ def _purchase_audit_event(
         "allocation_limit": round(allocation_limit, 2),
         "allocation_reason": allocation_reason,
     }
+    for key in [
+        "buy_ordering_mode",
+        "original_candidate_order",
+        "pm_aware_candidate_order",
+        "buy_priority_score",
+        "fallback_enabled",
+        "fallback_triggered",
+        "fallback_from_code",
+        "fallback_to_code",
+        "fallback_from_reason",
+        "fallback_to_pm_score",
+        "fallback_to_pm_multiplier",
+        "fallback_to_order",
+        "skipped_by_fallback_quality_filter",
+    ]:
+        event[key] = item.get(key, "")
     for key in [
         "pm_ai_enabled",
         "pm_status",
@@ -1881,6 +2128,14 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "pm_per_code_cap_reduced",
         "pm_per_code_cap_skip",
         "pm_per_code_cap_reason",
+        "high_pm_min_hold_enabled",
+        "high_pm_min_hold_days",
+        "high_pm_min_hold_applied",
+        "high_pm_min_hold_blocked_exit",
+        "high_pm_min_hold_blocked_exit_count",
+        "high_pm_min_hold_exit_reason_original",
+        "high_pm_min_hold_release_date",
+        "holding_days_at_exit_signal",
     ]
     snapshot = {key: position.get(key) for key in keys if key in position}
     if "relative_strength_score" in snapshot and snapshot["relative_strength_score"] is None:
@@ -2155,6 +2410,13 @@ def execute_real_data_paper_trade(
             current_price=current_price,
             holding_days=holding_days,
         )
+        exit_plan, high_pm_min_hold_fields = _apply_high_pm_min_hold_exit_guard(
+            exit_plan,
+            position,
+            config,
+            trade_date,
+            holding_days,
+        )
         profit_rate = exit_plan["mark_profit_rate"]
         exit_reason = exit_plan["exit_reason"]
         planned_exit_price = float(exit_plan["exit_price"] or current_price)
@@ -2170,6 +2432,7 @@ def execute_real_data_paper_trade(
             "min_unrealized_return_so_far": min_unrealized_return_so_far,
             "drawdown_from_peak": profit_rate - max_unrealized_return_so_far if max_unrealized_return_so_far is not None else None,
             **holding_signal,
+            **high_pm_min_hold_fields,
         }
         if exit_reason and position["code"] not in pending_sell_codes:
             execute_now = bool(exit_plan.get("execute_now", False))
@@ -2198,6 +2461,7 @@ def execute_real_data_paper_trade(
                     "buy_reason": position.get("reason", ""),
                     **_position_feature_snapshot(position),
                     **holding_signal,
+                    **high_pm_min_hold_fields,
                     **_stop_loss_trade_fields(exit_plan, planned_exit_price),
                     **exit_ai_trade_fields(exit_plan),
                 },
@@ -2250,8 +2514,15 @@ def execute_real_data_paper_trade(
     purchase_audit_active = _purchase_audit_enabled(config)
     fallback_buys_today = 0
     max_fallback_buys_per_day = _affordable_fallback_max_buys_per_day(config)
+    selected_fallback_pending: dict[str, Any] | None = None
     for item_index, item in enumerate(selected, start=1):
         dynamic_exposure_fields = _dynamic_exposure_log_fields(config, item)
+        phase3l_fallback_fields = _phase3l_apply_selected_fallback_fields(
+            item,
+            config,
+            selected_fallback_pending if _phase3l_selected_fallback_enabled(config) else None,
+        )
+        dynamic_exposure_fields.update(phase3l_fallback_fields)
         item.update(dynamic_exposure_fields)
         candidate_rank = _candidate_rank_value(item, item_index)
         current_total_assets = float(state.get("total_assets") or (cash + _current_market_exposure({"positions": next_positions})) or initial_cash)
@@ -2259,6 +2530,52 @@ def execute_real_data_paper_trade(
         daily_remaining_before = _daily_buy_limit_remaining(config, trades, current_total_assets)
         max_positions_remaining_before = max(0, max_positions - len(next_positions) - len(pending_buy_codes))
         cash_before_candidate = cash
+        if (
+            _phase3l_selected_fallback_enabled(config)
+            and selected_fallback_pending
+            and not _phase3l_selected_fallback_quality_allowed(item, config)
+        ):
+            item["skipped_by_fallback_quality_filter"] = True
+            item["fallback_to_pm_score"] = item.get("pm_score")
+            item["fallback_to_pm_multiplier"] = item.get("pm_multiplier")
+            dynamic_exposure_fields["skipped_by_fallback_quality_filter"] = True
+            trades.append(
+                _skipped_buy_attempt(
+                    trade_id=f"{trade_date}_{item['code']}_SKIP_BUY",
+                    action="SKIP_BUY",
+                    code=item["code"],
+                    name=item["name"],
+                    trade_date=trade_date,
+                    price=_candidate_entry_price(item),
+                    allocation_limit=0,
+                    score=item.get("total_score"),
+                    reason=item.get("selection_reason") or item.get("selected_reason") or item["reason"],
+                    skipped_reason="fallback_quality_filter",
+                    config=config,
+                    allocation_reason="fallback_quality_filter",
+                    extra_fields=dynamic_exposure_fields,
+                )
+            )
+            if purchase_audit_active:
+                trades.append(
+                    _purchase_audit_event(
+                        item=item,
+                        trade_date=trade_date,
+                        config=config,
+                        cash_before=cash_before_candidate,
+                        cash_after=cash,
+                        daily_buy_limit_remaining_before=daily_remaining_before,
+                        daily_buy_limit_remaining_after=_daily_buy_limit_remaining(config, trades, current_total_assets),
+                        daily_buy_limit_type=str(daily_limit_info.get("type") or ""),
+                        daily_buy_limit_ratio=daily_limit_info.get("ratio"),
+                        daily_buy_limit_applied=float(daily_limit_info.get("limit") or 0),
+                        max_positions_remaining_before=max_positions_remaining_before,
+                        decision="SKIP",
+                        skip_reason="fallback_quality_filter",
+                        allocation_reason="fallback_quality_filter",
+                    )
+                )
+            continue
         if not market_section_allowed(item, config):
             trades.append(
                 _skipped_buy_attempt(
@@ -2599,6 +2916,8 @@ def execute_real_data_paper_trade(
                             allocation_reason=allocation_reason,
                         )
                     )
+                if _phase3l_selected_fallback_enabled(config) and _is_affordable_fallback_skip_reason(skipped_reason):
+                    selected_fallback_pending = {"from_code": item.get("code"), "from_reason": skipped_reason}
                 continue
         if shares > 0:
             shares, scaled_buy_fields = _scale_buy_to_daily_limit(
@@ -2653,6 +2972,8 @@ def execute_real_data_paper_trade(
                         allocation_reason=allocation_reason,
                     )
                 )
+            if _phase3l_selected_fallback_enabled(config) and _is_affordable_fallback_skip_reason(skipped_reason):
+                selected_fallback_pending = {"from_code": item.get("code"), "from_reason": skipped_reason}
             continue
         amount = shares * entry_price
         buy_commission = _calculate_commission(amount, config)
@@ -2749,6 +3070,8 @@ def execute_real_data_paper_trade(
             continue
         held_codes.add(item["code"])
         pending_buy_codes.add(item["code"])
+        if item.get("fallback_triggered"):
+            selected_fallback_pending = None
         if item.get("affordable_fallback_buy_selected"):
             fallback_buys_today += 1
         if next_day_execution:
@@ -3665,6 +3988,19 @@ def _next_business_date(date_text: str) -> str:
     current = date.fromisoformat(date_text) + timedelta(days=1)
     while current.weekday() >= 5:
         current += timedelta(days=1)
+    return current.isoformat()
+
+
+def _business_date_after_entry(entry_date_text: str, holding_days: int) -> str:
+    from datetime import date, timedelta
+
+    if not entry_date_text:
+        return ""
+    current = date.fromisoformat(entry_date_text)
+    for _ in range(max(0, holding_days - 1)):
+        current += timedelta(days=1)
+        while current.weekday() >= 5:
+            current += timedelta(days=1)
     return current.isoformat()
 
 

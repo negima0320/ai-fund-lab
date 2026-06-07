@@ -744,3 +744,238 @@ Latest result at the time of this document:
 ```text
 20 passed, 1 warning
 ```
+
+## Portfolio Manager AI Phase 3-E to 3-I Update
+
+After the v2_75 detail audit, several robustness and capital-allocation checks
+were added. The goal was to determine whether Portfolio Manager AI sizing could
+be promoted safely, or whether the improved profit depended on hidden
+concentration / drawdown risk.
+
+### Phase 3-E: Low PM Score Skip
+
+Profile:
+
+```text
+rookie_dealer_02_v2_76_pm_ai_low_score_skip
+```
+
+Change:
+
+- Derived from v2_75.
+- Trades with very low Portfolio Manager score were skipped instead of being
+  bought at the lowest multiplier.
+
+Result:
+
+| profile | net_profit | PF | DD | win_rate | trades |
+|---|---:|---:|---:|---:|---:|
+| v2_75 | `2,679,727` | `2.2054` | `-9.17%` | `48.53%` | `546` |
+| v2_76 | `3,812,364` | `2.5720` | `-19.38%` | `55.05%` | `507` |
+
+Interpretation:
+
+- v2_76 improved profit, PF, and win rate.
+- It also removed the weakest low-score trades.
+- However, DD worsened materially and required a root-cause audit before any
+  promotion.
+
+### Phase 3-F: v2_76 Drawdown Root Cause Audit
+
+Report:
+
+```text
+reports/ml/portfolio_manager_phase3f_drawdown_audit_2023-01_to_2026-05.md
+```
+
+v2_76 maximum DD window:
+
+| metric | value |
+|---|---:|
+| DD start | `2025-09-26` |
+| DD trough | `2025-09-29` |
+| recovery | `2025-10-24` |
+| max DD | `-19.38%` |
+| drawdown amount | `-743,700` |
+| average capital utilization | `72.70%` |
+| max capital utilization | `81.71%` |
+| average holding count | `3.50` |
+
+Root-cause flags:
+
+| flag | result | note |
+|---|---|---|
+| specific code concentration | `True` | one code explained the DD-period loss |
+| high multiplier concentration | `False` | not caused by `1.30` multiplier concentration |
+| capital utilization spike | `False` | utilization was high but not an abnormal spike |
+| holding count spike | `False` | holdings were not unusually high |
+| market-regime-like drop | `False` | losses were not broad-based |
+| exit delay suspected | `False` | loss holding days were not unusually long |
+
+Conclusion:
+
+- v2_76's DD problem was not caused by the PM multiplier itself.
+- It was mainly a per-code exposure / concentration problem.
+- The recommended next guard was a per-code exposure cap.
+
+### Phase 3-G: Per-Code Exposure Cap
+
+Profiles tested:
+
+| profile | cap |
+|---|---:|
+| `rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_015` | `15%` |
+| `rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap` | `20%` |
+| `rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_025` | `25%` |
+| `rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030` | `30%` |
+
+Result:
+
+| profile | net_profit | PF | DD | win_rate | trades | avg capital utilization |
+|---|---:|---:|---:|---:|---:|---:|
+| v2_75 | `2,679,727` | `2.2054` | `-9.17%` | `48.53%` | `546` | n/a |
+| v2_76 | `3,812,364` | `2.5720` | `-19.38%` | `55.05%` | `507` | n/a |
+| v2_77 cap 0.15 | `505,230` | `2.1495` | `-3.93%` | `50.81%` | `310` | `16.92%` |
+| v2_77 cap 0.20 | `1,343,154` | `2.2436` | `-7.58%` | `52.95%` | `477` | `35.02%` |
+| v2_77 cap 0.25 | `1,505,822` | `1.9677` | `-6.58%` | `50.70%` | `502` | `44.49%` |
+| v2_77 cap 0.30 | `2,914,686` | `2.5430` | `-7.54%` | `53.15%` | `511` | `51.00%` |
+
+Interpretation:
+
+- Cap `0.15` and `0.20` were too conservative.
+- Cap `0.25` improved DD but weakened PF.
+- Cap `0.30` gave the best balance so far:
+  - profit above v2_75
+  - PF close to v2_76
+  - DD better than both v2_75 and v2_76
+  - 67400 / top-code concentration reduced relative to earlier profiles
+
+Current best research candidate after Phase 3-G:
+
+```text
+rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030
+```
+
+### Phase 3-H: v2_77 Capital Utilization Audit
+
+Report:
+
+```text
+reports/ml/portfolio_manager_phase3h_capital_utilization_2023-01_to_2026-05.md
+```
+
+v2_77 cap 0.30 utilization:
+
+| metric | value |
+|---|---:|
+| average capital utilization | `50.995%` |
+| median capital utilization | `53.121%` |
+| days below 30% | `219` |
+| days below 50% | `355` |
+| days below 70% | `604` |
+| days above 80% | `112` |
+| cash idle days | `63` |
+| average holding count | about `2.44` |
+
+Low-utilization dominant reasons:
+
+| reason | days |
+|---|---:|
+| `no_candidates` | `114` |
+| `unknown` | `72` |
+| `exit_only_day` | `67` |
+| `selected_but_not_affordable` | `40` |
+| `candidates_all_low_pm_skipped` | `35` |
+| `below_round_lot_after_scaling` | `27` |
+
+Skip counts:
+
+| skip reason | count |
+|---|---:|
+| `selected_but_not_affordable` | `369` |
+| `pm_low_score_skip` | `234` |
+| `insufficient_available_cash` | `134` |
+| `daily_buy_limit_scaled_below_round_lot` | `73` |
+| `per_code_exposure_cap_scaled_below_round_lot` | `50` |
+| `duplicate_holding` | `2` |
+
+Next candidates proposed by the audit:
+
+1. Keep per-code cap `0.30` and tune low-score skip / low multiplier behavior.
+2. Test candidate pool expansion.
+3. Test total-assets-linked `daily_buy_limit`.
+4. Test replacement candidate filling after per-code cap blocks an order.
+
+### Phase 3-I: Candidate Pool Expansion Audit
+
+Report:
+
+```text
+reports/ml/portfolio_manager_phase3i_candidate_pool_expansion_2023-01_to_2026-05.md
+```
+
+Candidate pool settings:
+
+| variant | max_selected |
+|---|---:|
+| current | `10` |
+| candidate_pool_x2 | `20` |
+| candidate_pool_x3 | `30` |
+
+Result:
+
+| variant | net_profit | PF | DD | win_rate | trades | avg utilization | no_candidates |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| current | `2,914,686` | `2.5430` | `-7.54%` | `53.15%` | `511` | `50.995%` | `114` |
+| x2 | `2,520,271` | `2.3186` | `-8.04%` | `51.59%` | `507` | `51.010%` | `114` |
+| x3 | `2,520,271` | `2.3186` | `-8.04%` | `51.59%` | `507` | `51.010%` | `114` |
+
+Interpretation:
+
+- Candidate pool expansion did not reduce `no_candidates`.
+- Capital utilization improved only by about `0.015pt`.
+- Profit, PF, DD, win rate, and trade count all worsened versus current.
+- x2 and x3 produced identical results, implying the bottleneck is not the raw
+  candidate pool size after `max_selected=20`.
+
+Decision:
+
+- Do not adopt candidate pool expansion for now.
+- Move to a different utilization-improvement path:
+  - low-score skip threshold tuning
+  - candidate replacement after cap/affordability blocks
+  - cash / daily limit policy
+  - fallback quality improvement
+
+### Current Profile Ranking After Phase 3-I
+
+| priority | profile | status |
+|---:|---|---|
+| 1 | `rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030` | best balance so far: strong profit/PF with DD under 8% |
+| 2 | `rookie_dealer_02_v2_76_pm_ai_low_score_skip` | highest profit/PF/win rate, but DD too large without exposure guard |
+| 3 | `rookie_dealer_02_v2_75_pm_ai_high_minus_avoid_sizing` | strong prior profile and simpler reference |
+| 4 | `rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue` | prior baseline / fallback reference |
+| deferred | candidate_pool_x2/x3 | no utilization benefit and worse PF/profit |
+
+### Latest Test Command
+
+```bash
+PYTHONPYCACHEPREFIX=/private/tmp/ai-fund-lab-pycache python3 -m pytest -q \
+  tests/test_ml_portfolio_manager_dataset.py \
+  tests/test_ml_portfolio_manager_trainer.py \
+  tests/test_ml_portfolio_manager_data_lineage.py \
+  tests/test_ml_portfolio_manager_phase3c.py \
+  tests/test_ml_portfolio_manager_phase3d.py \
+  tests/test_ml_portfolio_manager_phase3d_detail_audit.py \
+  tests/test_ml_portfolio_manager_phase3e.py \
+  tests/test_ml_portfolio_manager_phase3f_drawdown_audit.py \
+  tests/test_ml_portfolio_manager_phase3g_per_code_cap.py \
+  tests/test_ml_portfolio_manager_phase3h_capital_utilization.py \
+  tests/test_ml_portfolio_manager_phase3i_candidate_pool.py
+```
+
+Latest result:
+
+```text
+34 passed, 1 warning
+```

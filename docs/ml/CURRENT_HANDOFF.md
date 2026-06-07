@@ -1,6 +1,6 @@
 # Current ML Handoff
 
-Last updated: `2026-06-07 05:43 JST`
+Last updated: `2026-06-07`
 
 This document is the short handoff for continuing the AI / ML work in a fresh
 chat. It intentionally summarizes only the current state, key constraints, and
@@ -9,20 +9,28 @@ next useful actions. For the full history, see
 
 ## Current State
 
-The current strongest research profile is:
+The current strongest balanced research profile is:
 
 ```text
-rookie_dealer_02_v2_75_pm_ai_high_minus_avoid_sizing
+rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030
 ```
 
-The fallback / reference baseline is:
+Important reference profiles are:
 
 ```text
+rookie_dealer_02_v2_76_pm_ai_low_score_skip
+rookie_dealer_02_v2_75_pm_ai_high_minus_avoid_sizing
 rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue
 ```
 
-v2_75 is derived from v2_73 and adds Portfolio Manager AI sizing. It changes
-planned buy amount using:
+Profile lineage:
+
+- v2_73: ML-ranked + Exit AI + scaled buy continue; prior baseline.
+- v2_75: adds Portfolio Manager AI sizing.
+- v2_76: derives from v2_75 and skips very low PM score trades.
+- v2_77 cap 0.30: derives from v2_76 and adds per-code exposure cap `0.30`.
+
+Portfolio Manager AI score:
 
 ```text
 pm_score = high_conviction_proba - avoid_proba
@@ -47,27 +55,30 @@ The multiplier is applied before existing constraints:
 - max positions
 - Exit AI
 
+v2_76 additionally skips the lowest PM-score trades. v2_77 keeps that behavior
+and adds a per-code exposure cap to address v2_76's drawdown concentration.
+
 ## Latest Commit and Working Tree
 
-Latest committed code:
+Latest committed code before this handoff update:
 
 ```text
-44b01c4 Add PM phase3d detail audit
+ea139c5 Add portfolio manager AI audits and v2_77 variants
 ```
 
 Recent relevant commits:
 
 ```text
+ea139c5 Add portfolio manager AI audits and v2_77 variants
+f48cf9c Add PM phase3e low score skip profile
+e46914b Document current ML handoff
 44b01c4 Add PM phase3d detail audit
-486f896 Document ML portfolio manager progress
-493324c Add portfolio manager AI sizing backtest profile
 ```
 
-Current uncommitted documentation updates at the time this handoff was written:
+Current documentation updates in progress:
 
 - `docs/ml/ML_Phase_25_to_Portfolio_Manager_AI_Summary.md`
 - `docs/ml/README.md`
-- `docs/ml/v2_73_adoption_notes.md`
 - `docs/ml/CURRENT_HANDOFF.md`
 
 ## Important Artifacts
@@ -97,6 +108,8 @@ Backtest logs:
 ```text
 logs/backtests/rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue/2023-01-01_to_2026-05-31/
 logs/backtests/rookie_dealer_02_v2_75_pm_ai_high_minus_avoid_sizing/2023-01-01_to_2026-05-31/
+logs/backtests/rookie_dealer_02_v2_76_pm_ai_low_score_skip/2023-01-01_to_2026-05-31/
+logs/backtests/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030/2023-01-01_to_2026-05-31/
 ```
 
 Key reports:
@@ -105,6 +118,10 @@ Key reports:
 reports/ml/portfolio_manager_phase3d_full_backtest_2023-01_to_2026-05.md
 reports/ml/portfolio_manager_phase3d_detail_audit_2023-01_to_2026-05.md
 reports/ml/portfolio_manager_phase3d_detail_audit_2023-01_to_2026-05.json
+reports/ml/portfolio_manager_phase3f_drawdown_audit_2023-01_to_2026-05.md
+reports/ml/portfolio_manager_phase3g_per_code_cap_2023-01_to_2026-05.md
+reports/ml/portfolio_manager_phase3h_capital_utilization_2023-01_to_2026-05.md
+reports/ml/portfolio_manager_phase3i_candidate_pool_expansion_2023-01_to_2026-05.md
 ```
 
 Generated `data/ml`, `models/ml`, `reports/ml`, and `logs/backtests` artifacts
@@ -118,47 +135,55 @@ Period:
 2023-01-01 to 2026-05-31
 ```
 
-Comparison:
+Latest comparison:
 
 | profile | net_profit | PF | DD | win_rate | trades |
 |---|---:|---:|---:|---:|---:|
 | v2_73 baseline | `1,169,366` | `1.5683` | `-19.13%` | `43.01%` | `481` |
 | v2_75 | `2,679,727` | `2.2054` | `-9.17%` | `48.53%` | `546` |
-
-v2_75 detail audit:
-
-- promotion checks: `7 / 8` passed
-- PM fields are now carried into `trades.csv`
-- `all_trades` BUY rows with PM values: `549 / 549`
-- `trades.csv` SELL rows with PM values: `546 / 546`
-- `purchase_audit.csv` PM match rate: `100%`
-- `pm_status`: `ok` for all closed trades
-
-67400 dependency:
-
-- v2_75 67400 profit: `539,696`
-- 67400 contribution to v2_75 net_profit: `20.14%`
-- v2_75 excluding 67400 profit: `1,573,282`
-- v2_75 excluding 67400 PF: `1.5670`
-- v2_75 excluding 67400 DD: `-10.64%`
-- v2_75 still beats v2_73 net profit after excluding 67400.
-
-PM multiplier performance:
-
-| multiplier | trades | net_profit | PF | win_rate |
-|---:|---:|---:|---:|---:|
-| `0.60` | `110` | `-136,272` | `0.7795` | `28.18%` |
-| `0.80` | `152` | `244,615` | `1.3123` | `46.05%` |
-| `1.00` | `145` | `512,770` | `1.5592` | `44.83%` |
-| `1.15` | `40` | `363,848` | `3.6735` | `65.00%` |
-| `1.30` | `99` | `1,128,016` | `4.3629` | `72.73%` |
+| v2_76 | `3,812,364` | `2.5720` | `-19.38%` | `55.05%` | `507` |
+| v2_77 cap 0.20 | `1,343,154` | `2.2436` | `-7.58%` | `52.95%` | `477` |
+| v2_77 cap 0.30 | `2,914,686` | `2.5430` | `-7.54%` | `53.15%` | `511` |
 
 Interpretation:
 
-- `1.30` and `1.15` are strongly positive.
-- `0.60` is clearly weak.
-- PM score is directionally useful, especially by PF, win rate, and return on
-  buy amount.
+- v2_76 has the highest profit/PF/win rate, but DD is too large.
+- Phase 3-F found v2_76 DD was mainly a specific-code exposure issue.
+- v2_77 cap 0.30 is the current best balance: profit above v2_75, PF near
+  v2_76, and DD below v2_75/v2_76.
+- v2_75 remains the simpler PM-sizing reference.
+
+v2_77 cap 0.30 capital utilization:
+
+| metric | value |
+|---|---:|
+| average capital utilization | `50.995%` |
+| median capital utilization | `53.121%` |
+| days below 50% | `355` |
+| cash idle days | `63` |
+| average holding count | about `2.44` |
+
+Low-utilization dominant reasons:
+
+| reason | days |
+|---|---:|
+| `no_candidates` | `114` |
+| `exit_only_day` | `67` |
+| `candidates_all_low_pm_skipped` | `35` |
+
+Candidate pool expansion result:
+
+| variant | max_selected | net_profit | PF | DD | avg utilization | no_candidates |
+|---|---:|---:|---:|---:|---:|---:|
+| current | `10` | `2,914,686` | `2.5430` | `-7.54%` | `50.995%` | `114` |
+| pool x2 | `20` | `2,520,271` | `2.3186` | `-8.04%` | `51.010%` | `114` |
+| pool x3 | `30` | `2,520,271` | `2.3186` | `-8.04%` | `51.010%` | `114` |
+
+Decision:
+
+- Do not adopt candidate pool expansion for now.
+- It did not reduce `no_candidates`, barely improved utilization, and worsened
+  profit/PF/DD.
 
 ## Hard Constraints
 
@@ -199,10 +224,32 @@ PYTHONPYCACHEPREFIX=/private/tmp/ai-fund-lab-pycache python3 src/main.py \
   --no-daily-logs
 ```
 
+Run v2_77 cap 0.30 full backtest:
+
+```bash
+PYTHONPYCACHEPREFIX=/private/tmp/ai-fund-lab-pycache python3 src/main.py \
+  --mode backtest \
+  --provider jquants \
+  --profile rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030 \
+  --start-date 2023-01-01 \
+  --end-date 2026-05-31 \
+  --skip-price-fetch \
+  --quiet \
+  --summary-only \
+  --no-daily-logs
+```
+
 Run v2_75 detail audit:
 
 ```bash
 PYTHONPYCACHEPREFIX=/private/tmp/ai-fund-lab-pycache python3 scripts/ml/audit_portfolio_manager_phase3d_detail.py
+```
+
+Run latest capital utilization and candidate-pool audits:
+
+```bash
+PYTHONPYCACHEPREFIX=/private/tmp/ai-fund-lab-pycache python3 scripts/ml/audit_portfolio_manager_phase3h_capital_utilization.py
+PYTHONPYCACHEPREFIX=/private/tmp/ai-fund-lab-pycache python3 scripts/ml/audit_portfolio_manager_phase3i_candidate_pool.py
 ```
 
 Relevant tests:
@@ -214,30 +261,37 @@ PYTHONPYCACHEPREFIX=/private/tmp/ai-fund-lab-pycache python3 -m pytest -q \
   tests/test_ml_portfolio_manager_data_lineage.py \
   tests/test_ml_portfolio_manager_phase3c.py \
   tests/test_ml_portfolio_manager_phase3d.py \
-  tests/test_ml_portfolio_manager_phase3d_detail_audit.py
+  tests/test_ml_portfolio_manager_phase3d_detail_audit.py \
+  tests/test_ml_portfolio_manager_phase3e.py \
+  tests/test_ml_portfolio_manager_phase3f_drawdown_audit.py \
+  tests/test_ml_portfolio_manager_phase3g_per_code_cap.py \
+  tests/test_ml_portfolio_manager_phase3h_capital_utilization.py \
+  tests/test_ml_portfolio_manager_phase3i_candidate_pool.py
 ```
 
 Latest known test result:
 
 ```text
-20 passed, 1 warning
+34 passed, 1 warning
 ```
 
 ## Next Good Tasks
 
 Recommended next experiments:
 
-1. Test a v2_75-derived profile where `pm_multiplier=0.60` becomes skip instead
-   of reduced buy.
-2. Test multiplier caps, such as removing the `1.30` boost.
-3. Audit adverse periods only, especially weak months like `2025-03` and
-   `2024-04`.
-4. Check whether `daily_buy_limit_scaled_below_round_lot` keeps increasing in
-   live-like daily runs.
-5. Create v2_75 adoption notes if it survives the next robustness checks.
+1. Keep v2_77 cap 0.30 as the current balanced research candidate.
+2. Do not continue candidate-pool expansion unless the upstream candidate
+   shortage definition changes.
+3. Try utilization-improvement paths that do not dilute candidate quality:
+   - low-score skip threshold tuning
+   - replacement candidate filling after cap / affordability blocks
+   - total-assets-linked `daily_buy_limit`
+   - fallback quality improvement
+4. Keep v2_75 and v2_73 as fallback references.
+5. Continue monitoring top-code contribution and DD-period concentration.
 
-Keep v2_73 as the fallback baseline until v2_75 survives those additional
-robustness checks.
+Do not promote v2_76 directly without an exposure guard because its DD is too
+large.
 
 ## Documentation Map
 
@@ -247,4 +301,3 @@ Use these documents:
 - `docs/ml/ML_Phase_25_to_Portfolio_Manager_AI_Summary.md`: full recent history
 - `docs/ml/v2_73_adoption_notes.md`: why v2_73 became the prior baseline
 - `docs/ml/daily_ai_candidate_operation.md`: human-review daily AI candidates
-

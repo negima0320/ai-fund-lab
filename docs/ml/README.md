@@ -31,7 +31,7 @@ adoption notes for the AI / ML stack.
   - Exit AI
   - capital allocation profiles
   - v2_73 adoption
-  - Portfolio Manager AI data lineage, training, Phase 3-C, Phase 3-D full backtest, and v2_75 detail audit
+  - Portfolio Manager AI data lineage, training, Phase 3-C, Phase 3-D full backtest, v2_75 detail audit, v2_76 drawdown audit, v2_77 per-code cap, capital utilization, and candidate-pool expansion audit
 
 ## Adoption Notes
 
@@ -43,9 +43,10 @@ adoption notes for the AI / ML stack.
 
 Current strongest research candidate:
 
-- `rookie_dealer_02_v2_75_pm_ai_high_minus_avoid_sizing`
-  - v2_73-derived profile with Portfolio Manager AI sizing
-  - detail audit is summarized in `ML_Phase_25_to_Portfolio_Manager_AI_Summary.md`
+- `rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030`
+  - v2_76-derived profile with low-PM-score skip and per-code exposure cap `0.30`
+  - current best balance after Phase 3-G/3-H/3-I: profit/PF remain strong while DD stays below 8%
+  - latest audits are summarized in `ML_Phase_25_to_Portfolio_Manager_AI_Summary.md`
   - still a backtest/research profile; not connected to live order placement
 
 - `daily_ai_candidate_operation.md`

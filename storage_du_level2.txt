@@ -1,0 +1,257 @@
+ 35G	data
+ 33G	data/processed
+ 15G	data/processed/common
+3.4G	data/processed/rookie_dealer_02_v2_74_ml_ranked_exit_ai_affordable_fallback
+1.6G	data/ml
+1.0G	logs
+826M	data/ml/datasets
+670M	data/processed/rookie_dealer_02_v2_65
+666M	data/processed/rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue
+653M	data/processed/rookie_dealer_02_v2_75_pm_ai_high_minus_avoid_sizing
+623M	data/processed/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030_pool_x3
+623M	data/processed/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030_pool_x2
+622M	data/processed/rookie_dealer_02_v2_78_pm_aware_order_fallback_w100
+622M	data/processed/rookie_dealer_02_v2_78_pm_aware_order_fallback_w050
+622M	data/processed/rookie_dealer_02_v2_78_pm_aware_order_fallback_w025
+622M	data/processed/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030
+622M	data/processed/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_025
+622M	data/processed/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_015
+622M	data/processed/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap
+622M	data/processed/rookie_dealer_02_v2_76_pm_ai_low_score_skip
+622M	data/processed/rookie_dealer_02_v2_72_ml_ranked_exit_ai_scaled_buy_v2
+622M	data/processed/rookie_dealer_02_v2_71_ml_ranked_exit_ai_050_scaled_buy
+622M	data/processed/rookie_dealer_02_v2_66_ml_ranked
+615M	data/cache/jquants
+615M	data/cache
+579M	data/ml/features
+491M	logs/backtests
+491M	data/raw
+390M	logs/scoring
+389M	logs/scoring/rookie_dealer_02_v2_65
+326M	reports
+263M	reports/ml
+216M	models/ml
+216M	models
+194M	models/ml/walk_forward
+153M	logs/screening
+137M	logs/screening/rookie_dealer_02_v2_51
+105M	logs/backtests/rookie_dealer_02_v2_65
+104M	data/ml/labels
+100M	data/processed/rookie_dealer_02
+ 82M	data/ml/walk_forward_predictions
+ 32M	data/processed/rookie_dealer_01
+ 27M	logs/backtests/rookie_dealer_02_v2_74_ml_ranked_exit_ai_affordable_fallback
+ 24M	logs/market_context
+ 24M	data/processed/rookie_dealer_02_v3
+ 23M	logs/backtests/rookie_dealer_02_v2_74_ml_ranked_exit_ai_affordable_fallback_max_fallback_1_per_day
+ 20M	logs/backtests/rookie_dealer_02_v2_78_pm_aware_order_fallback_w100
+ 20M	logs/backtests/rookie_dealer_02_v2_78_pm_aware_order_fallback_w050
+ 20M	logs/backtests/rookie_dealer_02_v2_78_pm_aware_order_fallback_w025
+ 19M	logs/market_context/rookie_dealer_02_v2_1
+ 19M	logs/backtests/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030_pool_x3
+ 19M	logs/backtests/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030_pool_x2
+ 19M	logs/backtests/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030
+ 19M	logs/backtests/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_025
+ 18M	logs/backtests/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap
+ 18M	logs/backtests/rookie_dealer_02_v2_76_pm_ai_low_score_skip
+ 18M	logs/backtests/rookie_dealer_02_v2_75_pm_ai_high_minus_avoid_sizing
+ 16M	logs/backtests/rookie_dealer_02_v2_74_ml_ranked_exit_ai_affordable_fallback_risk_adjusted_gte_005
+ 16M	logs/backtests/rookie_dealer_02_v2_72_ml_ranked_exit_ai_scaled_buy_v2
+ 15M	logs/backtests/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_015
+ 15M	logs/backtests/rookie_dealer_02_v2_74_ml_ranked_exit_ai_affordable_fallback_expected_002_bad_entry_lte_070
+ 15M	logs/backtests/rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue
+ 14M	logs/backtests/rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue_fixed_500000
+ 14M	logs/backtests/rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue_fixed_1500000
+ 14M	logs/backtests/rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue_asset_ratio_070
+ 12M	reports/backtests
+ 12M	models/ml/archive
+ 12M	logs/backtests/rookie_dealer_02_v2_71_ml_ranked_exit_ai_050_scaled_buy
+ 11M	reports/profile_comparisons
+ 11M	logs/backtests/rookie_dealer_02_v2_66_ml_ranked
+ 10M	reports/rookie_dealer_02_v2_65
+5.8M	reports/rookie_dealer_02_v2_65/backtests
+4.1M	logs/backtests/rookie_dealer_02_v2_66
+3.8M	models/ml/portfolio_manager
+3.6M	reports/backtests/rookie_dealer_02_v2_1
+3.5M	logs/market_context/rookie_dealer_02_v2
+3.0M	data/processed/rookie_dealer_03
+2.4M	models/ml/current_enriched_v2
+2.3M	reports/backtests/rookie_dealer_02_v2
+2.3M	models/ml/current
+2.3M	data/processed/rookie_dealer_03_growth
+2.0M	logs/screening/breakout_rsi_54w_v1
+1.7M	logs/screening/rookie_dealer_02_v2_6
+1.7M	logs/screening/rookie_dealer_02_v2_19
+1.6M	logs/screening/rookie_dealer_02_v2_9
+1.6M	logs/screening/rookie_dealer_02_v2_8
+1.6M	logs/screening/rookie_dealer_02_v2_7
+1.6M	logs/screening/rookie_dealer_02_v2_11
+1.6M	logs/screening/rookie_dealer_02_v2_10
+1.6M	logs/screening/rookie_dealer_02_v2_1
+1.5M	reports/rookie_dealer_02_v2_75_pm_ai_high_minus_avoid_sizing
+1.5M	data/processed/breakout_rsi_54w_v1
+1.4M	reports/backtests/rookie_dealer_02_v2_6
+1.4M	data/ml/portfolio_manager
+1.3M	reports/rookie_dealer_02_v2_78_pm_aware_order_fallback_w100
+1.3M	reports/rookie_dealer_02_v2_78_pm_aware_order_fallback_w050
+1.3M	reports/rookie_dealer_02_v2_78_pm_aware_order_fallback_w025
+1.3M	reports/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030_pool_x3
+1.3M	reports/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030_pool_x2
+1.3M	reports/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030
+1.3M	reports/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_025
+1.3M	reports/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_015
+1.3M	reports/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap
+1.3M	reports/rookie_dealer_02_v2_76_pm_ai_low_score_skip
+1.3M	reports/rookie_dealer_02_v2_74_ml_ranked_exit_ai_affordable_fallback_risk_adjusted_gte_005
+1.3M	reports/rookie_dealer_02_v2_74_ml_ranked_exit_ai_affordable_fallback_max_fallback_1_per_day
+1.3M	reports/rookie_dealer_02_v2_74_ml_ranked_exit_ai_affordable_fallback_expected_002_bad_entry_lte_070
+1.3M	reports/rookie_dealer_02_v2_74_ml_ranked_exit_ai_affordable_fallback
+1.3M	reports/rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue_fixed_500000
+1.3M	reports/rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue_fixed_1500000
+1.3M	reports/rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue_asset_ratio_070
+1.3M	reports/rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue
+1.3M	reports/rookie_dealer_02_v2_72_ml_ranked_exit_ai_scaled_buy_v2
+1.3M	reports/rookie_dealer_02_v2_71_ml_ranked_exit_ai_050_scaled_buy
+1.3M	reports/rookie_dealer_02_v2_66_ml_ranked
+1.3M	reports/backtests/rookie_dealer_02_v2_3
+1.2M	reports/backtests/rookie_dealer_02_v2_2
+1.0M	logs/market_context/rookie_dealer_02
+876K	reports/backtests/rookie_dealer_02_v2_4
+872K	models/ml/exit
+840K	reports/rookie_dealer_02_v2_66
+816K	logs/trades
+780K	reports/backtests/rookie_dealer_02_v3
+596K	reports/backtests/rookie_dealer_02
+500K	reports/rookie_dealer_02_v2_66/backtests
+460K	logs/portfolio
+456K	logs/screening/rookie_dealer_02_v2_68_ml_ranked_exit_ai_050
+372K	logs/trades/rookie_dealer_01
+340K	logs/market_context/rookie_dealer_01
+240K	logs/screening/rookie_dealer_01
+240K	logs/screening/2026-06
+224K	logs/trades/2026-06
+216K	data/ml/exit_datasets
+204K	data/processed/rookie_dealer_03_standard_growth
+196K	reports/ml/logs
+172K	logs/portfolio/rookie_dealer_01
+152K	logs/reflections
+120K	logs/portfolio/2026-06
+104K	reports/backtests/rookie_dealer_01
+100K	data/raw/news
+ 96K	logs/safety
+ 76K	reports/backtests/rookie_dealer_03
+ 68K	logs/safety/rookie_dealer_01
+ 44K	logs/trades/rookie_dealer_02
+ 44K	logs/reflections/rookie_dealer_01
+ 44K	logs/reflections/2026-06
+ 40K	reports/2026-06
+ 28K	reports/maintenance
+ 24K	reports/charts
+ 24K	logs/screening/rookie_dealer_02
+ 16K	logs/safety/2026-06
+ 12K	reports/ml/daily_candidates
+ 12K	logs/portfolio/rookie_dealer_02
+8.0K	reports/order_previews
+8.0K	logs/safety/rookie_dealer_02
+4.0K	reports/backtests/2026-03-06_to_2026-03-06
+4.0K	logs/reflections/rookie_dealer_02
+  0B	reports/paper
+  0B	reports/backtests/rookie_dealer_02_v2_9
+  0B	reports/backtests/rookie_dealer_02_v2_8
+  0B	reports/backtests/rookie_dealer_02_v2_78_pm_aware_order_fallback_w100
+  0B	reports/backtests/rookie_dealer_02_v2_78_pm_aware_order_fallback_w050
+  0B	reports/backtests/rookie_dealer_02_v2_78_pm_aware_order_fallback_w025
+  0B	reports/backtests/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030_pool_x3
+  0B	reports/backtests/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030_pool_x2
+  0B	reports/backtests/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030
+  0B	reports/backtests/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_025
+  0B	reports/backtests/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_015
+  0B	reports/backtests/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap
+  0B	reports/backtests/rookie_dealer_02_v2_76_pm_ai_low_score_skip
+  0B	reports/backtests/rookie_dealer_02_v2_75_pm_ai_high_minus_avoid_sizing
+  0B	reports/backtests/rookie_dealer_02_v2_74_ml_ranked_exit_ai_affordable_fallback_risk_adjusted_gte_005
+  0B	reports/backtests/rookie_dealer_02_v2_74_ml_ranked_exit_ai_affordable_fallback_max_fallback_1_per_day
+  0B	reports/backtests/rookie_dealer_02_v2_74_ml_ranked_exit_ai_affordable_fallback_expected_002_bad_entry_lte_070
+  0B	reports/backtests/rookie_dealer_02_v2_74_ml_ranked_exit_ai_affordable_fallback
+  0B	reports/backtests/rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue_fixed_500000
+  0B	reports/backtests/rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue_fixed_1500000
+  0B	reports/backtests/rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue_asset_ratio_070
+  0B	reports/backtests/rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue
+  0B	reports/backtests/rookie_dealer_02_v2_72_ml_ranked_exit_ai_scaled_buy_v2
+  0B	reports/backtests/rookie_dealer_02_v2_71_ml_ranked_exit_ai_050_scaled_buy
+  0B	reports/backtests/rookie_dealer_02_v2_70_ml_ranked_exit_ai_060
+  0B	reports/backtests/rookie_dealer_02_v2_7
+  0B	reports/backtests/rookie_dealer_02_v2_69_ml_ranked_exit_ai_055
+  0B	reports/backtests/rookie_dealer_02_v2_69
+  0B	reports/backtests/rookie_dealer_02_v2_68_ml_ranked_exit_ai_050
+  0B	reports/backtests/rookie_dealer_02_v2_68
+  0B	reports/backtests/rookie_dealer_02_v2_67_ml_standalone
+  0B	reports/backtests/rookie_dealer_02_v2_67
+  0B	reports/backtests/rookie_dealer_02_v2_66_ml_ranked_hold5
+  0B	reports/backtests/rookie_dealer_02_v2_66_ml_ranked
+  0B	reports/backtests/rookie_dealer_02_v2_66
+  0B	reports/backtests/rookie_dealer_02_v2_65
+  0B	reports/backtests/rookie_dealer_02_v2_64
+  0B	reports/backtests/rookie_dealer_02_v2_63
+  0B	reports/backtests/rookie_dealer_02_v2_62
+  0B	reports/backtests/rookie_dealer_02_v2_61
+  0B	reports/backtests/rookie_dealer_02_v2_60
+  0B	reports/backtests/rookie_dealer_02_v2_55
+  0B	reports/backtests/rookie_dealer_02_v2_54
+  0B	reports/backtests/rookie_dealer_02_v2_53
+  0B	reports/backtests/rookie_dealer_02_v2_52
+  0B	reports/backtests/rookie_dealer_02_v2_51
+  0B	reports/backtests/rookie_dealer_02_v2_50
+  0B	reports/backtests/rookie_dealer_02_v2_49
+  0B	reports/backtests/rookie_dealer_02_v2_48
+  0B	reports/backtests/rookie_dealer_02_v2_47
+  0B	reports/backtests/rookie_dealer_02_v2_46
+  0B	reports/backtests/rookie_dealer_02_v2_45
+  0B	reports/backtests/rookie_dealer_02_v2_44
+  0B	reports/backtests/rookie_dealer_02_v2_43
+  0B	reports/backtests/rookie_dealer_02_v2_42
+  0B	reports/backtests/rookie_dealer_02_v2_41
+  0B	reports/backtests/rookie_dealer_02_v2_40
+  0B	reports/backtests/rookie_dealer_02_v2_39
+  0B	reports/backtests/rookie_dealer_02_v2_38
+  0B	reports/backtests/rookie_dealer_02_v2_37
+  0B	reports/backtests/rookie_dealer_02_v2_36
+  0B	reports/backtests/rookie_dealer_02_v2_35
+  0B	reports/backtests/rookie_dealer_02_v2_34
+  0B	reports/backtests/rookie_dealer_02_v2_33
+  0B	reports/backtests/rookie_dealer_02_v2_32
+  0B	reports/backtests/rookie_dealer_02_v2_31
+  0B	reports/backtests/rookie_dealer_02_v2_30
+  0B	reports/backtests/rookie_dealer_02_v2_29
+  0B	reports/backtests/rookie_dealer_02_v2_28
+  0B	reports/backtests/rookie_dealer_02_v2_27
+  0B	reports/backtests/rookie_dealer_02_v2_26
+  0B	reports/backtests/rookie_dealer_02_v2_25
+  0B	reports/backtests/rookie_dealer_02_v2_24
+  0B	reports/backtests/rookie_dealer_02_v2_23
+  0B	reports/backtests/rookie_dealer_02_v2_22
+  0B	reports/backtests/rookie_dealer_02_v2_21
+  0B	reports/backtests/rookie_dealer_02_v2_20
+  0B	reports/backtests/rookie_dealer_02_v2_19
+  0B	reports/backtests/rookie_dealer_02_v2_18
+  0B	reports/backtests/rookie_dealer_02_v2_17
+  0B	reports/backtests/rookie_dealer_02_v2_16
+  0B	reports/backtests/rookie_dealer_02_v2_15
+  0B	reports/backtests/rookie_dealer_02_v2_14
+  0B	reports/backtests/rookie_dealer_02_v2_13
+  0B	reports/backtests/rookie_dealer_02_v2_12
+  0B	reports/backtests/rookie_dealer_02_v2_11
+  0B	reports/backtests/rookie_dealer_02_v2_10
+  0B	reports/backtests/breakout_rsi_54w_v1
+  0B	reports/articles/daily
+  0B	reports/articles
+  0B	logs/screening/rookie_dealer_03_standard_growth
+  0B	logs/screening/rookie_dealer_03_growth
+  0B	logs/screening/rookie_dealer_03
+  0B	logs/screening/rookie_dealer_02_v3
+  0B	logs/screening/rookie_dealer_02_v2_4
+  0B	logs/screening/rookie_dealer_02_v2_3
+  0B	logs/screening/rookie_dealer_02_v2_2
+  0B	logs/screening/rookie_dealer_02_v2
+  0B	logs/backtests/rookie_dealer_02_v2_66_ml_ranked_hold5
+  0B	logs/ai_decision
