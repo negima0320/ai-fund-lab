@@ -31,7 +31,7 @@ adoption notes for the AI / ML stack.
   - Exit AI
   - capital allocation profiles
   - v2_73 adoption
-  - Portfolio Manager AI data lineage, training, Phase 3-C, Phase 3-D full backtest, v2_75 detail audit, v2_76 drawdown audit, v2_77 per-code cap, capital utilization, and candidate-pool expansion audit
+  - Portfolio Manager AI data lineage, training, Phase 3-C, Phase 3-D full backtest, v2_75 detail audit, v2_76 drawdown audit, v2_77 per-code cap, capital utilization, candidate-pool expansion, PM-aware ordering, affordability/ranking audits, and high-PM minimum-hold profiles
 
 ## Adoption Notes
 
@@ -41,13 +41,20 @@ adoption notes for the AI / ML stack.
 - `v2_73_adoption_notes.md`
   - prior tentative main profile before Portfolio Manager AI Phase 3-D
 
-Current strongest research candidate:
+Current strongest full-backtested research candidate:
 
-- `rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030`
-  - v2_76-derived profile with low-PM-score skip and per-code exposure cap `0.30`
-  - current best balance after Phase 3-G/3-H/3-I: profit/PF remain strong while DD stays below 8%
+- `rookie_dealer_02_v2_78_pm_aware_order_fallback_w025`
+  - v2_77 cap0.30-derived profile with PM-aware buy ordering and selected fallback
+  - current best balance after Phase 3-L: v2_77 cap0.30 profit/PF/DD improved while affordability skips decreased
   - latest audits are summarized in `ML_Phase_25_to_Portfolio_Manager_AI_Summary.md`
   - still a backtest/research profile; not connected to live order placement
+
+Experimental next candidates:
+
+- `rookie_dealer_02_v2_79_high_pm_min_hold_5d`
+- `rookie_dealer_02_v2_79_high_pm_min_hold_7d`
+  - Phase 4-C profiles implemented from the Phase 4-B high-PM minimum-hold audit
+  - full 2023-01 to 2026-05 backtests still need to be run
 
 - `daily_ai_candidate_operation.md`
   - human-review daily AI candidate output

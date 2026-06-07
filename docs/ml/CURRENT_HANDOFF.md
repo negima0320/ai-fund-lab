@@ -9,15 +9,19 @@ next useful actions. For the full history, see
 
 ## Current State
 
-The current strongest balanced research profile is:
+The latest full-backtested strongest balanced research profile is:
 
 ```text
-rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030
+rookie_dealer_02_v2_78_pm_aware_order_fallback_w025
 ```
 
 Important reference profiles are:
 
 ```text
+rookie_dealer_02_v2_79_high_pm_min_hold_5d
+rookie_dealer_02_v2_79_high_pm_min_hold_7d
+rookie_dealer_02_v2_78_pm_aware_order_fallback_w025
+rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030
 rookie_dealer_02_v2_76_pm_ai_low_score_skip
 rookie_dealer_02_v2_75_pm_ai_high_minus_avoid_sizing
 rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue
@@ -29,6 +33,8 @@ Profile lineage:
 - v2_75: adds Portfolio Manager AI sizing.
 - v2_76: derives from v2_75 and skips very low PM score trades.
 - v2_77 cap 0.30: derives from v2_76 and adds per-code exposure cap `0.30`.
+- v2_78 w0.25: derives from v2_77 cap 0.30 and adds PM-aware selected ordering plus selected fallback.
+- v2_79 5d/7d: derives from v2_78 w0.25 and suppresses Exit AI early exits only for high-PM positions.
 
 Portfolio Manager AI score:
 
@@ -63,12 +69,13 @@ and adds a per-code exposure cap to address v2_76's drawdown concentration.
 Latest committed code before this handoff update:
 
 ```text
-ea139c5 Add portfolio manager AI audits and v2_77 variants
+e03294e Add portfolio manager audit and high PM hold profiles
 ```
 
 Recent relevant commits:
 
 ```text
+e03294e Add portfolio manager audit and high PM hold profiles
 ea139c5 Add portfolio manager AI audits and v2_77 variants
 f48cf9c Add PM phase3e low score skip profile
 e46914b Document current ML handoff
@@ -110,6 +117,7 @@ logs/backtests/rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue/
 logs/backtests/rookie_dealer_02_v2_75_pm_ai_high_minus_avoid_sizing/2023-01-01_to_2026-05-31/
 logs/backtests/rookie_dealer_02_v2_76_pm_ai_low_score_skip/2023-01-01_to_2026-05-31/
 logs/backtests/rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030/2023-01-01_to_2026-05-31/
+logs/backtests/rookie_dealer_02_v2_78_pm_aware_order_fallback_w025/2023-01-01_to_2026-05-31/
 ```
 
 Key reports:
@@ -122,6 +130,10 @@ reports/ml/portfolio_manager_phase3f_drawdown_audit_2023-01_to_2026-05.md
 reports/ml/portfolio_manager_phase3g_per_code_cap_2023-01_to_2026-05.md
 reports/ml/portfolio_manager_phase3h_capital_utilization_2023-01_to_2026-05.md
 reports/ml/portfolio_manager_phase3i_candidate_pool_expansion_2023-01_to_2026-05.md
+reports/ml/portfolio_manager_phase3j_affordability_audit_2023-01_to_2026-05.md
+reports/ml/portfolio_manager_phase3k_candidate_ranking_audit_2023-01_to_2026-05.md
+reports/ml/portfolio_manager_phase3l_pm_aware_order_2023-01_to_2026-05.md
+reports/ml/portfolio_manager_phase4b_high_pm_min_hold_audit_2023-01_to_2026-05.md
 ```
 
 Generated `data/ml`, `models/ml`, `reports/ml`, and `logs/backtests` artifacts
@@ -144,14 +156,43 @@ Latest comparison:
 | v2_76 | `3,812,364` | `2.5720` | `-19.38%` | `55.05%` | `507` |
 | v2_77 cap 0.20 | `1,343,154` | `2.2436` | `-7.58%` | `52.95%` | `477` |
 | v2_77 cap 0.30 | `2,914,686` | `2.5430` | `-7.54%` | `53.15%` | `511` |
+| v2_78 w0.25 | `3,054,794` | `2.6194` | `-7.47%` | `53.78%` | `505` |
 
 Interpretation:
 
 - v2_76 has the highest profit/PF/win rate, but DD is too large.
 - Phase 3-F found v2_76 DD was mainly a specific-code exposure issue.
-- v2_77 cap 0.30 is the current best balance: profit above v2_75, PF near
-  v2_76, and DD below v2_75/v2_76.
+- v2_77 cap 0.30 was the best balance before PM-aware ordering.
+- v2_78 w0.25 improved net profit, PF, DD, win rate, and affordability skips
+  versus v2_77 cap 0.30.
 - v2_75 remains the simpler PM-sizing reference.
+
+Phase 3-L PM-aware ordering:
+
+| variant | net_profit | PF | DD | selected_but_not_affordable |
+|---|---:|---:|---:|---:|
+| v2_77 cap0.30 | `2,914,686` | `2.5430` | `-7.54%` | `369` |
+| v2_78 w0.25 | `3,054,794` | `2.6194` | `-7.47%` | `253` |
+
+Phase 4-B high-PM minimum-hold audit on v2_78 w0.25:
+
+| rule | profit_delta | virtual PF | virtual win_rate |
+|---|---:|---:|---:|
+| min hold 3d | `+24,095` | `3.1407` | `68.45%` |
+| min hold 5d | `+344,508` | `3.7796` | `71.43%` |
+| min hold 7d | `+1,508,389` | `9.3080` | `77.38%` |
+
+Phase 4-C implemented these profiles but has not run the full 2023-01 to
+2026-05 backtest yet:
+
+```text
+rookie_dealer_02_v2_79_high_pm_min_hold_5d
+rookie_dealer_02_v2_79_high_pm_min_hold_7d
+```
+
+The minimum-hold guard only blocks Exit AI exits (`exit_ai_triggered=True`) for
+`pm_multiplier >= 1.15`; stop loss, take profit, max holding, and forced exits
+are not suppressed.
 
 v2_77 cap 0.30 capital utilization:
 
@@ -279,19 +320,48 @@ Latest known test result:
 
 Recommended next experiments:
 
-1. Keep v2_77 cap 0.30 as the current balanced research candidate.
-2. Do not continue candidate-pool expansion unless the upstream candidate
+1. Use v2_78 w0.25 as the current full-backtested balanced candidate.
+2. Run full backtests for v2_79 5d and v2_79 7d, then generate the Phase 4-C report.
+3. Do not continue candidate-pool expansion unless the upstream candidate
    shortage definition changes.
-3. Try utilization-improvement paths that do not dilute candidate quality:
+4. Try utilization-improvement paths that do not dilute candidate quality:
    - low-score skip threshold tuning
    - replacement candidate filling after cap / affordability blocks
    - total-assets-linked `daily_buy_limit`
    - fallback quality improvement
-4. Keep v2_75 and v2_73 as fallback references.
-5. Continue monitoring top-code contribution and DD-period concentration.
+5. Keep v2_77, v2_75, and v2_73 as fallback references.
+6. Continue monitoring top-code contribution and DD-period concentration.
 
 Do not promote v2_76 directly without an exposure guard because its DD is too
 large.
+
+Run v2_79 full backtests:
+
+```bash
+PYTHONPYCACHEPREFIX=/private/tmp/ai-fund-lab-pycache python3 src/main.py \
+  --mode backtest \
+  --provider jquants \
+  --profile rookie_dealer_02_v2_79_high_pm_min_hold_5d \
+  --start-date 2023-01-01 \
+  --end-date 2026-05-31 \
+  --skip-price-fetch \
+  --quiet \
+  --summary-only \
+  --no-daily-logs
+
+PYTHONPYCACHEPREFIX=/private/tmp/ai-fund-lab-pycache python3 src/main.py \
+  --mode backtest \
+  --provider jquants \
+  --profile rookie_dealer_02_v2_79_high_pm_min_hold_7d \
+  --start-date 2023-01-01 \
+  --end-date 2026-05-31 \
+  --skip-price-fetch \
+  --quiet \
+  --summary-only \
+  --no-daily-logs
+
+PYTHONPYCACHEPREFIX=/private/tmp/ai-fund-lab-pycache python3 scripts/ml/report_portfolio_manager_phase4c_high_pm_min_hold.py
+```
 
 ## Documentation Map
 

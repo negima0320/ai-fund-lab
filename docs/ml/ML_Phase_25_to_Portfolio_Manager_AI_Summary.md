@@ -3,7 +3,7 @@
 This document summarizes the ML work after Phase 24, including the 5-year
 walk-forward validation, enriched features, ML-integrated backtest profiles,
 Exit AI, capital allocation experiments, and Portfolio Manager AI through
-Phase 3-D.
+Phase 4-C.
 
 The overall direction changed from report-only ML analysis toward isolated
 backtest profiles. Existing baseline profiles were kept intact, and every
@@ -24,7 +24,7 @@ Implemented:
 - Exit AI backtest profiles
 - scaled-buy and capital allocation profile variants
 - v2_73 adoption notes
-- Portfolio Manager AI dataset, data-lineage audit, training, light evaluation, and full backtest profile
+- Portfolio Manager AI dataset, data-lineage audit, training, light evaluation, full backtest profiles, PM-aware ordering, and high-PM minimum hold profiles
 
 Still not implemented:
 
@@ -65,6 +65,10 @@ Important report examples:
 - `reports/ml/capital_allocation_phase5_v2_73_comparison_2023-01_to_2026-05.md`
 - `reports/ml/portfolio_manager_phase3d_full_backtest_2023-01_to_2026-05.md`
 - `reports/ml/portfolio_manager_phase3d_detail_audit_2023-01_to_2026-05.md`
+- `reports/ml/portfolio_manager_phase3j_affordability_audit_2023-01_to_2026-05.md`
+- `reports/ml/portfolio_manager_phase3k_candidate_ranking_audit_2023-01_to_2026-05.md`
+- `reports/ml/portfolio_manager_phase3l_pm_aware_order_2023-01_to_2026-05.md`
+- `reports/ml/portfolio_manager_phase4b_high_pm_min_hold_audit_2023-01_to_2026-05.md`
 
 ## Phase 25: 5-Year Walk-Forward
 
@@ -947,14 +951,207 @@ Decision:
   - cash / daily limit policy
   - fallback quality improvement
 
-### Current Profile Ranking After Phase 3-I
+### Phase 3-J: Affordability Audit
+
+Report:
+
+```text
+reports/ml/portfolio_manager_phase3j_affordability_audit_2023-01_to_2026-05.md
+```
+
+Target:
+
+```text
+rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030
+```
+
+Key finding:
+
+- `selected_but_not_affordable` occurred `369` times.
+- This was a major remaining reason for low utilization after v2_77.
+- The audit attached hypothetical 3d/5d/10d returns to skipped candidates.
+- Some skipped candidates had positive hypothetical returns, so a fallback path
+  was worth auditing.
+
+Interpretation:
+
+- The issue was not simply lack of cash.
+- The candidate loop could encounter an unaffordable selected candidate, while
+  the surrounding candidate set still contained possible alternatives.
+- Before changing logic, Phase 3-K checked whether existing candidate ordering
+  and fallback behavior already handled this.
+
+### Phase 3-K: Candidate Ranking / Fallback Path Audit
+
+Report:
+
+```text
+reports/ml/portfolio_manager_phase3k_candidate_ranking_audit_2023-01_to_2026-05.md
+```
+
+Current ranking path before Phase 3-L:
+
+| item | behavior |
+|---|---|
+| selected sorting | `daily_score_rank ASC`, then `risk_adjusted_score DESC`, then `code ASC` |
+| PM AI timing | PM sizing was applied after selected ordering |
+| affordability timing | cash / daily limit / round lot / PM sizing / per-code cap after ordering |
+| `selected_count_in_day` | not used |
+
+Path classification:
+
+| classification | count |
+|---|---:|
+| `candidate_log_insufficient` | `79` |
+| `top_candidate_unaffordable_and_no_buy` | `73` |
+| `top_candidate_unaffordable_but_affordable_candidate_exists_not_bought` | `12` |
+| `top_candidate_unaffordable_but_next_candidate_bought` | `40` |
+
+Decision:
+
+- A fallback path was still useful, but should stay inside audited selected
+  candidates first.
+- PM score should influence buy order because the original order was still
+  mainly rule-score / risk-adjusted-score driven.
+
+### Phase 3-L: PM-Aware Ordering and Selected Fallback
+
+New profiles:
+
+| profile | setting |
+|---|---|
+| `rookie_dealer_02_v2_78_pm_aware_order_fallback_w025` | PM-aware order weight `0.25` |
+| `rookie_dealer_02_v2_78_pm_aware_order_fallback_w050` | PM-aware order weight `0.50` |
+| `rookie_dealer_02_v2_78_pm_aware_order_fallback_w100` | PM-aware order weight `1.00` |
+
+Report:
+
+```text
+reports/ml/portfolio_manager_phase3l_pm_aware_order_2023-01_to_2026-05.md
+```
+
+Result:
+
+| variant | net_profit | PF | DD | win_rate | trades | selected_but_not_affordable |
+|---|---:|---:|---:|---:|---:|---:|
+| v2_77 current | `2,914,686` | `2.5430` | `-7.54%` | `53.15%` | `511` | `369` |
+| v2_78 w0.25 | `3,054,794` | `2.6194` | `-7.47%` | `53.78%` | `505` | `253` |
+| v2_78 w0.50 | `3,054,794` | `2.6194` | `-7.47%` | `53.78%` | `505` | `253` |
+| v2_78 w1.00 | `3,054,794` | `2.6194` | `-7.47%` | `53.78%` | `505` | `253` |
+
+Interpretation:
+
+- PM-aware ordering plus selected fallback improved net profit, PF, DD, win
+  rate, and affordability skips versus v2_77 cap0.30.
+- w0.25 / w0.50 / w1.00 produced identical aggregate results in this run.
+- v2_78 w0.25 became the next base for Exit quality audits because it was the
+  least aggressive ordering weight with the same observed outcome.
+
+### Phase 4-B: High PM Minimum Hold Audit
+
+Report:
+
+```text
+reports/ml/portfolio_manager_phase4b_high_pm_min_hold_audit_2023-01_to_2026-05.md
+```
+
+Target:
+
+```text
+rookie_dealer_02_v2_78_pm_aware_order_fallback_w025
+```
+
+The audit found that high-PM trades, defined as `pm_multiplier >= 1.15`, were
+already strong but often exited while post-exit returns remained positive.
+
+Actual high-PM summary:
+
+| metric | value |
+|---|---:|
+| trade_count | `168` |
+| net_profit | `1,314,581` |
+| PF | `3.2283` |
+| win_rate | `65.48%` |
+| average_holding_days | `4.17` |
+| early_exit_rate | `60.71%` |
+
+Minimum-hold counterfactual:
+
+| rule | changed trades | profit_delta | virtual PF | virtual win_rate |
+|---|---:|---:|---:|---:|
+| min hold 3d | `27` | `+24,095` | `3.1407` | `68.45%` |
+| min hold 5d | `64` | `+344,508` | `3.7796` | `71.43%` |
+| min hold 7d | `168` | `+1,508,389` | `9.3080` | `77.38%` |
+
+Important caveat:
+
+- This was a lightweight audit and did not replay portfolio equity, so DD and
+  capital lock-up impact still require a full backtest.
+
+### Phase 4-C: High PM Minimum Hold Profiles
+
+New profiles:
+
+| profile | behavior |
+|---|---|
+| `rookie_dealer_02_v2_79_high_pm_min_hold_5d` | suppress Exit AI exits for high-PM positions before 5 business holding days |
+| `rookie_dealer_02_v2_79_high_pm_min_hold_7d` | suppress Exit AI exits for high-PM positions before 7 business holding days |
+
+Base profile:
+
+```text
+rookie_dealer_02_v2_78_pm_aware_order_fallback_w025
+```
+
+Implementation:
+
+- Applies only when `pm_multiplier >= 1.15`.
+- Suppresses only Exit AI generated exits while `holding_days < high_pm_min_hold_days`.
+- Does not suppress existing stop loss, take profit, max holding, or forced
+  exits because the guard only blocks plans with `exit_ai_triggered=True`.
+- Adds audit fields such as:
+  - `high_pm_min_hold_enabled`
+  - `high_pm_min_hold_days`
+  - `high_pm_min_hold_applied`
+  - `high_pm_min_hold_blocked_exit`
+  - `high_pm_min_hold_blocked_exit_count`
+  - `high_pm_min_hold_exit_reason_original`
+  - `high_pm_min_hold_release_date`
+  - `holding_days_at_exit_signal`
+
+Report script:
+
+```text
+scripts/ml/report_portfolio_manager_phase4c_high_pm_min_hold.py
+```
+
+Planned report output after full backtests:
+
+```text
+reports/ml/portfolio_manager_phase4c_high_pm_min_hold_2023-01_to_2026-05.md
+reports/ml/portfolio_manager_phase4c_high_pm_min_hold_2023-01_to_2026-05.json
+```
+
+Quick Check result:
+
+```text
+tests/test_ml_portfolio_manager_phase4c_high_pm_min_hold.py
+6 passed
+```
+
+Full backtests were intentionally not run during implementation.
+
+### Current Profile Ranking After Phase 4-C
 
 | priority | profile | status |
 |---:|---|---|
-| 1 | `rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030` | best balance so far: strong profit/PF with DD under 8% |
-| 2 | `rookie_dealer_02_v2_76_pm_ai_low_score_skip` | highest profit/PF/win rate, but DD too large without exposure guard |
-| 3 | `rookie_dealer_02_v2_75_pm_ai_high_minus_avoid_sizing` | strong prior profile and simpler reference |
-| 4 | `rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue` | prior baseline / fallback reference |
+| 1 | `rookie_dealer_02_v2_78_pm_aware_order_fallback_w025` | latest full-backtested best balance after PM-aware ordering |
+| 2 | `rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030` | previous best balance: strong profit/PF with DD under 8% |
+| experimental | `rookie_dealer_02_v2_79_high_pm_min_hold_5d` | implemented; needs full backtest |
+| experimental | `rookie_dealer_02_v2_79_high_pm_min_hold_7d` | implemented; needs full backtest |
+| reference | `rookie_dealer_02_v2_76_pm_ai_low_score_skip` | highest profit/PF/win rate before caps, but DD too large without exposure guard |
+| reference | `rookie_dealer_02_v2_75_pm_ai_high_minus_avoid_sizing` | strong prior profile and simpler PM sizing reference |
+| reference | `rookie_dealer_02_v2_73_ml_ranked_exit_ai_050_scaled_buy_continue` | prior baseline / fallback reference |
 | deferred | candidate_pool_x2/x3 | no utilization benefit and worse PF/profit |
 
 ### Latest Test Command
@@ -971,11 +1168,17 @@ PYTHONPYCACHEPREFIX=/private/tmp/ai-fund-lab-pycache python3 -m pytest -q \
   tests/test_ml_portfolio_manager_phase3f_drawdown_audit.py \
   tests/test_ml_portfolio_manager_phase3g_per_code_cap.py \
   tests/test_ml_portfolio_manager_phase3h_capital_utilization.py \
-  tests/test_ml_portfolio_manager_phase3i_candidate_pool.py
+  tests/test_ml_portfolio_manager_phase3i_candidate_pool.py \
+  tests/test_ml_portfolio_manager_phase3j_affordability.py \
+  tests/test_ml_portfolio_manager_phase3k_candidate_ranking.py \
+  tests/test_ml_portfolio_manager_phase3l_pm_aware_order.py \
+  tests/test_ml_portfolio_manager_phase4b_high_pm_min_hold.py \
+  tests/test_ml_portfolio_manager_phase4c_high_pm_min_hold.py
 ```
 
-Latest result:
+Latest Phase 4-C quick-check result:
 
 ```text
-34 passed, 1 warning
+tests/test_ml_portfolio_manager_phase4c_high_pm_min_hold.py
+6 passed
 ```
