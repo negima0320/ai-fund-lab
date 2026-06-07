@@ -40,6 +40,13 @@ adoption notes for the AI / ML stack.
   - Phase 4-G clean Exit AI delay / candidate-presence hold audit
   - current decision: keep v2_78 as main candidate and keep v2_79 on hold
 
+- `Exit_AI_v2_Phase5A_to_5F_Retraining_Summary.md`
+  - Exit AI v2 API-only retraining readiness
+  - API-only dataset design and builder
+  - training design and leakage-safe top-decile trainer prototype
+  - Phase 5-F candidate full-train results
+  - current decision: keep current Exit AI unchanged and move next to Prediction / Integration Audit
+
 ## Adoption Notes
 
 - `v2_66_ml_ranked_adoption_notes.md`
@@ -70,6 +77,15 @@ Possible clean v2_80 research direction:
 - narrow high-PM Exit AI one-day delay for `pm_multiplier >= 1.15`
   - Phase 4-G found this reproduced 71570 and added `+11,200` in the virtual audit
   - blanket Exit AI 1-day delay was harmful and is not recommended
+
+Exit AI v2 research candidate:
+
+- `models/ml/exit_ai_v2/candidate_v2_api_only`
+  - trained from API-only dataset, not from backtest outcomes
+  - current Exit AI `models/ml/exit/current_v2_66` was not overwritten
+  - test AUC `0.6524`, PR-AUC `0.1553`, top decile lift `2.2574`
+  - not integrated into any profile yet
+  - next step is Exit AI v2 Prediction / Integration Audit
 
 - `daily_ai_candidate_operation.md`
   - human-review daily AI candidate output

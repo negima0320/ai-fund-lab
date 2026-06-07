@@ -5,7 +5,8 @@ Last updated: `2026-06-07`
 This document is the short handoff for continuing the AI / ML work in a fresh
 chat. It intentionally summarizes only the current state, key constraints, and
 next useful actions. For the full history, see
-`docs/ml/ML_Phase_25_to_Portfolio_Manager_AI_Summary.md`.
+`docs/ml/ML_Phase_25_to_Portfolio_Manager_AI_Summary.md` and
+`docs/ml/Exit_AI_v2_Phase5A_to_5F_Retraining_Summary.md`.
 
 ## Current State
 
@@ -69,24 +70,26 @@ and adds a per-code exposure cap to address v2_76's drawdown concentration.
 Latest committed code before this handoff update:
 
 ```text
-e03294e Add portfolio manager audit and high PM hold profiles
+4145ba8 Add AI retraining phase 5 audits
 ```
 
 Recent relevant commits:
 
 ```text
+4145ba8 Add AI retraining phase 5 audits
+29139a6 Add portfolio manager phase 4 audits
+970a02d Document portfolio manager phase 4 updates
 e03294e Add portfolio manager audit and high PM hold profiles
 ea139c5 Add portfolio manager AI audits and v2_77 variants
-f48cf9c Add PM phase3e low score skip profile
-e46914b Document current ML handoff
-44b01c4 Add PM phase3d detail audit
 ```
 
-Current documentation updates in progress:
+Current uncommitted work includes Phase 5-B cleanup, Phase 5-C builder,
+Phase 5-D training design, Phase 5-E trainer prototype, Phase 5-F candidate
+model output, and this documentation update:
 
-- `docs/ml/ML_Phase_25_to_Portfolio_Manager_AI_Summary.md`
 - `docs/ml/README.md`
 - `docs/ml/CURRENT_HANDOFF.md`
+- `docs/ml/Exit_AI_v2_Phase5A_to_5F_Retraining_Summary.md`
 
 ## Important Artifacts
 
@@ -95,7 +98,14 @@ Models:
 ```text
 models/ml/current_enriched_v2/
 models/ml/exit/current_v2_66/
+models/ml/exit_ai_v2/candidate_v2_api_only/
 models/ml/portfolio_manager/current_v2_73_phase3b_clean/
+```
+
+Exit AI v2 API-only dataset:
+
+```text
+data/ml/exit_ai_v2/exit_ai_v2_dataset_api_only_2021-06_to_2026-05.parquet
 ```
 
 Historical walk-forward predictions:
@@ -138,6 +148,11 @@ reports/ml/portfolio_manager_phase4c_high_pm_min_hold_2023-01_to_2026-05.md
 reports/ml/portfolio_manager_phase4d_v278_vs_v279_diff_audit_2023-01_to_2026-05.md
 reports/ml/portfolio_manager_phase4f_side_effect_audit_2023-01_to_2026-05.md
 reports/ml/portfolio_manager_phase4g_exit_delay_candidate_hold_audit_2023-01_to_2026-05.md
+reports/ml/phase5a_retraining_readiness_audit_2023-01_to_2026-05.md
+reports/ml/phase5b_exit_ai_v2_dataset_design_2021-06_to_2026-05.md
+reports/ml/phase5c_exit_ai_v2_dataset_builder_2021-06_to_2026-05.md
+reports/ml/phase5d_exit_ai_v2_training_design_2021-06_to_2026-05.md
+reports/ml/phase5e_exit_ai_v2_trainer_prototype_2021-06_to_2026-05.md
 ```
 
 Generated `data/ml`, `models/ml`, `reports/ml`, and `logs/backtests` artifacts
@@ -213,6 +228,88 @@ Phase 4-F/G decision:
 - The only positive clean rule candidate was a narrow high-PM delay: `pm_multiplier >= 1.15`, `profit_delta=+11,200`.
 - Keep v2_78 w0.25 as main candidate; keep v2_79 on hold.
 - See `docs/ml/Portfolio_Manager_AI_Phase4C_to_4G_Audit_Summary.md`.
+
+## Exit AI v2 Phase 5 Result
+
+Phase 5-A through 5-F created a separate API-only Exit AI v2 candidate.
+
+Important distinction:
+
+- Current Exit AI remains `models/ml/exit/current_v2_66`.
+- Candidate Exit AI v2 is saved separately under
+  `models/ml/exit_ai_v2/candidate_v2_api_only`.
+- No production profile or full strategy backtest has adopted Exit AI v2 yet.
+
+Dataset:
+
+```text
+data/ml/exit_ai_v2/exit_ai_v2_dataset_api_only_2021-06_to_2026-05.parquet
+```
+
+Dataset summary:
+
+| item | value |
+|---|---:|
+| rows | `1,957,321` |
+| columns | `56` |
+| final feature count before Phase 5-D drop | `41` |
+| file size | `471.66 MB` |
+| leakage risk | `low` |
+| blocking issues | `none` |
+
+Training design:
+
+| item | value |
+|---|---|
+| task | ranking-style `exit_quality_score` top decile |
+| model | `HistGradientBoostingClassifier` |
+| feature set | `feature_set_drop_missing_30pct` |
+| feature count | `36` |
+| dropped features | `BPS`, `OP_growth`, `FEPS_growth`, `FSales_growth`, `FOP_growth` |
+| threshold rule | train split 90th percentile only |
+
+Phase 5-F full train:
+
+| split | rows | positive rate |
+|---|---:|---:|
+| train | `991,902` | `10.00%` |
+| validation | `386,869` | `9.90%` |
+| test | `578,550` | `8.66%` |
+
+Target threshold:
+
+```text
+0.046277665995975825
+```
+
+Metrics:
+
+| split | AUC | PR-AUC | precision@top10% | recall@top10% | top decile lift |
+|---|---:|---:|---:|---:|---:|
+| validation | `0.5737` | `0.1283` | `0.1532` | `0.1548` | `1.5476` |
+| test | `0.6524` | `0.1553` | `0.1956` | `0.2257` | `2.2574` |
+
+Full-train leakage check:
+
+- forbidden columns in features: none
+- label-like columns in features: none
+- `future_return_*` in features: none
+- target/label in features: none
+- `selected_count_in_day`: false
+- backtest/profile columns: none
+- split overlap: false
+- train threshold only: true
+- leakage risk: low
+- blocking issues: none
+
+Next step:
+
+```text
+Exit AI v2 Prediction / Integration Audit
+```
+
+Do not yet replace the current Exit AI, add a profile switch, or run a full
+adoption backtest without an explicit integration-audit step.
 
 v2_77 cap 0.30 capital utilization:
 
@@ -341,7 +438,9 @@ Latest known test result:
 Recommended next experiments:
 
 1. Use v2_78 w0.25 as the current full-backtested balanced candidate.
-2. Run full backtests for v2_79 5d and v2_79 7d, then generate the Phase 4-C report.
+2. Run Exit AI v2 Prediction / Integration Audit using
+   `models/ml/exit_ai_v2/candidate_v2_api_only`, without overwriting
+   `models/ml/exit/current_v2_66`.
 3. Do not continue candidate-pool expansion unless the upstream candidate
    shortage definition changes.
 4. Try utilization-improvement paths that do not dilute candidate quality:
@@ -355,32 +454,12 @@ Recommended next experiments:
 Do not promote v2_76 directly without an exposure guard because its DD is too
 large.
 
-Run v2_79 full backtests:
+Exit AI v2 integration-audit starting point:
 
-```bash
-PYTHONPYCACHEPREFIX=/private/tmp/ai-fund-lab-pycache python3 src/main.py \
-  --mode backtest \
-  --provider jquants \
-  --profile rookie_dealer_02_v2_79_high_pm_min_hold_5d \
-  --start-date 2023-01-01 \
-  --end-date 2026-05-31 \
-  --skip-price-fetch \
-  --quiet \
-  --summary-only \
-  --no-daily-logs
-
-PYTHONPYCACHEPREFIX=/private/tmp/ai-fund-lab-pycache python3 src/main.py \
-  --mode backtest \
-  --provider jquants \
-  --profile rookie_dealer_02_v2_79_high_pm_min_hold_7d \
-  --start-date 2023-01-01 \
-  --end-date 2026-05-31 \
-  --skip-price-fetch \
-  --quiet \
-  --summary-only \
-  --no-daily-logs
-
-PYTHONPYCACHEPREFIX=/private/tmp/ai-fund-lab-pycache python3 scripts/ml/report_portfolio_manager_phase4c_high_pm_min_hold.py
+```text
+models/ml/exit_ai_v2/candidate_v2_api_only/
+data/ml/exit_ai_v2/exit_ai_v2_dataset_api_only_2021-06_to_2026-05.parquet
+reports/ml/phase5e_exit_ai_v2_trainer_prototype_2021-06_to_2026-05.json
 ```
 
 ## Documentation Map
@@ -389,5 +468,7 @@ Use these documents:
 
 - `docs/ml/README.md`: ML documentation index
 - `docs/ml/ML_Phase_25_to_Portfolio_Manager_AI_Summary.md`: full recent history
+- `docs/ml/Portfolio_Manager_AI_Phase4C_to_4G_Audit_Summary.md`: why v2_79 remains on hold
+- `docs/ml/Exit_AI_v2_Phase5A_to_5F_Retraining_Summary.md`: Exit AI v2 API-only retraining work
 - `docs/ml/v2_73_adoption_notes.md`: why v2_73 became the prior baseline
 - `docs/ml/daily_ai_candidate_operation.md`: human-review daily AI candidates

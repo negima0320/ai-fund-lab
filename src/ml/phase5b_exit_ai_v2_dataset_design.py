@@ -50,6 +50,16 @@ FORBIDDEN_COLUMNS = {
     "skip_reason",
 }
 
+FUTURE_LABEL_SOURCE_COLUMNS = {
+    "future_5d_return",
+    "future_10d_return",
+    "upside_10d",
+    "bad_entry_10d",
+    "future_max_return_10d",
+    "future_max_return_20d",
+    "future_swing_success_20d",
+}
+
 BASE_REQUIRED_COLUMNS = {"date", "code", "close"}
 LABEL_COLUMNS = [
     "future_return_3d",
@@ -100,7 +110,7 @@ def _date_range(frame: pd.DataFrame) -> dict[str, str | None]:
 
 
 def _safe_feature_columns(columns: list[str]) -> list[str]:
-    blocked = set(FORBIDDEN_COLUMNS) | set(LABEL_COLUMNS)
+    blocked = set(FORBIDDEN_COLUMNS) | set(LABEL_COLUMNS) | set(FUTURE_LABEL_SOURCE_COLUMNS)
     return [column for column in columns if column not in blocked]
 
 
@@ -250,6 +260,9 @@ class Phase5BExitAIV2DatasetDesignAudit:
             fields.append({"column": column, "role": "feature", "source": "API-derived feature dataset", "allowed": True})
         for column in LABEL_COLUMNS:
             fields.append({"column": column, "role": "label", "source": "mechanical future price path", "allowed": True})
+        future_label_sources = sorted(set(columns) & FUTURE_LABEL_SOURCE_COLUMNS)
+        for column in future_label_sources:
+            fields.append({"column": column, "role": "label_source_excluded_from_features", "source": "API-derived future price label source", "allowed": True})
         forbidden_present = sorted(set(columns) & FORBIDDEN_COLUMNS)
         for column in forbidden_present:
             fields.append({"column": column, "role": "forbidden", "source": "backtest/outcome-like column", "allowed": False})
@@ -260,6 +273,7 @@ class Phase5BExitAIV2DatasetDesignAudit:
             "schema_fields": fields,
             "safe_feature_columns": safe_features,
             "forbidden_columns_present_in_base": forbidden_present,
+            "future_label_source_columns_excluded_from_features": future_label_sources,
             "stock_selection_scores_policy": "exclude by default; may be separately audited only as walk-forward prediction artifacts, never current-model regenerated predictions",
         }
 
@@ -351,6 +365,7 @@ class Phase5BExitAIV2DatasetDesignAudit:
     def _leakage_audit(self, schema: dict[str, Any], labels: dict[str, Any]) -> dict[str, Any]:
         base_columns = set(schema.get("base_dataset_columns", []))
         forbidden = sorted(base_columns & FORBIDDEN_COLUMNS)
+        future_label_sources = sorted(base_columns & FUTURE_LABEL_SOURCE_COLUMNS)
         label_columns = labels.get("basic_labels", [])
         blocking = []
         if forbidden:
@@ -359,6 +374,7 @@ class Phase5BExitAIV2DatasetDesignAudit:
             blocking.append("selected_count_in_day is forbidden.")
         return {
             "forbidden_columns_found": forbidden,
+            "future_label_source_columns_excluded_from_features": future_label_sources,
             "safe_feature_columns_count": len(schema.get("safe_feature_columns", [])),
             "label_columns": label_columns,
             "leakage_risk": "low" if not blocking else "high",
@@ -432,4 +448,3 @@ def save_report(result: dict[str, Any], root: Path | str = ROOT) -> Phase5BPaths
 def run(root: Path | str = ROOT) -> Phase5BPaths:
     audit = Phase5BExitAIV2DatasetDesignAudit(root)
     return audit.save_report(audit.build_report())
-

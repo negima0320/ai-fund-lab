@@ -26,6 +26,8 @@ def _write_fixture_tree(root: Path, *, forbidden_base_column: bool = False) -> N
                 "volatility_20d": 0.2,
                 "risk_adjusted_score": 0.5,
                 "eps": 12.3,
+                "future_5d_return": 0.02,
+                "bad_entry_10d": False,
             }
             if forbidden_base_column:
                 row["selected_count_in_day"] = 3
@@ -58,10 +60,13 @@ def test_phase5b_design_uses_api_only_base_and_blocks_existing_exit_dataset(tmp_
     assert "trades.csv as teacher labels" in result["data_policy"]["forbidden_sources"]
     assert result["dataset_schema_design"]["row_definition"].startswith("one code/as_of_date")
     assert "selected_count_in_day" not in result["dataset_schema_design"]["safe_feature_columns"]
+    assert "future_5d_return" not in result["dataset_schema_design"]["safe_feature_columns"]
+    assert "future_5d_return" in result["dataset_schema_design"]["future_label_source_columns_excluded_from_features"]
     assert result["label_design"]["recommended_label"] == "exit_quality_score"
     assert result["sample_generation_feasibility"]["candidate_rows_before_label_horizon_filtering"] == 60
     assert result["sample_generation_feasibility"]["rows_after_20d_label_available"] == 20
     assert result["leakage_audit"]["blocking_issues"] == []
+    assert "bad_entry_10d" in result["leakage_audit"]["future_label_source_columns_excluded_from_features"]
     assert result["existing_exit_dataset_comparison"]["existing_dataset_retraining_allowed"] is False
     assert "trade_id" in result["existing_exit_dataset_comparison"]["existing_forbidden_columns_found"]
     assert result["existing_exit_dataset_comparison"]["new_dataset_design_retraining_allowed"] is True
