@@ -34,7 +34,7 @@ Profile lineage:
 - v2_76: derives from v2_75 and skips very low PM score trades.
 - v2_77 cap 0.30: derives from v2_76 and adds per-code exposure cap `0.30`.
 - v2_78 w0.25: derives from v2_77 cap 0.30 and adds PM-aware selected ordering plus selected fallback.
-- v2_79 5d/7d: derives from v2_78 w0.25 and suppresses Exit AI early exits only for high-PM positions.
+- v2_79 5d/7d: derives from v2_78 w0.25 and suppresses Exit AI early exits only for high-PM positions; numerically stronger in Phase 4-C, but held back after Phase 4-F/G because the intended minimum-hold guard did not directly fire.
 
 Portfolio Manager AI score:
 
@@ -134,6 +134,10 @@ reports/ml/portfolio_manager_phase3j_affordability_audit_2023-01_to_2026-05.md
 reports/ml/portfolio_manager_phase3k_candidate_ranking_audit_2023-01_to_2026-05.md
 reports/ml/portfolio_manager_phase3l_pm_aware_order_2023-01_to_2026-05.md
 reports/ml/portfolio_manager_phase4b_high_pm_min_hold_audit_2023-01_to_2026-05.md
+reports/ml/portfolio_manager_phase4c_high_pm_min_hold_2023-01_to_2026-05.md
+reports/ml/portfolio_manager_phase4d_v278_vs_v279_diff_audit_2023-01_to_2026-05.md
+reports/ml/portfolio_manager_phase4f_side_effect_audit_2023-01_to_2026-05.md
+reports/ml/portfolio_manager_phase4g_exit_delay_candidate_hold_audit_2023-01_to_2026-05.md
 ```
 
 Generated `data/ml`, `models/ml`, `reports/ml`, and `logs/backtests` artifacts
@@ -182,17 +186,33 @@ Phase 4-B high-PM minimum-hold audit on v2_78 w0.25:
 | min hold 5d | `+344,508` | `3.7796` | `71.43%` |
 | min hold 7d | `+1,508,389` | `9.3080` | `77.38%` |
 
-Phase 4-C implemented these profiles but has not run the full 2023-01 to
-2026-05 backtest yet:
+Phase 4-C ran these profiles:
 
 ```text
 rookie_dealer_02_v2_79_high_pm_min_hold_5d
 rookie_dealer_02_v2_79_high_pm_min_hold_7d
 ```
 
+Both v2_79 variants had the same headline result:
+
+| profile | net_profit | PF | DD | win_rate | trades |
+|---|---:|---:|---:|---:|---:|
+| v2_78 w0.25 | `3,054,794` | `2.6194` | `-7.47%` | `53.78%` | `505` |
+| v2_79 5d/7d | `3,544,602` | `2.7219` | `-6.49%` | `55.25%` | `517` |
+
 The minimum-hold guard only blocks Exit AI exits (`exit_ai_triggered=True`) for
 `pm_multiplier >= 1.15`; stop loss, take profit, max holding, and forced exits
 are not suppressed.
+
+Phase 4-F/G decision:
+
+- `high_pm_min_hold_blocked_exit_count=0`; minimum hold was not directly effective.
+- First path divergence was `71570` on `2023-01-24`: v2_78 sold by Exit AI, v2_79 did not sell until `2023-01-25`.
+- v2_79's improvement is a path-divergence side effect, not an adoptable minimum-hold result.
+- Phase 4-G found blanket Exit AI 1-day delay was harmful (`profit_delta=-81,700`).
+- The only positive clean rule candidate was a narrow high-PM delay: `pm_multiplier >= 1.15`, `profit_delta=+11,200`.
+- Keep v2_78 w0.25 as main candidate; keep v2_79 on hold.
+- See `docs/ml/Portfolio_Manager_AI_Phase4C_to_4G_Audit_Summary.md`.
 
 v2_77 cap 0.30 capital utilization:
 

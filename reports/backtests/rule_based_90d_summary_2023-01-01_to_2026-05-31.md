@@ -3,11 +3,11 @@
 ## 実行条件
 
 - 期間: 2023-01-01 〜 2026-05-31
-- profile: rookie_dealer_02_v2_78_pm_aware_order_fallback_w100 新人ディーラー2号 v2.78 PM-aware ordering + selected fallback w1.00
+- profile: rookie_dealer_02_v2_78_pm_aware_order_fallback_w025 新人ディーラー2号 v2.78 PM-aware ordering + selected fallback w0.25
 - provider: jquants
 - ChatGPT/OpenAI: disabled
 - broker: paper
-- config_version: cfg_34055e1
+- config_version: cfg_09b2f2f
 
 ## Backtest Date Range Audit
 
@@ -54,7 +54,7 @@
 ### Hardcoded Date Audit
 
 - target: 2026-03-06
-- match_count: 289
+- match_count: 295
 - warning: 2026-03-06 remains in config/src/docs/reports/README
 
 ### Processed Data Audit

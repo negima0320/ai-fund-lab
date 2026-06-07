@@ -33,6 +33,13 @@ adoption notes for the AI / ML stack.
   - v2_73 adoption
   - Portfolio Manager AI data lineage, training, Phase 3-C, Phase 3-D full backtest, v2_75 detail audit, v2_76 drawdown audit, v2_77 per-code cap, capital utilization, candidate-pool expansion, PM-aware ordering, affordability/ranking audits, and high-PM minimum-hold profiles
 
+- `Portfolio_Manager_AI_Phase4C_to_4G_Audit_Summary.md`
+  - v2_78 vs v2_79 high-PM minimum-hold verification
+  - Phase 4-D difference audit
+  - Phase 4-F side-effect root-cause audit
+  - Phase 4-G clean Exit AI delay / candidate-presence hold audit
+  - current decision: keep v2_78 as main candidate and keep v2_79 on hold
+
 ## Adoption Notes
 
 - `v2_66_ml_ranked_adoption_notes.md`
@@ -53,8 +60,16 @@ Experimental next candidates:
 
 - `rookie_dealer_02_v2_79_high_pm_min_hold_5d`
 - `rookie_dealer_02_v2_79_high_pm_min_hold_7d`
-  - Phase 4-C profiles implemented from the Phase 4-B high-PM minimum-hold audit
-  - full 2023-01 to 2026-05 backtests still need to be run
+  - Phase 4-C backtests were run and v2_79 outperformed v2_78 numerically
+  - Phase 4-F confirmed `high_pm_min_hold_blocked_exit_count=0`; the intended minimum-hold guard was not directly effective
+  - v2_79 remains on hold and should not be adopted as the main profile
+  - see `Portfolio_Manager_AI_Phase4C_to_4G_Audit_Summary.md`
+
+Possible clean v2_80 research direction:
+
+- narrow high-PM Exit AI one-day delay for `pm_multiplier >= 1.15`
+  - Phase 4-G found this reproduced 71570 and added `+11,200` in the virtual audit
+  - blanket Exit AI 1-day delay was harmful and is not recommended
 
 - `daily_ai_candidate_operation.md`
   - human-review daily AI candidate output
