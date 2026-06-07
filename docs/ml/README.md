@@ -47,6 +47,13 @@ adoption notes for the AI / ML stack.
   - Phase 5-F candidate full-train results
   - current decision: keep current Exit AI unchanged and move next to Prediction / Integration Audit
 
+- `Portfolio_Manager_AI_Phase5G_to_6G_Audit_Summary.md`
+  - Exit AI v2 Prediction / Integration Audit and v2_80 integration rejection
+  - Market Regime / Bear alpha audits
+  - Bear Booster implementation and non-adoption
+  - per-code cap bottleneck audit
+  - v2_82 cap38 full backtest result and current main-candidate decision
+
 ## Adoption Notes
 
 - `v2_66_ml_ranked_adoption_notes.md`
@@ -57,13 +64,18 @@ adoption notes for the AI / ML stack.
 
 Current strongest full-backtested research candidate:
 
-- `rookie_dealer_02_v2_78_pm_aware_order_fallback_w025`
-  - v2_77 cap0.30-derived profile with PM-aware buy ordering and selected fallback
-  - current best balance after Phase 3-L: v2_77 cap0.30 profit/PF/DD improved while affordability skips decreased
-  - latest audits are summarized in `ML_Phase_25_to_Portfolio_Manager_AI_Summary.md`
+- `rookie_dealer_02_v2_82_cap38`
+  - v2_78 w0.25-derived profile with only `per_code_exposure_cap_rate` relaxed from `0.30` to `0.38`
+  - Phase 6-G full backtest: net profit `3,777,545`, PF `2.7309`, DD `-6.54%`, win rate `55.11%`
+  - improved profit, PF, DD, win rate, monthly win rate, capital utilization, and cap skip/reduction count versus v2_78
+  - latest audits are summarized in `Portfolio_Manager_AI_Phase5G_to_6G_Audit_Summary.md`
   - still a backtest/research profile; not connected to live order placement
 
 Experimental next candidates:
+
+- `rookie_dealer_02_v2_78_pm_aware_order_fallback_w025`
+  - conservative fallback/reference after Phase 6-G
+  - prior main candidate: net profit `3,054,794`, PF `2.6194`, DD `-7.47%`, win rate `53.78%`
 
 - `rookie_dealer_02_v2_79_high_pm_min_hold_5d`
 - `rookie_dealer_02_v2_79_high_pm_min_hold_7d`
@@ -84,8 +96,9 @@ Exit AI v2 research candidate:
   - trained from API-only dataset, not from backtest outcomes
   - current Exit AI `models/ml/exit/current_v2_66` was not overwritten
   - test AUC `0.6524`, PR-AUC `0.1553`, top decile lift `2.2574`
-  - not integrated into any profile yet
-  - next step is Exit AI v2 Prediction / Integration Audit
+  - Phase 5-G prediction audit completed
+  - Phase 5-H v2_80 integration profiles underperformed v2_78 and were not adopted
+  - keep current Exit AI `models/ml/exit/current_v2_66`
 
 - `daily_ai_candidate_operation.md`
   - human-review daily AI candidate output

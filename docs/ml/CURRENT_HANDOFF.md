@@ -302,14 +302,101 @@ Full-train leakage check:
 - leakage risk: low
 - blocking issues: none
 
-Next step:
+Historical next step, now completed in the later Phase 5-G section:
 
 ```text
 Exit AI v2 Prediction / Integration Audit
 ```
 
-Do not yet replace the current Exit AI, add a profile switch, or run a full
-adoption backtest without an explicit integration-audit step.
+The integration audit and full profile checks are summarized below. The current
+decision remains: do not replace the current Exit AI, do not overwrite
+`models/ml/exit/current_v2_66`, and do not adopt Exit AI v2 profiles.
+
+## Phase 5-G to 6-G Result
+
+The Exit AI v2 integration audit and subsequent market/cap audits have now been
+completed. The detailed summary is:
+
+```text
+docs/ml/Portfolio_Manager_AI_Phase5G_to_6G_Audit_Summary.md
+```
+
+High-level decisions:
+
+- Do not adopt Exit AI v2 integration profiles.
+- Do not adopt the Bear Booster profile yet.
+- The main bottleneck was per-code exposure cap, not Exit AI v2 or Bear
+  booster logic.
+- Promote `rookie_dealer_02_v2_82_cap38` to the strongest current
+  full-backtested research candidate.
+- Keep `rookie_dealer_02_v2_78_pm_aware_order_fallback_w025` as conservative
+  fallback/reference.
+
+Phase 5-G prediction audit:
+
+| metric | value |
+|---|---:|
+| v2_78 sell rows audited | `505` |
+| prediction coverage | `94.65%` |
+| Exit AI v2 top-decile rows | `48` |
+| agreement with existing Exit AI / non-exit | `438` |
+| disagreement | `67` |
+
+Phase 5-H integration profiles:
+
+| variant | net_profit | PF | DD | win_rate | decision |
+|---|---:|---:|---:|---:|---|
+| v2_78 baseline | `3,054,794` | `2.6194` | `-7.47%` | `53.78%` | reference |
+| v2_80 conservative gate | `2,318,919` | `2.2956` | `-10.12%` | `53.36%` | rejected |
+| v2_80 high PM safe | `2,859,266` | `2.5615` | `-8.75%` | `54.06%` | rejected |
+
+Phase 6-F cap audit:
+
+| metric | value |
+|---|---:|
+| current cap hit count | `338` |
+| prevented buy amount | `140,475,510` |
+| cap 35% profit approximation | `+325,938` |
+| cap 40% profit approximation | `+511,396` |
+| cap 50% profit approximation | `+820,943` |
+| cap_is_current_bottleneck | `true` |
+| cap_relaxation_worth_testing | `true` |
+
+Phase 6-G cap38 full backtest:
+
+| metric | v2_78 | v2_82 cap38 | delta |
+|---|---:|---:|---:|
+| net_profit | `3,054,794` | `3,777,545` | `+722,751` |
+| PF | `2.6194` | `2.7309` | `+0.1115` |
+| DD | `-7.47%` | `-6.54%` | `+0.93pt` |
+| win_rate | `53.78%` | `55.11%` | `+1.33pt` |
+| monthly_win_rate | `75.61%` | `78.05%` | `+2.44pt` |
+| total_trades | `505` | `502` | `-3` |
+| average_capital_utilization | `38.31%` | `40.49%` | `+2.18pt` |
+| per_code_cap_skip_or_reduction_count | `50` | `16` | `-34` |
+
+Concentration:
+
+| metric | v2_78 | v2_82 cap38 |
+|---|---:|---:|
+| single-code profit concentration | `8.11%` | `6.83%` |
+| top5-code profit concentration | `15.20%` | `14.12%` |
+
+Current profile ranking:
+
+| priority | profile | status |
+|---:|---|---|
+| 1 | `rookie_dealer_02_v2_82_cap38` | current strongest full-backtested research candidate |
+| 2 | `rookie_dealer_02_v2_78_pm_aware_order_fallback_w025` | conservative fallback/reference |
+| deferred | `rookie_dealer_02_v2_81_bear_pm115_booster_50` | booster fired but performance unchanged due cap absorption |
+| rejected | v2_80 Exit AI v2 profiles | underperformed v2_78 |
+
+Coverage caveat:
+
+- Backtests requested `2023-01-01` to `2026-05-31`.
+- Cached prices ended at `2026-05-29`, so the engine reports
+  `coverage_ok=false`.
+- The compared logs were generated on the same cached-data basis.
 
 v2_77 cap 0.30 capital utilization:
 
@@ -437,19 +524,22 @@ Latest known test result:
 
 Recommended next experiments:
 
-1. Use v2_78 w0.25 as the current full-backtested balanced candidate.
-2. Run Exit AI v2 Prediction / Integration Audit using
-   `models/ml/exit_ai_v2/candidate_v2_api_only`, without overwriting
-   `models/ml/exit/current_v2_66`.
-3. Do not continue candidate-pool expansion unless the upstream candidate
+1. Use v2_82 cap38 as the current strongest full-backtested research candidate.
+2. Keep v2_78 w0.25 as conservative fallback/reference.
+3. Validate v2_82 robustness before adding another logic layer:
+   - year-by-year comparison;
+   - regime-by-regime comparison;
+   - residual cap-hit analysis under `0.38`;
+   - DD-period and top-code concentration checks.
+4. Do not continue candidate-pool expansion unless the upstream candidate
    shortage definition changes.
-4. Try utilization-improvement paths that do not dilute candidate quality:
+5. Try utilization-improvement paths that do not dilute candidate quality:
    - low-score skip threshold tuning
    - replacement candidate filling after cap / affordability blocks
    - total-assets-linked `daily_buy_limit`
    - fallback quality improvement
-5. Keep v2_77, v2_75, and v2_73 as fallback references.
-6. Continue monitoring top-code contribution and DD-period concentration.
+6. Keep v2_78, v2_77, v2_75, and v2_73 as fallback references.
+7. Continue monitoring top-code contribution and DD-period concentration.
 
 Do not promote v2_76 directly without an exposure guard because its DD is too
 large.

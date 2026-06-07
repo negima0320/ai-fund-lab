@@ -1182,3 +1182,226 @@ Latest Phase 4-C quick-check result:
 tests/test_ml_portfolio_manager_phase4c_high_pm_min_hold.py
 6 passed
 ```
+
+## Portfolio Manager AI Phase 5-G to 6-G Update
+
+The later integration and market/capacity audits are summarized in:
+
+```text
+docs/ml/Portfolio_Manager_AI_Phase5G_to_6G_Audit_Summary.md
+```
+
+Main conclusion:
+
+- Exit AI v2 was trained safely from API-only data, but the Phase 5-H
+  integration profiles underperformed and were not adopted.
+- Market Regime audits showed v2_78 was not weak in Bear regimes; naive Bear
+  suppression was harmful.
+- Bear Alpha Booster logic fired but did not change final performance because
+  the desired increased sizing was mostly absorbed by per-code cap constraints.
+- Phase 6-F identified per-code exposure cap as the current bottleneck.
+- Phase 6-G implemented and validated a pure cap relaxation profile,
+  `rookie_dealer_02_v2_82_cap38`.
+
+### Phase 5-G / 5-H: Exit AI v2 Integration Rejected
+
+Phase 5-G audited Exit AI v2 predictions against existing v2_78 sell rows:
+
+| metric | value |
+|---|---:|
+| sell rows | `505` |
+| prediction coverage | `94.65%` |
+| top-decile rows | `48` |
+| agreement count | `438` |
+| disagreement count | `67` |
+
+Phase 5-H full backtests:
+
+| variant | net_profit | PF | DD | win_rate |
+|---|---:|---:|---:|---:|
+| v2_78 baseline | `3,054,794` | `2.6194` | `-7.47%` | `53.78%` |
+| v2_80 conservative gate | `2,318,919` | `2.2956` | `-10.12%` | `53.36%` |
+| v2_80 high PM safe | `2,859,266` | `2.5615` | `-8.75%` | `54.06%` |
+
+Decision:
+
+- Do not adopt Exit AI v2 integration profiles.
+- Keep current Exit AI `models/ml/exit/current_v2_66`.
+- Keep Exit AI v2 candidate under
+  `models/ml/exit_ai_v2/candidate_v2_api_only` for research only.
+
+### Phase 6-A to 6-D: Bear Alpha Exists, But Do Not Suppress Bear
+
+The market regime and Bear winner audits found that v2_78 was strong in Bear
+regimes. After deduped TOPIX regime assignment:
+
+| metric | Bear value |
+|---|---:|
+| Bear trades | `40` |
+| Bear net_profit | `286,996` |
+| Bear PF | `3.3164` |
+| Bear win_rate | `70.00%` |
+
+Strong Bear subgroups:
+
+| condition | trades | net_profit | PF | win_rate |
+|---|---:|---:|---:|---:|
+| Bear + PM 1.30 | `11` | `175,226` | `10.3965` | `90.91%` |
+| Bear + PM>=1.15 | `15` | `202,119` | `11.8387` | `93.33%` |
+
+However, PM 0.80 Bear trades were also profitable:
+
+| metric | value |
+|---|---:|
+| PM 0.80 Bear trades | `13` |
+| PM 0.80 Bear profit | `88,217` |
+| PM 0.80 Bear PF | `3.0773` |
+| PM 0.80 Bear win_rate | `69.23%` |
+
+Decision:
+
+- Do not stop buying in Bear regimes.
+- Do not remove PM 0.80 in Bear.
+- If testing Bear alpha, use additive sizing only.
+
+### Phase 6-E: Bear Booster Profile Did Not Improve Realized Performance
+
+Profile:
+
+```text
+rookie_dealer_02_v2_81_bear_pm115_booster_50
+```
+
+Design:
+
+- Base: v2_78 w0.25.
+- Bear regime only.
+- `pm_multiplier >= 1.15` only.
+- Desired post-PM buy amount multiplied by `1.5`.
+- Existing caps still apply.
+
+Result:
+
+| metric | v2_78 | v2_81 |
+|---|---:|---:|
+| net_profit | `3,054,794` | `3,054,794` |
+| PF | `2.6194` | `2.6194` |
+| DD | `-7.47%` | `-7.47%` |
+| win_rate | `53.78%` | `53.78%` |
+
+Diagnostics:
+
+| metric | value |
+|---|---:|
+| booster applied count | `10` |
+| desired incremental amount | `3,566,800` |
+| boosted trades profit | `164,070` |
+| boosted trades win_rate | `90.00%` |
+
+Decision:
+
+- Do not adopt v2_81.
+- The booster idea was not invalidated, but its effective sizing was blocked by
+  existing cap constraints.
+
+### Phase 6-F: per-code Cap Was the Current Bottleneck
+
+Current setting:
+
+```text
+per_code_exposure_cap_rate = 0.30
+```
+
+Audit result:
+
+| metric | value |
+|---|---:|
+| cap hit count | `338` |
+| cap reduction amount | `140,475,510` |
+| cap prevented buy amount | `140,475,510` |
+
+Virtual cap relaxation:
+
+| cap_rate | profit approximation |
+|---:|---:|
+| `0.35` | `+325,938` |
+| `0.40` | `+511,396` |
+| `0.50` | `+820,943` |
+
+Verdict:
+
+- `cap_is_current_bottleneck=true`
+- `cap_relaxation_worth_testing=true`
+- `ready_for_phase6g=true`
+
+### Phase 6-G: v2_82 cap38 Becomes Main Research Candidate
+
+Profile:
+
+```text
+rookie_dealer_02_v2_82_cap38
+```
+
+Aliases:
+
+```text
+rookie_dealer_02_v2_82
+rookie_dealer_02_v2.82
+```
+
+Only profile difference from v2_78 w0.25:
+
+```yaml
+portfolio_manager_ai_sizing:
+  per_code_exposure_cap_rate: 0.38
+```
+
+No Bear Booster and no Exit AI v2 are mixed into v2_82.
+
+Full backtest comparison:
+
+| metric | v2_78 | v2_82 cap38 | delta |
+|---|---:|---:|---:|
+| net_profit | `3,054,794` | `3,777,545` | `+722,751` |
+| PF | `2.6194` | `2.7309` | `+0.1115` |
+| DD | `-7.47%` | `-6.54%` | `+0.93pt` |
+| win_rate | `53.78%` | `55.11%` | `+1.33pt` |
+| monthly_win_rate | `75.61%` | `78.05%` | `+2.44pt` |
+| total_trades | `505` | `502` | `-3` |
+| average_holding_days | `3.97` | `4.01` | `+0.04` |
+| average_capital_utilization | `38.31%` | `40.49%` | `+2.18pt` |
+| selected_but_not_affordable | `253` | `257` | `+4` |
+| insufficient_available_cash | `74` | `71` | `-3` |
+| per_code_cap_skip_or_reduction_count | `50` | `16` | `-34` |
+
+Concentration:
+
+| metric | v2_78 | v2_82 cap38 |
+|---|---:|---:|
+| single-code profit concentration | `8.11%` | `6.83%` |
+| top5-code profit concentration | `15.20%` | `14.12%` |
+
+Assets using profile initial capital `1,000,000`:
+
+| metric | v2_78 | v2_82 cap38 |
+|---|---:|---:|
+| final assets | `4,813,588` | `5,720,597` |
+| CAGR | `58.51%` | `66.74%` |
+
+Decision:
+
+- Promote `rookie_dealer_02_v2_82_cap38` to the current strongest
+  full-backtested research candidate.
+- Keep `rookie_dealer_02_v2_78_pm_aware_order_fallback_w025` as the
+  conservative fallback/reference.
+
+### Current Profile Ranking After Phase 6-G
+
+| priority | profile | status |
+|---:|---|---|
+| 1 | `rookie_dealer_02_v2_82_cap38` | strongest full-backtested candidate; cap 0.38 improved profit/PF/DD/win rate without concentration worsening |
+| 2 | `rookie_dealer_02_v2_78_pm_aware_order_fallback_w025` | conservative fallback/reference |
+| deferred | `rookie_dealer_02_v2_81_bear_pm115_booster_50` | booster fired but performance unchanged due cap absorption |
+| rejected | `rookie_dealer_02_v2_80_exit_ai_v2_conservative_gate` | worse than v2_78 |
+| rejected | `rookie_dealer_02_v2_80_exit_ai_v2_conservative_gate_high_pm_safe` | better than v2_80 but below v2_78 |
+| on hold | `rookie_dealer_02_v2_79_high_pm_min_hold_5d` | intended minimum-hold effect did not directly fire |
