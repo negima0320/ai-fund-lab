@@ -523,6 +523,13 @@ def _portfolio_manager_low_score_skip_policy(config: dict[str, Any]) -> tuple[bo
     return enabled, threshold
 
 
+def _portfolio_manager_per_code_exposure_cap_policy(config: dict[str, Any]) -> tuple[bool, float]:
+    policy = _portfolio_manager_sizing_policy(config)
+    enabled = bool(policy.get("per_code_exposure_cap_enabled", False))
+    rate = float(policy.get("per_code_exposure_cap_rate", 0.0) or 0.0)
+    return enabled and rate > 0, rate
+
+
 def _portfolio_manager_sizing_advisor(config: dict[str, Any]) -> PortfolioManagerSizingAdvisor:
     policy = _portfolio_manager_sizing_policy(config)
     model_dir = str(policy.get("model_dir") or DEFAULT_PM_MODEL_DIR)
@@ -648,8 +655,106 @@ def _portfolio_manager_trade_fields(source: dict[str, Any]) -> dict[str, Any]:
         "pm_resized_shares",
         "pm_resized_amount",
         "pm_resize_reason",
+        "pm_per_code_cap_enabled",
+        "pm_per_code_cap_rate",
+        "pm_per_code_current_exposure",
+        "pm_per_code_max_exposure",
+        "pm_per_code_allowed_additional_buy",
+        "pm_per_code_cap_original_shares",
+        "pm_per_code_cap_original_amount",
+        "pm_per_code_cap_shares",
+        "pm_per_code_cap_amount",
+        "pm_per_code_cap_reduced",
+        "pm_per_code_cap_skip",
+        "pm_per_code_cap_reason",
     ]
     return {key: source.get(key) for key in keys if key in source}
+
+
+def _position_market_value(position: dict[str, Any]) -> float:
+    value = position.get("market_value")
+    if value not in {None, ""}:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            pass
+    shares = float(position.get("shares") or position.get("quantity") or 0)
+    price = float(position.get("current_price") or position.get("entry_price") or 0)
+    return shares * price
+
+
+def _current_code_exposure(positions: list[dict[str, Any]], code: str) -> float:
+    target = str(code)
+    return float(sum(_position_market_value(position) for position in positions if str(position.get("code") or "") == target))
+
+
+def _apply_per_code_exposure_cap(
+    *,
+    item: dict[str, Any],
+    shares: int,
+    entry_price: float,
+    positions: list[dict[str, Any]],
+    total_assets: float,
+    config: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    enabled, cap_rate = _portfolio_manager_per_code_exposure_cap_policy(config)
+    if not enabled:
+        return shares, {}
+    code = str(item.get("code") or "")
+    original_shares = int(shares or 0)
+    original_amount = max(0.0, original_shares * float(entry_price or 0))
+    current_exposure = _current_code_exposure(positions, code)
+    max_exposure = max(0.0, float(total_assets or 0) * cap_rate)
+    allowed = max_exposure - current_exposure
+    fields: dict[str, Any] = {
+        "pm_per_code_cap_enabled": True,
+        "pm_per_code_cap_rate": cap_rate,
+        "pm_per_code_current_exposure": round(current_exposure, 2),
+        "pm_per_code_max_exposure": round(max_exposure, 2),
+        "pm_per_code_allowed_additional_buy": round(allowed, 2),
+        "pm_per_code_cap_original_shares": original_shares,
+        "pm_per_code_cap_original_amount": round(original_amount, 2),
+        "pm_per_code_cap_shares": original_shares,
+        "pm_per_code_cap_amount": round(original_amount, 2),
+        "pm_per_code_cap_reduced": False,
+        "pm_per_code_cap_skip": False,
+        "pm_per_code_cap_reason": "",
+    }
+    if original_shares <= 0 or entry_price <= 0:
+        item.update(fields)
+        return shares, fields
+    if allowed <= 0:
+        fields.update(
+            {
+                "pm_per_code_cap_shares": 0,
+                "pm_per_code_cap_amount": 0.0,
+                "pm_per_code_cap_reduced": True,
+                "pm_per_code_cap_skip": True,
+                "pm_per_code_cap_reason": "per_code_exposure_cap",
+            }
+        )
+        item.update(fields)
+        return 0, fields
+    if original_amount <= allowed:
+        item.update(fields)
+        return shares, fields
+    lot_size = _round_lot_size(config) if _use_round_lot(config) else 1
+    capped_lots = int(allowed // (entry_price * lot_size))
+    capped_shares = capped_lots * lot_size
+    reason = "per_code_exposure_cap"
+    if capped_shares <= 0:
+        reason = "per_code_exposure_cap_scaled_below_round_lot"
+    fields.update(
+        {
+            "pm_per_code_cap_shares": capped_shares,
+            "pm_per_code_cap_amount": round(capped_shares * entry_price, 2),
+            "pm_per_code_cap_reduced": True,
+            "pm_per_code_cap_skip": capped_shares <= 0,
+            "pm_per_code_cap_reason": reason,
+        }
+    )
+    item.update(fields)
+    return capped_shares, fields
 
 
 def _daily_buy_limit_info(config: dict[str, Any], total_assets: float | None = None) -> dict[str, Any]:
@@ -1400,6 +1505,18 @@ def _purchase_audit_event(
         "pm_resized_shares",
         "pm_resized_amount",
         "pm_resize_reason",
+        "pm_per_code_cap_enabled",
+        "pm_per_code_cap_rate",
+        "pm_per_code_current_exposure",
+        "pm_per_code_max_exposure",
+        "pm_per_code_allowed_additional_buy",
+        "pm_per_code_cap_original_shares",
+        "pm_per_code_cap_original_amount",
+        "pm_per_code_cap_shares",
+        "pm_per_code_cap_amount",
+        "pm_per_code_cap_reduced",
+        "pm_per_code_cap_skip",
+        "pm_per_code_cap_reason",
     ]:
         event[key] = item.get(key, "")
     return event
@@ -1752,6 +1869,18 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "pm_resized_shares",
         "pm_resized_amount",
         "pm_resize_reason",
+        "pm_per_code_cap_enabled",
+        "pm_per_code_cap_rate",
+        "pm_per_code_current_exposure",
+        "pm_per_code_max_exposure",
+        "pm_per_code_allowed_additional_buy",
+        "pm_per_code_cap_original_shares",
+        "pm_per_code_cap_original_amount",
+        "pm_per_code_cap_shares",
+        "pm_per_code_cap_amount",
+        "pm_per_code_cap_reduced",
+        "pm_per_code_cap_skip",
+        "pm_per_code_cap_reason",
     ]
     snapshot = {key: position.get(key) for key in keys if key in position}
     if "relative_strength_score" in snapshot and snapshot["relative_strength_score"] is None:
@@ -2294,6 +2423,7 @@ def execute_real_data_paper_trade(
         planned_shares = shares
         planned_amount = shares * entry_price if shares > 0 else 0.0
         pm_sizing_fields: dict[str, Any] = {}
+        per_code_cap_fields: dict[str, Any] = {}
         if shares > 0:
             shares, pm_sizing_fields = _apply_portfolio_manager_sizing(
                 item=item,
@@ -2305,6 +2435,17 @@ def execute_real_data_paper_trade(
             )
             if shares <= 0:
                 skipped_reason = str(pm_sizing_fields.get("pm_resize_reason") or "pm_sizing_scaled_below_round_lot")
+        if shares > 0:
+            shares, per_code_cap_fields = _apply_per_code_exposure_cap(
+                item=item,
+                shares=shares,
+                entry_price=entry_price,
+                positions=next_positions,
+                total_assets=current_total_assets,
+                config=config,
+            )
+            if shares <= 0:
+                skipped_reason = str(per_code_cap_fields.get("pm_per_code_cap_reason") or "per_code_exposure_cap")
         scaled_buy_fields: dict[str, Any] = {}
         if shares <= 0 and allocation_reason in {"insufficient_available_cash", "target_exposure_limit"}:
             skipped_reason = allocation_reason
@@ -2312,7 +2453,7 @@ def execute_real_data_paper_trade(
             shares <= 0
             and _capital_utilization_enabled(config)
             and not ai_purchase_active
-            and skipped_reason not in {"pm_low_score_skip", "pm_sizing_scaled_below_round_lot"}
+            and skipped_reason not in {"pm_low_score_skip", "pm_sizing_scaled_below_round_lot", "per_code_exposure_cap", "per_code_exposure_cap_scaled_below_round_lot"}
         ):
             skipped_reason = "selected_but_not_affordable"
         if shares <= 0:
@@ -2353,6 +2494,7 @@ def execute_real_data_paper_trade(
                         extra_fields={
                             **dynamic_exposure_fields,
                             **pm_sizing_fields,
+                            **per_code_cap_fields,
                             "affordable_fallback_attempted": True,
                             "affordable_fallback_replaced_by_code": fallback_item.get("code"),
                             "affordable_fallback_replaced_by_name": fallback_item.get("name"),
@@ -2380,6 +2522,7 @@ def execute_real_data_paper_trade(
                 current_price = _candidate_market_price(item, entry_price)
                 shares, skipped_reason = _calculate_buy_shares(entry_price, allocation, config)
                 pm_sizing_fields = {}
+                per_code_cap_fields = {}
                 if shares > 0:
                     shares, pm_sizing_fields = _apply_portfolio_manager_sizing(
                         item=item,
@@ -2391,6 +2534,17 @@ def execute_real_data_paper_trade(
                     )
                     if shares <= 0:
                         skipped_reason = str(pm_sizing_fields.get("pm_resize_reason") or "pm_sizing_scaled_below_round_lot")
+                if shares > 0:
+                    shares, per_code_cap_fields = _apply_per_code_exposure_cap(
+                        item=item,
+                        shares=shares,
+                        entry_price=entry_price,
+                        positions=next_positions,
+                        total_assets=current_total_assets,
+                        config=config,
+                    )
+                    if shares <= 0:
+                        skipped_reason = str(per_code_cap_fields.get("pm_per_code_cap_reason") or "per_code_exposure_cap")
                 if shares <= 0:
                     fallback_item = None
             if fallback_item:
@@ -2399,6 +2553,7 @@ def execute_real_data_paper_trade(
                 no_fallback_extra = {
                     **dynamic_exposure_fields,
                     **pm_sizing_fields,
+                    **per_code_cap_fields,
                     "affordable_fallback_attempted": _is_affordable_fallback_skip_reason(skipped_reason)
                     and _affordable_fallback_enabled(config),
                     "affordable_fallback_no_candidate": _is_affordable_fallback_skip_reason(skipped_reason)
@@ -2470,7 +2625,7 @@ def execute_real_data_paper_trade(
                     skipped_reason=skipped_reason,
                     config=config,
                     allocation_reason=allocation_reason,
-                    extra_fields={**dynamic_exposure_fields, **pm_sizing_fields},
+                    extra_fields={**dynamic_exposure_fields, **pm_sizing_fields, **per_code_cap_fields},
                 )
             )
             if purchase_audit_active:
@@ -2523,6 +2678,7 @@ def execute_real_data_paper_trade(
             **scaled_buy_fields,
             **ai_purchase_fields,
             **pm_sizing_fields,
+            **per_code_cap_fields,
             **_technical_snapshot(item),
             "unrealized_profit": round(shares * (current_price - entry_price), 2),
             "unrealized_profit_rate": round((current_price - entry_price) / entry_price, 4) if entry_price else 0.0,
@@ -2545,6 +2701,7 @@ def execute_real_data_paper_trade(
             **scaled_buy_fields,
             **ai_purchase_fields,
             **pm_sizing_fields,
+            **per_code_cap_fields,
             "score": item["total_score"],
             "entry_score": item["total_score"],
             "rank": item.get("rank"),
@@ -2690,6 +2847,7 @@ def execute_real_data_paper_trade(
         planned_shares = shares
         planned_amount = shares * entry_price if shares > 0 else 0.0
         pm_sizing_fields: dict[str, Any] = {}
+        per_code_cap_fields: dict[str, Any] = {}
         if shares > 0:
             shares, pm_sizing_fields = _apply_portfolio_manager_sizing(
                 item=fallback_item,
@@ -2701,6 +2859,17 @@ def execute_real_data_paper_trade(
             )
             if shares <= 0:
                 skipped_reason = str(pm_sizing_fields.get("pm_resize_reason") or "pm_sizing_scaled_below_round_lot")
+        if shares > 0:
+            shares, per_code_cap_fields = _apply_per_code_exposure_cap(
+                item=fallback_item,
+                shares=shares,
+                entry_price=entry_price,
+                positions=next_positions,
+                total_assets=current_total_assets,
+                config=config,
+            )
+            if shares <= 0:
+                skipped_reason = str(per_code_cap_fields.get("pm_per_code_cap_reason") or "per_code_exposure_cap")
         max_positions_remaining_before = max(0, max_positions - len(next_positions) - len(pending_buy_codes))
         if shares > 0:
             shares, scaled_buy_fields = _scale_buy_to_daily_limit(
@@ -2736,6 +2905,7 @@ def execute_real_data_paper_trade(
             "reason": fallback_item.get("selection_reason") or fallback_item.get("selected_reason") or fallback_item["reason"],
             **scaled_buy_fields,
             **pm_sizing_fields,
+            **per_code_cap_fields,
             **_technical_snapshot(fallback_item),
             "unrealized_profit": round(shares * (current_price - entry_price), 2),
             "unrealized_profit_rate": round((current_price - entry_price) / entry_price, 4) if entry_price else 0.0,
@@ -2757,6 +2927,7 @@ def execute_real_data_paper_trade(
             "buy_commission": buy_commission,
             **scaled_buy_fields,
             **pm_sizing_fields,
+            **per_code_cap_fields,
             "score": fallback_item["total_score"],
             "rank": fallback_item.get("rank"),
             "daily_score_rank": fallback_item.get("daily_score_rank") or fallback_item.get("rank"),

@@ -84,6 +84,8 @@ PROFILE_ALIASES = {
     "rookie_dealer_02_v2_75": "rookie_dealer_02_v2_75_pm_ai_high_minus_avoid_sizing",
     "rookie_dealer_02_v2.76": "rookie_dealer_02_v2_76_pm_ai_low_score_skip",
     "rookie_dealer_02_v2_76": "rookie_dealer_02_v2_76_pm_ai_low_score_skip",
+    "rookie_dealer_02_v2.77": "rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap",
+    "rookie_dealer_02_v2_77": "rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap",
 }
 
 

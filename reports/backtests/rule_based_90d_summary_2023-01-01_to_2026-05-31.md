@@ -3,11 +3,11 @@
 ## 実行条件
 
 - 期間: 2023-01-01 〜 2026-05-31
-- profile: rookie_dealer_02_v2_76_pm_ai_low_score_skip 新人ディーラー2号 v2.76 PM AI low score skip
+- profile: rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030_pool_x3 新人ディーラー2号 v2.77 PM AI low score skip + per-code cap 0.30 candidate pool x3
 - provider: jquants
 - ChatGPT/OpenAI: disabled
 - broker: paper
-- config_version: cfg_88f06c1
+- config_version: cfg_e747756
 
 ## Backtest Date Range Audit
 
@@ -54,7 +54,7 @@
 ### Hardcoded Date Audit
 
 - target: 2026-03-06
-- match_count: 686
+- match_count: 283
 - warning: 2026-03-06 remains in config/src/docs/reports/README
 
 ### Processed Data Audit
@@ -70,30 +70,30 @@
 - match: config/provider.yaml
 - match: src/db.py
 - match: src/main.py
-- match: src/__pycache__/main.cpython-312.pyc
-- match: src/__pycache__/db.cpython-312.pyc
 - match: src/ml/capital_allocation_audit.py
 - match: reports/backtest_2026-03-06_to_2026-03-06.json
 - match: reports/backtest_2026-03-06_to_2026-03-06.md
 - match: reports/day_2026-03-06.md
-- match: reports/rookie_dealer_02_v2_69/backtest_2021-06-01_to_2026-05-31.json
+- match: reports/rookie_dealer_02_v2_74_ml_ranked_exit_ai_affordable_fallback/backtest_2023-01-01_to_2026-05-31.json
+- match: reports/rookie_dealer_02_v2_74_ml_ranked_exit_ai_affordable_fallback/backtest_2023-01-01_to_2026-05-31.md
+- match: reports/rookie_dealer_02_v2_66/backtest_2026-02-01_to_2026-02-28.md
 
 ## 結果サマリ
 
 - 初期資金: 1,000,000円
-- 最終資産: 5,764,293円
-- 税引前損益: 4,784,293円
-- 税引後損益: 3,812,364円
-- 税引後損益率: 381.24%
-- 勝率: 55.05%
-- profit factor: 2.57
-- 最大ドローダウン: -19.38%
-- 総取引数: 505
-- 利確回数: 96
-- 損切り回数: 164
-- 最大保有期間売却回数: 227
+- 最終資産: 4,142,792円
+- 税引前損益: 3,162,792円
+- 税引後損益: 2,520,271円
+- 税引後損益率: 252.03%
+- 勝率: 51.59%
+- profit factor: 2.32
+- 最大ドローダウン: -8.04%
+- 総取引数: 504
+- 利確回数: 84
+- 損切り回数: 178
+- 最大保有期間売却回数: 223
 - no trade日数: 276
-- selected_count合計: 1375
+- selected_count合計: 1457
 
 ## 新人ディーラー1号コメント
 

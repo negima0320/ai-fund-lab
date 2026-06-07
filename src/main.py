@@ -21436,6 +21436,18 @@ def write_purchase_audit_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "pm_resized_shares",
         "pm_resized_amount",
         "pm_resize_reason",
+        "pm_per_code_cap_enabled",
+        "pm_per_code_cap_rate",
+        "pm_per_code_current_exposure",
+        "pm_per_code_max_exposure",
+        "pm_per_code_allowed_additional_buy",
+        "pm_per_code_cap_original_shares",
+        "pm_per_code_cap_original_amount",
+        "pm_per_code_cap_shares",
+        "pm_per_code_cap_amount",
+        "pm_per_code_cap_reduced",
+        "pm_per_code_cap_skip",
+        "pm_per_code_cap_reason",
     ]
     try:
         output_rows = [{field: row.get(field, "") for field in fieldnames} for row in rows]
