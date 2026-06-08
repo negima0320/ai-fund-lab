@@ -1,27 +1,33 @@
 # Current ML Handoff
 
-Last updated: `2026-06-07`
+Last updated: `2026-06-08`
 
 This document is the short handoff for continuing the AI / ML work in a fresh
 chat. It intentionally summarizes only the current state, key constraints, and
 next useful actions. For the full history, see
-`docs/ml/ML_Phase_25_to_Portfolio_Manager_AI_Summary.md` and
-`docs/ml/Exit_AI_v2_Phase5A_to_5F_Retraining_Summary.md`.
+`docs/ml/ML_Phase_25_to_Portfolio_Manager_AI_Summary.md`,
+`docs/ml/Exit_AI_v2_Phase5A_to_5F_Retraining_Summary.md`,
+`docs/ml/Portfolio_Manager_AI_Phase7A_to_7G_Final_Summary.md`, and
+`docs/ml/Portfolio_Manager_AI_Phase8A_to_8H_PM_AI_Redesign_Summary.md`.
 
 ## Current State
 
-The latest full-backtested strongest balanced research profile is:
+The latest full-backtested Version 1.0 Candidate remains:
 
 ```text
-rookie_dealer_02_v2_78_pm_aware_order_fallback_w025
+rookie_dealer_02_v2_82_cap38
 ```
 
 Important reference profiles are:
 
 ```text
+rookie_dealer_02_v2_82_cap38
+rookie_dealer_02_v2_78_pm_aware_order_fallback_w025
 rookie_dealer_02_v2_79_high_pm_min_hold_5d
 rookie_dealer_02_v2_79_high_pm_min_hold_7d
-rookie_dealer_02_v2_78_pm_aware_order_fallback_w025
+rookie_dealer_02_v2_90_pm_ai_v2_api_only_cap38
+rookie_dealer_02_v2_91_pm_ai_v2_calibrated_rule_e_cap38
+rookie_dealer_02_v2_92_relative_allocator_cap38
 rookie_dealer_02_v2_77_pm_ai_low_score_skip_per_code_cap_030
 rookie_dealer_02_v2_76_pm_ai_low_score_skip
 rookie_dealer_02_v2_75_pm_ai_high_minus_avoid_sizing
@@ -36,6 +42,31 @@ Profile lineage:
 - v2_77 cap 0.30: derives from v2_76 and adds per-code exposure cap `0.30`.
 - v2_78 w0.25: derives from v2_77 cap 0.30 and adds PM-aware selected ordering plus selected fallback.
 - v2_79 5d/7d: derives from v2_78 w0.25 and suppresses Exit AI early exits only for high-PM positions; numerically stronger in Phase 4-C, but held back after Phase 4-F/G because the intended minimum-hold guard did not directly fire.
+- v2_82 cap38: derives from v2_78 behavior and relaxes per-code exposure cap to `0.38`; current Version 1.0 Candidate.
+- v2_90: integrates API-only PM AI v2 raw; rejected because PM 1.30 disappeared and utilization collapsed.
+- v2_91: calibrates PM AI v2 to recover PM 1.30 count; rejected because PM 1.30 quality did not recover.
+- v2_92: rule-based same-day relative allocator using Stock Selection ranks; operationally valid but rejected after underperforming v2_82.
+
+Current v2_82 core result:
+
+| metric | value |
+|---|---:|
+| net_profit | `3,777,545` |
+| PF | `2.7309` |
+| DD | `-6.54%` |
+| win_rate | `55.11%` |
+| monthly_win_rate | `78.05%` |
+| average_capital_utilization | `40.49%` |
+| final_assets | `5,720,597` |
+| CAGR | `66.74%` |
+
+Phase 8 decision:
+
+- Keep v2_82 as the Version 1.0 Candidate.
+- Do not promote PM AI v2 candidate.
+- Do not promote calibrated PM AI v2.
+- Do not promote v2_92 relative allocator.
+- Do not overwrite current PM AI or Exit AI model directories.
 
 Portfolio Manager AI score:
 
@@ -67,29 +98,32 @@ and adds a per-code exposure cap to address v2_76's drawdown concentration.
 
 ## Latest Commit and Working Tree
 
-Latest committed code before this handoff update:
+This handoff was updated after Phase 8-H and is intended to be committed with
+the Phase 8 PM AI redesign / relative allocator work.
+
+Recent active work includes:
+
+- Phase 8-A System Understanding Audit
+- Phase 8-B PM AI Candidate Integration Audit
+- Phase 8-C PM AI v2 raw integration backtest
+- Phase 8-D PM AI v2 calibration audit
+- Phase 8-E calibrated PM AI v2 backtest
+- Phase 8-F PM AI label redesign audit
+- Phase 8-G ranking / relative allocation audit
+- Phase 8-H rule-based relative allocator implementation and backtest
+
+Current generated reports of interest:
 
 ```text
-4145ba8 Add AI retraining phase 5 audits
+reports/ml/phase8a_system_understanding_audit_2023-01_to_2026-05.md
+reports/ml/phase8b_pm_candidate_integration_audit_2023-01_to_2026-05.md
+reports/ml/phase8c_pm_ai_v2_backtest_2023-01_to_2026-05.md
+reports/ml/phase8d_pm_ai_v2_calibration_audit_2023-01_to_2026-05.md
+reports/ml/phase8e_pm_ai_v2_calibrated_backtest_2023-01_to_2026-05.md
+reports/ml/phase8f_pm_ai_label_redesign_audit_2023-01_to_2026-05.md
+reports/ml/phase8g_pm_ai_ranking_audit_2023-01_to_2026-05.md
+reports/ml/phase8h_relative_allocator_backtest_2023-01_to_2026-05.md
 ```
-
-Recent relevant commits:
-
-```text
-4145ba8 Add AI retraining phase 5 audits
-29139a6 Add portfolio manager phase 4 audits
-970a02d Document portfolio manager phase 4 updates
-e03294e Add portfolio manager audit and high PM hold profiles
-ea139c5 Add portfolio manager AI audits and v2_77 variants
-```
-
-Current uncommitted work includes Phase 5-B cleanup, Phase 5-C builder,
-Phase 5-D training design, Phase 5-E trainer prototype, Phase 5-F candidate
-model output, and this documentation update:
-
-- `docs/ml/README.md`
-- `docs/ml/CURRENT_HANDOFF.md`
-- `docs/ml/Exit_AI_v2_Phase5A_to_5F_Retraining_Summary.md`
 
 ## Important Artifacts
 

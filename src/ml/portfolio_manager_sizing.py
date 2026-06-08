@@ -37,6 +37,12 @@ class PortfolioManagerSizingDecision:
     model_version: str
     feature_found: bool
     warning: str = ""
+    model_path: str = ""
+    api_only_candidate_enabled: bool = False
+    feature_missing_count: int | None = None
+    calibration_rule: str = ""
+    calibration_thresholds: dict[str, Any] | None = None
+    raw_multiplier: float | None = None
 
     def as_fields(self) -> dict[str, Any]:
         status = "ok"
@@ -44,7 +50,7 @@ class PortfolioManagerSizingDecision:
         if self.warning:
             missing_reason = self.warning
             status = "missing" if not self.feature_found else "warning"
-        return {
+        fields = {
             "pm_ai_enabled": True,
             "pm_status": status,
             "pm_missing_reason": missing_reason,
@@ -56,7 +62,26 @@ class PortfolioManagerSizingDecision:
             "pm_model_version": self.model_version,
             "pm_feature_found": self.feature_found,
             "pm_warning": self.warning,
+            "pm_model_path": self.model_path,
+            "pm_api_only_candidate_enabled": self.api_only_candidate_enabled,
+            "pm_calibration_rule": self.calibration_rule,
+            "pm_calibration_thresholds": json.dumps(self.calibration_thresholds or {}, sort_keys=True),
         }
+        if self.api_only_candidate_enabled:
+            fields.update(
+                {
+                    "pm_candidate_high_conviction_proba": self.high_conviction_proba,
+                    "pm_candidate_avoid_proba": self.avoid_proba,
+                    "pm_candidate_score": self.score,
+                    "pm_candidate_multiplier": self.multiplier,
+                    "pm_candidate_multiplier_raw": self.raw_multiplier if self.raw_multiplier is not None else self.multiplier,
+                    "pm_candidate_multiplier_calibrated": self.multiplier,
+                    "pm_candidate_feature_missing_count": self.feature_missing_count,
+                    "pm_candidate_prediction_available": self.feature_found,
+                    "pm_candidate_fallback_reason": self.warning,
+                }
+            )
+        return fields
 
 
 class PortfolioManagerSizingAdvisor:
@@ -68,16 +93,27 @@ class PortfolioManagerSizingAdvisor:
         model_dir: str | Path = DEFAULT_PM_MODEL_DIR,
         dataset_path: str | Path = DEFAULT_PM_DATASET,
         expected_feature_count: int = EXPECTED_CLEAN_FEATURE_COUNT,
+        calibration_rule: str = "",
+        calibration_thresholds: dict[str, Any] | None = None,
     ) -> None:
         self.root = Path(root)
         self.model_dir = self._resolve(model_dir)
         self.dataset_path = self._resolve(dataset_path)
         self.expected_feature_count = int(expected_feature_count)
+        self.calibration_rule = str(calibration_rule or "")
+        self.calibration_thresholds = calibration_thresholds or {}
         self.feature_columns = self._load_feature_columns()
         self._assert_feature_columns()
         self.metadata = self._load_metadata()
-        self.high_model = self._load_model("high_conviction_target_classification.joblib")
-        self.avoid_model = self._load_model("avoid_target_classification.joblib")
+        self.preprocess = self._load_preprocess()
+        self.high_model = self._load_model(
+            "high_conviction_target_classification.joblib",
+            "high_conviction_target_classifier.joblib",
+        )
+        self.avoid_model = self._load_model(
+            "avoid_target_classification.joblib",
+            "avoid_target_classifier.joblib",
+        )
         self.features = self._load_feature_store()
 
     def decision_for(self, signal_date: str, code: str) -> PortfolioManagerSizingDecision:
@@ -93,14 +129,20 @@ class PortfolioManagerSizingAdvisor:
                 model_version=self.model_version,
                 feature_found=False,
                 warning="pm_feature_row_missing",
+                model_path=str(self.model_dir),
+                api_only_candidate_enabled=self.api_only_candidate_enabled,
+                feature_missing_count=None,
+                calibration_rule=self.calibration_rule,
+                calibration_thresholds=self.calibration_thresholds,
+                raw_multiplier=1.0,
             )
-        frame = pd.DataFrame([row], columns=self.feature_columns)
-        for column in self.feature_columns:
-            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        feature_missing_count = sum(1 for column in self.feature_columns if pd.isna(row.get(column)))
+        frame = self._transform_features(pd.DataFrame([row], columns=self.feature_columns), self.high_model)
         high = self._positive_probability(self.high_model, frame)
         avoid = self._positive_probability(self.avoid_model, frame)
         score = high - avoid
-        multiplier = multiplier_from_high_minus_avoid(high, avoid)
+        raw_multiplier = multiplier_from_high_minus_avoid(high, avoid)
+        multiplier = self._calibrated_multiplier(score, raw_multiplier)
         return PortfolioManagerSizingDecision(
             high_conviction_proba=high,
             avoid_proba=avoid,
@@ -109,12 +151,23 @@ class PortfolioManagerSizingAdvisor:
             feature_count=len(self.feature_columns),
             model_version=self.model_version,
             feature_found=True,
+            model_path=str(self.model_dir),
+            api_only_candidate_enabled=self.api_only_candidate_enabled,
+            feature_missing_count=feature_missing_count,
+            calibration_rule=self.calibration_rule,
+            calibration_thresholds=self.calibration_thresholds,
+            raw_multiplier=raw_multiplier,
         )
 
     @property
     def model_version(self) -> str:
         value = self.metadata.get("model_profile") or self.metadata.get("created_at") or self.model_dir.name
         return str(value)
+
+    @property
+    def api_only_candidate_enabled(self) -> bool:
+        profile = str(self.metadata.get("model_profile") or "")
+        return "api_only" in profile or "candidate_v2_api_only" in str(self.model_dir)
 
     def _resolve(self, path: str | Path) -> Path:
         candidate = Path(path)
@@ -147,26 +200,94 @@ class PortfolioManagerSizingAdvisor:
             payload = json.load(fh)
         return payload if isinstance(payload, dict) else {}
 
-    def _load_model(self, filename: str) -> Any:
+    def _load_preprocess(self) -> dict[str, Any]:
+        path = self.model_dir / "preprocess.json"
+        if not path.exists():
+            return {}
+        with path.open(encoding="utf-8") as fh:
+            payload = json.load(fh)
+        return payload if isinstance(payload, dict) else {}
+
+    def _load_model(self, *filenames: str) -> Any:
         import joblib
 
-        return joblib.load(self.model_dir / filename)
+        for filename in filenames:
+            path = self.model_dir / filename
+            if path.exists():
+                return joblib.load(path)
+        raise FileNotFoundError(f"Portfolio Manager model file not found in {self.model_dir}: {filenames}")
 
     def _load_feature_store(self) -> dict[tuple[str, str], dict[str, Any]]:
-        df = pd.read_parquet(self.dataset_path, columns=["signal_date", "code", *self.feature_columns])
-        df["signal_date"] = pd.to_datetime(df["signal_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        date_column = self._feature_store_date_column()
+        df = pd.read_parquet(self.dataset_path, columns=[date_column, "code", *self.feature_columns])
+        df[date_column] = pd.to_datetime(df[date_column], errors="coerce").dt.strftime("%Y-%m-%d")
         df["code"] = df["code"].astype(str)
-        df = df.dropna(subset=["signal_date", "code"]).drop_duplicates(["signal_date", "code"], keep="last")
+        df = df.dropna(subset=[date_column, "code"]).drop_duplicates([date_column, "code"], keep="last")
         return {
-            (str(row["signal_date"]), str(row["code"])): {column: row.get(column) for column in self.feature_columns}
+            (str(row[date_column]), str(row["code"])): {column: row.get(column) for column in self.feature_columns}
             for row in df.to_dict(orient="records")
         }
+
+    def _feature_store_date_column(self) -> str:
+        try:
+            import pyarrow.parquet as pq
+
+            names = set(pq.read_schema(self.dataset_path).names)
+            if "signal_date" in names:
+                return "signal_date"
+            if "as_of_date" in names:
+                return "as_of_date"
+        except Exception:
+            pass
+        return "signal_date"
+
+    def _transform_features(self, frame: pd.DataFrame, model: Any | None = None) -> pd.DataFrame:
+        out = frame.copy()
+        medians = self.preprocess.get("medians", {}) if isinstance(self.preprocess.get("medians"), dict) else {}
+        missing_indicators = self.preprocess.get("missing_indicator_columns", [])
+        missing_indicators = [str(column) for column in missing_indicators] if isinstance(missing_indicators, list) else []
+        for column in self.feature_columns:
+            out[column] = pd.to_numeric(out[column], errors="coerce")
+        for column in missing_indicators:
+            if column in out.columns:
+                out[f"{column}_missing"] = out[column].isna().astype(int)
+        for column in self.feature_columns:
+            if column in medians:
+                out[column] = out[column].fillna(float(medians[column]))
+        ordered_columns = list(self.feature_columns) + [
+            f"{column}_missing" for column in missing_indicators if f"{column}_missing" in out.columns
+        ]
+        model_columns = [str(column) for column in getattr(model, "feature_names_in_", [])]
+        if model_columns:
+            for column in model_columns:
+                if column not in out.columns:
+                    out[column] = 0
+            ordered_columns = model_columns
+        return out[ordered_columns]
 
     def _positive_probability(self, model: Any, frame: pd.DataFrame) -> float:
         if hasattr(model, "predict_proba"):
             probabilities = model.predict_proba(frame)
             return float(probabilities[0][1])
         return float(model.predict(frame)[0])
+
+    def _calibrated_multiplier(self, score: float, raw_multiplier: float) -> float:
+        rule = self.calibration_rule.strip().lower()
+        if rule not in {"rule_e", "rule e", "quantile_match_current_pm_distribution"}:
+            return raw_multiplier
+        thresholds = {
+            "pm130_score_min": -0.12284356890271281,
+            "pm115_score_min": -0.1443989258328934,
+            "pm080_score_max": -0.2072886007777547,
+            **self.calibration_thresholds,
+        }
+        if score >= float(thresholds["pm130_score_min"]):
+            return 1.30
+        if score >= float(thresholds["pm115_score_min"]):
+            return 1.15
+        if score <= float(thresholds["pm080_score_max"]):
+            return 0.80
+        return 1.00
 
 
 def multiplier_from_high_minus_avoid(high_proba: float | None, avoid_proba: float | None) -> float:

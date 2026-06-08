@@ -61,6 +61,14 @@ adoption notes for the AI / ML stack.
   - final pytest failure triage
   - current decision: `v2_82_cap38` is the Version 1.0 Candidate; PM AI API-only candidate is trained but not integrated
 
+- `Portfolio_Manager_AI_Phase8A_to_8H_PM_AI_Redesign_Summary.md`
+  - system understanding and PM AI contribution audit
+  - PM AI API-only candidate integration, calibration, and label redesign audits
+  - v2_90 / v2_91 PM AI v2 backtest rejection
+  - Phase 8-G ranking / relative allocation audit
+  - v2_92 rule-based relative allocator backtest rejection
+  - current decision: keep `v2_82_cap38`; do not promote PM AI v2 or the relative allocator
+
 ## Adoption Notes
 
 - `v2_66_ml_ranked_adoption_notes.md`
@@ -114,7 +122,20 @@ PM AI API-only research candidate:
   - trained from API-only PM dataset, not from backtest outcomes
   - current PM AI `models/ml/portfolio_manager/current_v2_73_phase3b_clean` was not overwritten
   - high conviction test AUC `0.6472`; avoid target test AUC `0.6345`
-  - not integrated into v2_82; requires a separate integration audit
+  - Phase 8-B to 8-F confirmed the model is clean but not a viable replacement
+    for the current PM AI in v2_82
+  - v2_90 raw integration and v2_91 calibrated integration both underperformed
+    v2_82 and were not adopted
+
+Rule-based relative allocator research profile:
+
+- `rookie_dealer_02_v2_92_relative_allocator_cap38`
+  - uses same-day candidate relative rank / percentile instead of current PM AI
+  - Rule C `blended_relative_score` backtest was operationally valid but
+    underperformed
+  - result: net profit `940,647`, PF `1.5118`, DD `-11.56%`, win rate `43.89%`
+  - decision: do not adopt; keep v2_82
+  - see `Portfolio_Manager_AI_Phase8A_to_8H_PM_AI_Redesign_Summary.md`
 
 - `daily_ai_candidate_operation.md`
   - human-review daily AI candidate output

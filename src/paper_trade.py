@@ -26,7 +26,7 @@ from safety import can_trade, safety_event
 from tax import calculate_period_profit_summary
 
 
-_PM_SIZING_ADVISOR_CACHE: dict[tuple[str, str, int], PortfolioManagerSizingAdvisor] = {}
+_PM_SIZING_ADVISOR_CACHE: dict[tuple[Any, ...], PortfolioManagerSizingAdvisor] = {}
 _EXIT_AI_V2_GATE_ADVISOR_CACHE: dict[tuple[str, str, str], "ExitAIV2GateAdvisor"] = {}
 _BEAR_PM_BOOSTER_REGIME_CACHE: dict[str, dict[str, str]] = {}
 
@@ -523,6 +523,15 @@ def _portfolio_manager_sizing_enabled(config: dict[str, Any]) -> bool:
     return bool(_portfolio_manager_sizing_policy(config).get("enabled", False))
 
 
+def _relative_allocator_policy(config: dict[str, Any]) -> dict[str, Any]:
+    policy = config.get("relative_allocator")
+    return policy if isinstance(policy, dict) else {}
+
+
+def _relative_allocator_enabled(config: dict[str, Any]) -> bool:
+    return bool(_relative_allocator_policy(config).get("enabled", False))
+
+
 def _portfolio_manager_low_score_skip_policy(config: dict[str, Any]) -> tuple[bool, float]:
     policy = _portfolio_manager_sizing_policy(config)
     enabled = bool(policy.get("low_score_skip_enabled", False))
@@ -944,12 +953,18 @@ def _portfolio_manager_sizing_advisor(config: dict[str, Any]) -> PortfolioManage
     model_dir = str(policy.get("model_dir") or DEFAULT_PM_MODEL_DIR)
     dataset_path = str(policy.get("dataset_path") or DEFAULT_PM_DATASET)
     expected_feature_count = int(policy.get("expected_feature_count") or EXPECTED_CLEAN_FEATURE_COUNT)
-    key = (model_dir, dataset_path, expected_feature_count)
+    calibration_rule = str(policy.get("pm_calibration_rule") or policy.get("calibration_rule") or "")
+    calibration_thresholds = policy.get("pm_calibration_thresholds") or policy.get("calibration_thresholds") or {}
+    if not isinstance(calibration_thresholds, dict):
+        calibration_thresholds = {}
+    key = (model_dir, dataset_path, expected_feature_count, calibration_rule, str(sorted(calibration_thresholds.items())))
     if key not in _PM_SIZING_ADVISOR_CACHE:
         _PM_SIZING_ADVISOR_CACHE[key] = PortfolioManagerSizingAdvisor(
             model_dir=model_dir,
             dataset_path=dataset_path,
             expected_feature_count=expected_feature_count,
+            calibration_rule=calibration_rule,
+            calibration_thresholds=calibration_thresholds,
         )
     return _PM_SIZING_ADVISOR_CACHE[key]
 
@@ -1016,26 +1031,48 @@ def _apply_portfolio_manager_sizing(
         )
         item.update(fields)
         return shares, fields
-    try:
-        advisor = _portfolio_manager_sizing_advisor(config)
-        decision = advisor.decision_for(str(item.get("signal_date") or item.get("date") or trade_date), str(item.get("code") or ""))
-        fields.update(decision.as_fields())
-    except Exception as exc:  # Defensive: PM sizing must not break the base trading engine.
+    if _relative_allocator_enabled(config):
+        multiplier = float(item.get("relative_multiplier") or item.get("pm_multiplier") or 1.0)
+        relative_score = _optional_float(item.get("relative_score"))
         fields.update(
             {
                 "pm_ai_enabled": True,
-                "pm_status": "error",
-                "pm_missing_reason": f"pm_sizing_error:{type(exc).__name__}",
-                "pm_feature_count": "",
+                "pm_status": "ok" if item.get("relative_multiplier") is not None else "missing",
+                "pm_missing_reason": "" if item.get("relative_multiplier") is not None else "relative_allocator_fields_missing",
+                "pm_feature_count": 0,
                 "pm_high_conviction_proba": None,
                 "pm_avoid_proba": None,
-                "pm_score": 0.0,
-                "pm_multiplier": 1.0,
-                "pm_model_version": "",
-                "pm_feature_found": False,
-                "pm_warning": f"pm_sizing_error:{type(exc).__name__}",
+                "pm_score": 0.0 if relative_score is None else relative_score,
+                "pm_multiplier": multiplier,
+                "pm_model_version": "relative_allocator_v1",
+                "pm_feature_found": item.get("relative_multiplier") is not None,
+                "pm_warning": "" if item.get("relative_multiplier") is not None else "relative_allocator_fields_missing",
+                "pm_model_path": "",
+                "pm_api_only_candidate_enabled": False,
+                "pm_multiplier_source": "relative_allocator",
             }
         )
+    else:
+        try:
+            advisor = _portfolio_manager_sizing_advisor(config)
+            decision = advisor.decision_for(str(item.get("signal_date") or item.get("date") or trade_date), str(item.get("code") or ""))
+            fields.update(decision.as_fields())
+        except Exception as exc:  # Defensive: PM sizing must not break the base trading engine.
+            fields.update(
+                {
+                    "pm_ai_enabled": True,
+                    "pm_status": "error",
+                    "pm_missing_reason": f"pm_sizing_error:{type(exc).__name__}",
+                    "pm_feature_count": "",
+                    "pm_high_conviction_proba": None,
+                    "pm_avoid_proba": None,
+                    "pm_score": 0.0,
+                    "pm_multiplier": 1.0,
+                    "pm_model_version": "",
+                    "pm_feature_found": False,
+                    "pm_warning": f"pm_sizing_error:{type(exc).__name__}",
+                }
+            )
     low_score_skip_enabled, low_score_skip_threshold = _portfolio_manager_low_score_skip_policy(config)
     if (
         low_score_skip_enabled
@@ -1160,6 +1197,19 @@ def _portfolio_manager_trade_fields(source: dict[str, Any]) -> dict[str, Any]:
         "pm_model_version",
         "pm_feature_found",
         "pm_warning",
+        "pm_model_path",
+        "pm_api_only_candidate_enabled",
+        "pm_calibration_rule",
+        "pm_calibration_thresholds",
+        "pm_candidate_high_conviction_proba",
+        "pm_candidate_avoid_proba",
+        "pm_candidate_score",
+        "pm_candidate_multiplier",
+        "pm_candidate_multiplier_raw",
+        "pm_candidate_multiplier_calibrated",
+        "pm_candidate_feature_missing_count",
+        "pm_candidate_prediction_available",
+        "pm_candidate_fallback_reason",
         "pm_base_planned_shares",
         "pm_base_planned_amount",
         "pm_target_amount",
@@ -1179,6 +1229,16 @@ def _portfolio_manager_trade_fields(source: dict[str, Any]) -> dict[str, Any]:
         "pm_per_code_cap_reduced",
         "pm_per_code_cap_skip",
         "pm_per_code_cap_reason",
+        "relative_allocator_enabled",
+        "relative_allocator_rule",
+        "relative_candidate_count",
+        "relative_rank",
+        "relative_percentile",
+        "relative_score",
+        "relative_source_score",
+        "relative_multiplier",
+        "relative_multiplier_reason",
+        "pm_multiplier_source",
         "buy_ordering_mode",
         "original_candidate_order",
         "pm_aware_candidate_order",
@@ -2034,6 +2094,139 @@ def _sort_selected_candidates_pm_aware(selected: list[dict[str, Any]], config: d
     return ordered
 
 
+def _apply_relative_allocator_to_candidates(selected: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
+    policy = _relative_allocator_policy(config)
+    enabled = bool(policy.get("enabled", False))
+    if not selected:
+        return selected
+    if not enabled:
+        for item in selected:
+            item.setdefault("relative_allocator_enabled", False)
+        return selected
+    rule = str(policy.get("rule") or "blended_relative_score")
+    items = [dict(item) for item in selected]
+    score_columns = ["risk_adjusted_score", "expected_return_10d", "bad_entry_probability_10d"]
+    percentiles = {column: _relative_percentiles(items, column, lower_is_better=(column == "bad_entry_probability_10d")) for column in score_columns}
+    for item in items:
+        code = str(item.get("code") or "")
+        relative_score = _relative_allocator_score(code, rule, percentiles)
+        rank = _relative_rank_for_score(relative_score, [score for score in (_relative_allocator_score(str(row.get("code") or ""), rule, percentiles) for row in items) if score is not None])
+        candidate_count = len(items)
+        percentile = 1.0 if candidate_count <= 1 else 1.0 - ((rank - 1.0) / float(candidate_count - 1))
+        multiplier, reason = _relative_multiplier_for(rule, rank, percentile)
+        source_score = _relative_source_score(item, rule)
+        item.update(
+            {
+                "relative_allocator_enabled": True,
+                "relative_allocator_rule": rule,
+                "relative_candidate_count": candidate_count,
+                "relative_rank": rank,
+                "relative_percentile": percentile,
+                "relative_score": relative_score,
+                "relative_source_score": source_score,
+                "relative_multiplier": multiplier,
+                "relative_multiplier_reason": reason,
+                "pm_multiplier_source": "relative_allocator",
+                "pm_ai_enabled": True,
+                "pm_status": "ok",
+                "pm_missing_reason": "",
+                "pm_feature_count": 0,
+                "pm_high_conviction_proba": None,
+                "pm_avoid_proba": None,
+                "pm_score": relative_score,
+                "pm_multiplier": multiplier,
+                "pm_model_version": "relative_allocator_v1",
+                "pm_feature_found": True,
+                "pm_warning": "",
+                "pm_model_path": "",
+                "pm_api_only_candidate_enabled": False,
+            }
+        )
+    return items
+
+
+def _relative_percentiles(items: list[dict[str, Any]], column: str, *, lower_is_better: bool = False) -> dict[str, float]:
+    values: list[tuple[str, float]] = []
+    for item in items:
+        value = _optional_float(item.get(column))
+        if value is not None:
+            values.append((str(item.get("code") or ""), value))
+    if not values:
+        return {}
+    ordered = sorted(values, key=lambda pair: (pair[1], pair[0]), reverse=not lower_is_better)
+    count = len(ordered)
+    out: dict[str, float] = {}
+    for index, (code, _value) in enumerate(ordered, start=1):
+        out[code] = 1.0 if count <= 1 else 1.0 - ((index - 1.0) / float(count - 1))
+    return out
+
+
+def _relative_allocator_score(code: str, rule: str, percentiles: dict[str, dict[str, float]]) -> float | None:
+    rule = rule.strip().lower()
+    if rule == "risk_adjusted_score_rank":
+        return percentiles.get("risk_adjusted_score", {}).get(code)
+    if rule == "expected_return_10d_rank":
+        return percentiles.get("expected_return_10d", {}).get(code)
+    risk = percentiles.get("risk_adjusted_score", {}).get(code)
+    expected = percentiles.get("expected_return_10d", {}).get(code)
+    bad_entry = percentiles.get("bad_entry_probability_10d", {}).get(code)
+    parts = [(risk, 0.45), (expected, 0.35), (bad_entry, 0.20)]
+    available = [(float(value), weight) for value, weight in parts if value is not None]
+    if not available:
+        return None
+    weight_sum = sum(weight for _value, weight in available)
+    return sum(value * weight for value, weight in available) / weight_sum if weight_sum else None
+
+
+def _relative_rank_for_score(score: float | None, scores: list[float]) -> int:
+    if score is None or not scores:
+        return 999999
+    better = sum(1 for value in scores if value > score)
+    return int(better + 1)
+
+
+def _relative_multiplier_for(rule: str, rank: int, percentile: float | None) -> tuple[float, str]:
+    if percentile is None:
+        return 1.0, "relative_score_missing"
+    rule = rule.strip().lower()
+    if rule == "no_pm_baseline":
+        return 1.0, "no_pm_baseline"
+    if rule == "conservative_blend":
+        if rank == 1:
+            return 1.30, "rank_1"
+        if rank == 2 or percentile >= 0.70:
+            return 1.15, "rank_2_or_top30pct"
+        if percentile <= 0.30:
+            return 0.80, "bottom30pct"
+        return 1.00, "middle"
+    if rank == 1 or percentile >= 0.90:
+        return 1.30, "rank_1_or_top10pct"
+    if percentile >= 0.75:
+        return 1.15, "top25pct"
+    if percentile <= 0.25:
+        return 0.80, "bottom25pct"
+    return 1.00, "middle"
+
+
+def _relative_source_score(item: dict[str, Any], rule: str) -> Any:
+    rule = rule.strip().lower()
+    if rule == "risk_adjusted_score_rank":
+        return item.get("risk_adjusted_score")
+    if rule == "expected_return_10d_rank":
+        return item.get("expected_return_10d")
+    if rule == "no_pm_baseline":
+        return ""
+    return json.dumps(
+        {
+            "risk_adjusted_score": item.get("risk_adjusted_score"),
+            "expected_return_10d": item.get("expected_return_10d"),
+            "bad_entry_probability_10d": item.get("bad_entry_probability_10d"),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
 def _purchase_audit_event(
     *,
     item: dict[str, Any],
@@ -2134,6 +2327,19 @@ def _purchase_audit_event(
         "pm_model_version",
         "pm_feature_found",
         "pm_warning",
+        "pm_model_path",
+        "pm_api_only_candidate_enabled",
+        "pm_calibration_rule",
+        "pm_calibration_thresholds",
+        "pm_candidate_high_conviction_proba",
+        "pm_candidate_avoid_proba",
+        "pm_candidate_score",
+        "pm_candidate_multiplier",
+        "pm_candidate_multiplier_raw",
+        "pm_candidate_multiplier_calibrated",
+        "pm_candidate_feature_missing_count",
+        "pm_candidate_prediction_available",
+        "pm_candidate_fallback_reason",
         "pm_base_planned_shares",
         "pm_base_planned_amount",
         "pm_target_amount",
@@ -2153,6 +2359,16 @@ def _purchase_audit_event(
         "pm_per_code_cap_reduced",
         "pm_per_code_cap_skip",
         "pm_per_code_cap_reason",
+        "relative_allocator_enabled",
+        "relative_allocator_rule",
+        "relative_candidate_count",
+        "relative_rank",
+        "relative_percentile",
+        "relative_score",
+        "relative_source_score",
+        "relative_multiplier",
+        "relative_multiplier_reason",
+        "pm_multiplier_source",
         "bear_pm_booster_enabled",
         "bear_pm_booster_applied",
         "bear_pm_booster_multiplier",
@@ -2509,6 +2725,19 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "pm_model_version",
         "pm_feature_found",
         "pm_warning",
+        "pm_model_path",
+        "pm_api_only_candidate_enabled",
+        "pm_calibration_rule",
+        "pm_calibration_thresholds",
+        "pm_candidate_high_conviction_proba",
+        "pm_candidate_avoid_proba",
+        "pm_candidate_score",
+        "pm_candidate_multiplier",
+        "pm_candidate_multiplier_raw",
+        "pm_candidate_multiplier_calibrated",
+        "pm_candidate_feature_missing_count",
+        "pm_candidate_prediction_available",
+        "pm_candidate_fallback_reason",
         "pm_base_planned_shares",
         "pm_base_planned_amount",
         "pm_target_amount",
@@ -2528,6 +2757,16 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "pm_per_code_cap_reduced",
         "pm_per_code_cap_skip",
         "pm_per_code_cap_reason",
+        "relative_allocator_enabled",
+        "relative_allocator_rule",
+        "relative_candidate_count",
+        "relative_rank",
+        "relative_percentile",
+        "relative_score",
+        "relative_source_score",
+        "relative_multiplier",
+        "relative_multiplier_reason",
+        "pm_multiplier_source",
         "bear_pm_booster_enabled",
         "bear_pm_booster_applied",
         "bear_pm_booster_multiplier",
@@ -2634,6 +2873,7 @@ def execute_real_data_paper_trade(
         if item.get("selected") and float(item["total_score"]) >= min_score and float(item["confidence"]) >= min_confidence
     ]
     selected = _sort_selected_candidates(selected, config)
+    selected = _apply_relative_allocator_to_candidates(selected, config)
     selected_codes_for_hold = {str(item.get("code") or "") for item in selected if item.get("code")}
     pending_orders = list(state.get("pending_orders", []))
     due_pending, future_pending = _split_due_pending_orders(pending_orders, trade_date)
