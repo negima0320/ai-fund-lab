@@ -1084,7 +1084,7 @@ def _apply_bear_pm_booster(
     before_amount = max(0.0, int(shares or 0) * float(entry_price or 0))
     pm_multiplier = _optional_float(item.get("pm_multiplier"))
     pm_score = _optional_float(item.get("pm_score"))
-    market_regime = _bear_pm_booster_regime_for_date(trade_date, config) if policy["enabled"] else ""
+    market_regime = _bear_pm_booster_regime_for_date(trade_date, config) if policy["enabled"] else str(item.get("market_regime") or "")
     fields: dict[str, Any] = {
         "market_regime": market_regime,
         "bear_pm_booster_enabled": bool(policy["enabled"]),
@@ -2335,6 +2335,7 @@ def _technical_snapshot(item: dict[str, Any]) -> dict[str, Any]:
         "investor_context_score": item.get("investor_context_score"),
         "market_filter_applied": item.get("market_filter_applied", False),
         "market_regime": item.get("market_regime"),
+        "entry_market_regime": item.get("entry_market_regime") or item.get("market_regime"),
         "advance_ratio": item.get("advance_ratio"),
         "market_average_change_rate": item.get("market_average_change_rate"),
         "classified_market_regime": item.get("classified_market_regime"),
@@ -2429,6 +2430,7 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "investor_context_score",
         "market_filter_applied",
         "market_regime",
+        "entry_market_regime",
         "advance_ratio",
         "market_average_change_rate",
         "classified_market_regime",
@@ -2545,6 +2547,8 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "holding_days_at_exit_signal",
     ]
     snapshot = {key: position.get(key) for key in keys if key in position}
+    if not snapshot.get("market_regime") and snapshot.get("entry_market_regime"):
+        snapshot["market_regime"] = snapshot["entry_market_regime"]
     if "relative_strength_score" in snapshot and snapshot["relative_strength_score"] is None:
         snapshot["relative_strength_score"] = 0.0
     return snapshot

@@ -32,6 +32,10 @@ CLI全体は次で確認できます。
 .venv/bin/python src/main.py --mode help
 ```
 
+## 運用方法
+
+日次運用と検証の手順は [docs/operations.md](docs/operations.md) を正とします。通常実行は `scripts/run_daily_paper.sh` を使い、スケジュールと安全設定は `config/operation_schedule.yaml` で確認します。
+
 ## よく使うコマンド
 
 ```bash

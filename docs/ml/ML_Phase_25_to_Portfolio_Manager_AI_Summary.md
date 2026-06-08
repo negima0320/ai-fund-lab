@@ -1405,3 +1405,190 @@ Decision:
 | rejected | `rookie_dealer_02_v2_80_exit_ai_v2_conservative_gate` | worse than v2_78 |
 | rejected | `rookie_dealer_02_v2_80_exit_ai_v2_conservative_gate_high_pm_safe` | better than v2_80 but below v2_78 |
 | on hold | `rookie_dealer_02_v2_79_high_pm_min_hold_5d` | intended minimum-hold effect did not directly fire |
+
+## Portfolio Manager AI Phase 7-A to 7-G Final Update
+
+Phase 7 moved from profile-search to release-readiness:
+
+- full AI state and retraining readiness;
+- PM AI leakage forensics;
+- PM AI API-only dataset design, builder, and trainer;
+- v2_82 Final Championship Audit;
+- final pytest failure triage.
+
+Detailed summary:
+
+```text
+docs/ml/Portfolio_Manager_AI_Phase7A_to_7G_Final_Summary.md
+```
+
+### Phase 7-A: Full AI State Audit
+
+Current strongest candidate at entry:
+
+```text
+rookie_dealer_02_v2_82_cap38
+```
+
+Key AI inventory:
+
+| AI | rows | features | leakage risk | recommendation |
+|---|---:|---:|---|---|
+| Stock Selection AI | `2,041,709` | `48` | low | defer retraining |
+| Portfolio Manager AI current | `1,375` | `68` | high for direct retraining | rebuild dataset first |
+| Exit AI current v2_66 | `1,194` | `18` | high | defer |
+| Exit AI v2 candidate | `1,957,321` | `36` | low | integration redesign first |
+
+Conclusion:
+
+- all AI retraining was not ready as-is.
+- PM AI direct retraining was not allowed because the current dataset needed
+  cleaner API-only rebuilding.
+
+### Phase 7-B / 7-B': PM AI Leakage Forensics
+
+The follow-up audit fixed false positives such as `close_position`, which is a
+price feature, not portfolio position state.
+
+Final judgement:
+
+| item | value |
+|---|---|
+| feature_leakage_confirmed | `false` |
+| feature_leakage_suspected | `true` |
+| current_pm_model_safe_to_use | `true` |
+| v2_82_result_trust_level | `medium_trust` |
+| pm_ai_direct_retraining_allowed | `false` |
+| pm_ai_dataset_rebuild_required | `true` |
+
+The issue was not immediate production leakage. The problem was that
+candidate-list dependent features such as `candidate_count_in_day`,
+`rank_in_day`, `*_percentile_in_day`, and `*_gap_to_best` were too important
+for a clean retraining path.
+
+### Phase 7-C / 7-D: PM AI API-only Dataset
+
+Design verdict:
+
+| item | value |
+|---|---|
+| api_only_pm_dataset_feasible | `true` |
+| candidate_feature_removal_required | `true` |
+| recommended plan | `Plan B: PM AI API-only rebuild + complete candidate-list feature removal` |
+| ready_for_phase7d | `true` |
+
+Full dataset:
+
+```text
+data/ml/portfolio_manager_api_only/pm_ai_api_only_dataset_2021-06_to_2026-05.parquet
+```
+
+Dataset result:
+
+| metric | value |
+|---|---:|
+| final_rows | `1,999,421` |
+| final_feature_count | `40` |
+| final_label_count | `5` |
+| train rows | `991,902` |
+| validation rows | `386,869` |
+| test rows | `620,650` |
+
+Leakage risk was low and blocking issues were none.
+
+### Phase 7-E: PM AI API-only Trainer
+
+Candidate model:
+
+```text
+models/ml/portfolio_manager/candidate_v2_api_only
+```
+
+Current PM AI was not overwritten:
+
+```text
+models/ml/portfolio_manager/current_v2_73_phase3b_clean
+```
+
+Full-train metrics:
+
+| target | validation AUC | test AUC | validation PR-AUC | test PR-AUC |
+|---|---:|---:|---:|---:|
+| high_conviction_target | `0.6527` | `0.6472` | `0.2397` | `0.2032` |
+| avoid_target | `0.5483` | `0.6345` | `0.2424` | `0.2641` |
+
+Decision:
+
+- PM AI API-only candidate is trained and leakage-safe.
+- It is not integrated into v2_82.
+- It requires a dedicated integration audit before any profile change.
+
+### Phase 7-F: Final Championship Audit
+
+Core period:
+
+```text
+2023-01-01 to 2026-05-31
+```
+
+Final comparison:
+
+| metric | v2_78 | v2_82 cap38 | delta |
+|---|---:|---:|---:|
+| net_profit | `3,054,794` | `3,777,545` | `+722,751` |
+| PF | `2.6194` | `2.7309` | `+0.1115` |
+| DD | `-7.47%` | `-6.54%` | `+0.93pt` |
+| win_rate | `53.78%` | `55.11%` | `+1.33pt` |
+| monthly_win_rate | `75.61%` | `78.05%` | `+2.44pt` |
+| final assets | `4,813,588` | `5,720,597` | `+907,010` |
+| CAGR | `58.51%` | `66.74%` | `+8.23pt` |
+
+Final verdict:
+
+| item | value |
+|---|---|
+| production_candidate | `true` |
+| recommended_profile | `rookie_dealer_02_v2_82_cap38` |
+| confidence_level | `medium` |
+| fix_recommended | `true` |
+
+Extended 2021-2022 was not used as decisive because same-condition
+Stock Selection walk-forward predictions start at `2023-01-04`.
+
+### Phase 7-G: Final Test Failure Triage
+
+Initial full pytest:
+
+```text
+811 passed, 14 failed, 15 warnings
+```
+
+Fixed categories:
+
+- earnings filter expectation mismatch;
+- SELL trade `market_regime` inheritance;
+- J-Quants / no-data cache fixture stability;
+- operations docs missing expected sections.
+
+Final full pytest:
+
+```text
+825 passed, 15 warnings
+```
+
+Decision:
+
+- `rookie_dealer_02_v2_82_cap38` can proceed as Version 1.0 Candidate.
+- v2_82 trading decision logic was not changed during triage.
+- Remaining warnings are non-blocking pandas/joblib warnings.
+
+### Current Profile Ranking After Phase 7-G
+
+| priority | profile / model | status |
+|---:|---|---|
+| 1 | `rookie_dealer_02_v2_82_cap38` | Version 1.0 Candidate; strongest full-backtested profile |
+| 2 | `rookie_dealer_02_v2_78_pm_aware_order_fallback_w025` | conservative fallback/reference |
+| candidate model | `models/ml/portfolio_manager/candidate_v2_api_only` | trained, leakage-safe, not integrated |
+| rejected | v2_80 Exit AI v2 gate profiles | underperformed v2_78 |
+| deferred | v2_81 Bear Booster | booster fired but cap absorbed effective benefit |
+| on hold | v2_79 high-PM minimum hold | numerical improvement was side-effect path, not direct minimum-hold effect |

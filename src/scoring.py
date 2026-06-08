@@ -527,9 +527,10 @@ def _apply_selection_rules(
         item_min_score = _effective_regular_min_score(item, selection_config, min_score)
         item["effective_min_score"] = item_min_score
         item["market_min_score_override_applied"] = item_min_score != min_score
-        market_section_blocked = (
-            section == "Unknown" and not allow_unknown_market
-        ) or (section != "Unknown" and section not in allowed_sections)
+        market_section_blocked = bool(market_filter["enabled"]) and (
+            (section == "Unknown" and not allow_unknown_market)
+            or (section != "Unknown" and section not in allowed_sections)
+        )
         item["market_section_filter_checked"] = True
         item["market_section_filter_blocked"] = market_section_blocked
         item["market_section_filter_reason"] = "market_filter_excluded" if market_section_blocked else ""

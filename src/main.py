@@ -9661,7 +9661,10 @@ def run_fetch_prices(provider_name: str, target_date_text: str) -> None:
 
     config = load_config(CONFIG_PATH)
     listed_stock_by_code = {str(stock["code"]): stock for stock in _listed_stock_master() if stock.get("code")}
-    allowed_codes = set(_allowed_stock_master_by_code(config))
+    if not _listed_stock_master_path().exists():
+        allowed_codes = set(prime_codes)
+    else:
+        allowed_codes = set(_allowed_stock_master_by_code(config)) if listed_stock_by_code else set(prime_codes)
     if not listed_stock_by_code:
         raise SystemExit("Listed stock master is empty. Re-run list-stocks.")
     if not allowed_codes:
@@ -18725,12 +18728,22 @@ def _fetch_price_history_for_date(
         raise
     config = load_config(CONFIG_PATH)
     listed_stock_by_code = {str(stock["code"]): stock for stock in _listed_stock_master() if stock.get("code")}
-    all_listed_prices = [
-        _normalize_daily_price_with_market(record, listed_stock_by_code)
-        for record in daily_prices
-        if _get_first(record, ["code", "Code", "LocalCode"]) in listed_stock_by_code
-    ]
-    allowed_codes = set(_allowed_stock_master_by_code(config))
+    if listed_stock_by_code:
+        all_listed_prices = [
+            _normalize_daily_price_with_market(record, listed_stock_by_code)
+            for record in daily_prices
+            if _get_first(record, ["code", "Code", "LocalCode"]) in listed_stock_by_code
+        ]
+    else:
+        all_listed_prices = [
+            _normalize_daily_price_with_market(record, listed_stock_by_code)
+            for record in daily_prices
+            if _get_first(record, ["code", "Code", "LocalCode"]) in prime_codes
+        ]
+    if not _listed_stock_master_path().exists():
+        allowed_codes = set(prime_codes)
+    else:
+        allowed_codes = set(_allowed_stock_master_by_code(config)) if listed_stock_by_code else set(prime_codes)
     allowed_prices = [row for row in all_listed_prices if row.get("code") in allowed_codes]
     if all_listed_prices:
         cache_price_snapshot(fetch_date, len(daily_prices), all_listed_prices)
@@ -18740,9 +18753,10 @@ def _fetch_price_history_for_date(
                 f"{len(all_listed_prices)} listed rows from {len(daily_prices)} rows"
             )
         return allowed_prices
-    save_no_data_day(fetch_date, reason="no_listed_rows", source="fetch-period-prices")
+    save_no_data_day(fetch_date, reason="no_prime_rows" if not listed_stock_by_code else "no_listed_rows", source="fetch-period-prices")
     if verbose:
-        print(f"fetch-period-prices {fetch_date.isoformat()} no listed rows; saved no-data cache")
+        reason = "no prime rows" if not listed_stock_by_code else "no listed rows"
+        print(f"fetch-period-prices {fetch_date.isoformat()} {reason}; saved no-data cache")
     return []
 
 

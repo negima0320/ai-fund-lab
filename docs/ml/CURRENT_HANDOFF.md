@@ -430,6 +430,90 @@ Decision:
 - It did not reduce `no_candidates`, barely improved utilization, and worsened
   profit/PF/DD.
 
+## Phase 7-A to 7-G Final Readiness Result
+
+The final AI-state audit, PM AI API-only rebuild path, Final Championship
+Audit, and final pytest triage have now been completed.
+
+Detailed summary:
+
+```text
+docs/ml/Portfolio_Manager_AI_Phase7A_to_7G_Final_Summary.md
+```
+
+Final Version 1.0 Candidate:
+
+```text
+rookie_dealer_02_v2_82_cap38
+```
+
+Phase 7-F Final Championship core result:
+
+| metric | v2_78 | v2_82 cap38 | delta |
+|---|---:|---:|---:|
+| net_profit | `3,054,794` | `3,777,545` | `+722,751` |
+| PF | `2.6194` | `2.7309` | `+0.1115` |
+| DD | `-7.47%` | `-6.54%` | `+0.93pt` |
+| win_rate | `53.78%` | `55.11%` | `+1.33pt` |
+| monthly_win_rate | `75.61%` | `78.05%` | `+2.44pt` |
+| final assets | `4,813,588` | `5,720,597` | `+907,010` |
+| CAGR | `58.51%` | `66.74%` | `+8.23pt` |
+
+Phase 7-F verdict:
+
+| item | value |
+|---|---|
+| production_candidate | `true` |
+| recommended_profile | `rookie_dealer_02_v2_82_cap38` |
+| confidence_level | `medium` |
+| fix_recommended | `true` |
+
+The confidence is `medium` because 2021-2022 cannot be evaluated as the same
+condition championship period from the current prediction artifacts:
+
+- `data/ml/walk_forward_predictions/` begins at `2023-01-04`.
+- Extended `2021-06-01 to 2026-05-31` should be treated as unavailable for a
+  decisive comparison until true historical walk-forward predictions are
+  rebuilt.
+
+PM AI API-only candidate:
+
+```text
+models/ml/portfolio_manager/candidate_v2_api_only
+```
+
+Status:
+
+- trained from API-only PM dataset;
+- current PM AI was not overwritten;
+- high conviction test AUC `0.6472`;
+- avoid target test AUC `0.6345`;
+- not integrated into v2_82.
+
+Phase 7-G final test result:
+
+```text
+825 passed, 15 warnings
+```
+
+Fixed before the final green run:
+
+- earnings filter expectation mismatch;
+- SELL trade `market_regime` inheritance;
+- J-Quants / no-data cache fixture stability;
+- operations docs missing expected sections.
+
+Current profile/model ranking after Phase 7-G:
+
+| priority | profile / model | status |
+|---:|---|---|
+| 1 | `rookie_dealer_02_v2_82_cap38` | Version 1.0 Candidate; strongest full-backtested profile |
+| 2 | `rookie_dealer_02_v2_78_pm_aware_order_fallback_w025` | conservative fallback/reference |
+| candidate model | `models/ml/portfolio_manager/candidate_v2_api_only` | trained, leakage-safe, not integrated |
+| rejected | v2_80 Exit AI v2 profiles | underperformed v2_78 |
+| deferred | v2_81 Bear Booster | booster fired but cap absorbed effective benefit |
+| on hold | v2_79 high-PM minimum hold | numerical improvement was side-effect path, not direct minimum-hold effect |
+
 ## Hard Constraints
 
 Do not do these unless explicitly asked:
@@ -514,32 +598,35 @@ PYTHONPYCACHEPREFIX=/private/tmp/ai-fund-lab-pycache python3 -m pytest -q \
   tests/test_ml_portfolio_manager_phase3i_candidate_pool.py
 ```
 
-Latest known test result:
+Latest known full pytest result:
 
 ```text
-34 passed, 1 warning
+825 passed, 15 warnings
 ```
 
 ## Next Good Tasks
 
 Recommended next experiments:
 
-1. Use v2_82 cap38 as the current strongest full-backtested research candidate.
+1. Freeze v2_82 cap38 as the Version 1.0 Candidate.
 2. Keep v2_78 w0.25 as conservative fallback/reference.
-3. Validate v2_82 robustness before adding another logic layer:
-   - year-by-year comparison;
-   - regime-by-regime comparison;
-   - residual cap-hit analysis under `0.38`;
-   - DD-period and top-code concentration checks.
+3. Do not integrate PM AI API-only candidate until a dedicated integration
+   audit proves it improves v2_82.
+4. If robustness beyond 2023 is required, rebuild true 2021-2022 walk-forward
+   predictions first.
+5. Keep v2_82 clean:
+   - no Bear Booster;
+   - no Exit AI v2 candidate;
+   - no PM AI API-only candidate integration yet.
 4. Do not continue candidate-pool expansion unless the upstream candidate
    shortage definition changes.
-5. Try utilization-improvement paths that do not dilute candidate quality:
+6. Try utilization-improvement paths that do not dilute candidate quality:
    - low-score skip threshold tuning
    - replacement candidate filling after cap / affordability blocks
    - total-assets-linked `daily_buy_limit`
    - fallback quality improvement
-6. Keep v2_78, v2_77, v2_75, and v2_73 as fallback references.
-7. Continue monitoring top-code contribution and DD-period concentration.
+7. Keep v2_78, v2_77, v2_75, and v2_73 as fallback references.
+8. Continue monitoring top-code contribution and DD-period concentration.
 
 Do not promote v2_76 directly without an exposure guard because its DD is too
 large.
@@ -558,6 +645,7 @@ Use these documents:
 
 - `docs/ml/README.md`: ML documentation index
 - `docs/ml/ML_Phase_25_to_Portfolio_Manager_AI_Summary.md`: full recent history
+- `docs/ml/Portfolio_Manager_AI_Phase7A_to_7G_Final_Summary.md`: final readiness and Version 1.0 Candidate summary
 - `docs/ml/Portfolio_Manager_AI_Phase4C_to_4G_Audit_Summary.md`: why v2_79 remains on hold
 - `docs/ml/Exit_AI_v2_Phase5A_to_5F_Retraining_Summary.md`: Exit AI v2 API-only retraining work
 - `docs/ml/v2_73_adoption_notes.md`: why v2_73 became the prior baseline

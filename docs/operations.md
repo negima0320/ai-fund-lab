@@ -26,6 +26,49 @@ python3 -m venv .venv
 
 `validate-config --strict` はwarningも失敗扱いにするため、長期検証前の最終確認に使います。
 
+## 基本運用フロー
+
+通常運用は paper brokerのみ で行います。秘密情報は `.env` に置き、READMEやdocs、ログに直接書きません。live自動売買は使わず、`tachibana_live` は安全確認用の禁止対象として扱います。
+
+基本の流れ:
+
+1. 09:00〜09:30 に状態確認とpreflightを行う
+2. 取引時間中はPaperBrokerで候補、保有、資金制約を確認する
+3. 16:30 以降に日次分析、ログ確認、翌営業日の候補確認を行う
+
+## cron運用例
+
+cronを使う場合も、実行先はpaper brokerのみです。
+
+```cron
+30 16 * * 1-5 cd /Users/negishi/work/ai-fund-lab && scripts/run_daily_paper.sh
+```
+
+## launchd運用例
+
+macOSでは `docs/launchd/com.negima.ai-fund-lab.paper-run.plist` を参考にします。`WorkingDirectory`、`ProgramArguments`、`StandardOutPath`、`StandardErrorPath`、`StartCalendarInterval` を確認してから登録します。
+
+## ログ
+
+主なログは `logs/`、検証レポートは `reports/`、バックテスト成果物は `logs/backtests/<profile>/<period>/` に出力されます。異常時は `summary.csv`、`trades.csv`、`purchase_audit.csv`、`backtest_summary.json` を優先して確認します。
+
+## 安全運用ルール
+
+- live orderは使わない
+- `tachibana_live` は通常運用で指定しない
+- 秘密情報をGit管理対象へ書かない
+- 本番相当の検証ではAPI再取得、OpenAI API使用、current model上書きの有無を明示する
+- `storage/STOP_TRADING` がある場合は新規買付を止める
+
+## よく使うコマンド
+
+```bash
+scripts/run_daily_paper.sh
+scripts/run_analyze.sh
+scripts/run_evening_selection.sh
+.venv/bin/python src/main.py --mode validate-config
+```
+
 ## Backtest
 
 単体profileの検証:

@@ -54,6 +54,13 @@ adoption notes for the AI / ML stack.
   - per-code cap bottleneck audit
   - v2_82 cap38 full backtest result and current main-candidate decision
 
+- `Portfolio_Manager_AI_Phase7A_to_7G_Final_Summary.md`
+  - full AI state and retraining-readiness audit
+  - PM AI leakage forensics and API-only dataset rebuild/trainer
+  - v2_82 Final Championship Audit
+  - final pytest failure triage
+  - current decision: `v2_82_cap38` is the Version 1.0 Candidate; PM AI API-only candidate is trained but not integrated
+
 ## Adoption Notes
 
 - `v2_66_ml_ranked_adoption_notes.md`
@@ -66,9 +73,10 @@ Current strongest full-backtested research candidate:
 
 - `rookie_dealer_02_v2_82_cap38`
   - v2_78 w0.25-derived profile with only `per_code_exposure_cap_rate` relaxed from `0.30` to `0.38`
-  - Phase 6-G full backtest: net profit `3,777,545`, PF `2.7309`, DD `-6.54%`, win rate `55.11%`
+  - Phase 7-F Final Championship core result: net profit `3,777,545`, PF `2.7309`, DD `-6.54%`, win rate `55.11%`, CAGR `66.74%`
   - improved profit, PF, DD, win rate, monthly win rate, capital utilization, and cap skip/reduction count versus v2_78
-  - latest audits are summarized in `Portfolio_Manager_AI_Phase5G_to_6G_Audit_Summary.md`
+  - Phase 7-G full pytest after triage: `825 passed, 15 warnings`
+  - latest audits are summarized in `Portfolio_Manager_AI_Phase7A_to_7G_Final_Summary.md`
   - still a backtest/research profile; not connected to live order placement
 
 Experimental next candidates:
@@ -99,6 +107,14 @@ Exit AI v2 research candidate:
   - Phase 5-G prediction audit completed
   - Phase 5-H v2_80 integration profiles underperformed v2_78 and were not adopted
   - keep current Exit AI `models/ml/exit/current_v2_66`
+
+PM AI API-only research candidate:
+
+- `models/ml/portfolio_manager/candidate_v2_api_only`
+  - trained from API-only PM dataset, not from backtest outcomes
+  - current PM AI `models/ml/portfolio_manager/current_v2_73_phase3b_clean` was not overwritten
+  - high conviction test AUC `0.6472`; avoid target test AUC `0.6345`
+  - not integrated into v2_82; requires a separate integration audit
 
 - `daily_ai_candidate_operation.md`
   - human-review daily AI candidate output
