@@ -69,6 +69,12 @@ adoption notes for the AI / ML stack.
   - v2_92 rule-based relative allocator backtest rejection
   - current decision: keep `v2_82_cap38`; do not promote PM AI v2 or the relative allocator
 
+- `Portfolio_Manager_AI_Phase9A_to_9D3_PM_AI_v3_Summary.md`
+  - PM AI v3 re-architecture as market regime + candidate ranking + position sizing
+  - clean dataset, PM sizing universe dataset, trainer, mapping stability, and threshold audits
+  - v2_93 research profile rejection, PM sizing coverage root cause, and Phase 9-D3 recommended threshold
+  - current decision: keep `v2_82_cap38`; PM AI v3 remains research-only and should proceed only to integration audit, not adoption
+
 ## Adoption Notes
 
 - `v2_66_ml_ranked_adoption_notes.md`

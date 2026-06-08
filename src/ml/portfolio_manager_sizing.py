@@ -12,7 +12,10 @@ from ml.portfolio_manager_dataset import CLEAN_FORBIDDEN_FEATURE_COLUMNS, LABEL_
 
 DEFAULT_PM_MODEL_DIR = Path("models/ml/portfolio_manager/current_v2_73_phase3b_clean")
 DEFAULT_PM_DATASET = Path("data/ml/portfolio_manager/portfolio_manager_dataset_v2_73_clean_2023-01_to_2026-05.parquet")
+DEFAULT_PM_V3_MODEL_DIR = Path("models/ml/portfolio_manager_v3/candidate_phase9d")
+DEFAULT_PM_V3_DATASET = Path("data/ml/portfolio_manager_v3/portfolio_manager_v3_dataset_2023-01_to_2026-05.parquet")
 EXPECTED_CLEAN_FEATURE_COUNT = 68
+EXPECTED_PM_V3_FEATURE_COUNT = 50
 FORBIDDEN_FEATURE_FRAGMENTS = (
     "actual",
     "decision",
@@ -290,6 +293,156 @@ class PortfolioManagerSizingAdvisor:
         return 1.00
 
 
+class PortfolioManagerV3SizingAdvisor:
+    """Research-only PM AI v3 sizing lookup for Phase 9-F candidate backtests."""
+
+    def __init__(
+        self,
+        root: str | Path = ".",
+        model_dir: str | Path = DEFAULT_PM_V3_MODEL_DIR,
+        dataset_path: str | Path = DEFAULT_PM_V3_DATASET,
+        expected_feature_count: int = EXPECTED_PM_V3_FEATURE_COUNT,
+        mapping_name: str = "mapping_a_rank_score_only",
+    ) -> None:
+        self.root = Path(root)
+        self.model_dir = self._resolve(model_dir)
+        self.dataset_path = self._resolve(dataset_path)
+        self.expected_feature_count = int(expected_feature_count)
+        self.mapping_name = str(mapping_name or "mapping_a_rank_score_only")
+        self.feature_columns = self._load_feature_columns()
+        self._assert_feature_columns()
+        self.rank_model = self._load_model("model_a_candidate_ranking_regressor.joblib")
+        self.downside_model = self._load_optional_model("model_b_downside_utility_regressor.joblib")
+        self.top_model = self._load_optional_model("model_c_top_utility_classifier.joblib")
+        self.decisions = self._load_decision_store()
+
+    def decision_for(self, signal_date: str, code: str) -> PortfolioManagerSizingDecision:
+        key = (pd.Timestamp(signal_date).strftime("%Y-%m-%d"), str(code))
+        row = self.decisions.get(key)
+        if row is None:
+            return PortfolioManagerSizingDecision(
+                high_conviction_proba=None,
+                avoid_proba=None,
+                score=0.0,
+                multiplier=1.0,
+                feature_count=len(self.feature_columns),
+                model_version=self.model_version,
+                feature_found=False,
+                warning="pm_v3_feature_row_missing",
+                model_path=str(self.model_dir),
+                calibration_rule=self.mapping_name,
+                calibration_thresholds=self.mapping_thresholds,
+                raw_multiplier=1.0,
+            )
+        return PortfolioManagerSizingDecision(
+            high_conviction_proba=row.get("pm_v3_top_utility_proba"),
+            avoid_proba=None,
+            score=float(row.get("pm_v3_rank_score_pred") or 0.0),
+            multiplier=float(row.get("pm_multiplier") or 1.0),
+            feature_count=len(self.feature_columns),
+            model_version=self.model_version,
+            feature_found=True,
+            model_path=str(self.model_dir),
+            calibration_rule=self.mapping_name,
+            calibration_thresholds=self.mapping_thresholds,
+            raw_multiplier=float(row.get("pm_multiplier") or 1.0),
+        )
+
+    @property
+    def model_version(self) -> str:
+        return f"pm_ai_v3_phase9d_{self.mapping_name}"
+
+    @property
+    def mapping_thresholds(self) -> dict[str, float]:
+        if self.mapping_name == "mapping_a_rank_score_only":
+            return {"pm130_rank_pct_min": 0.90, "pm115_rank_pct_min": 0.75, "pm080_rank_pct_max": 0.25, "pm060_rank_pct_max": 0.10}
+        if self.mapping_name == "mapping_a_conservative_pm130_threshold":
+            return {"pm130_rank_pct_min": 0.90, "pm130_downside_pct_min": 0.50, "pm115_rank_pct_min": 0.75, "pm080_rank_pct_max": 0.25, "pm060_rank_pct_max": 0.10}
+        if self.mapping_name == "mapping_a_half_pm130_candidates":
+            return {"pm130_rank_pct_min": 0.95, "pm115_rank_pct_min": 0.75, "pm080_rank_pct_max": 0.25, "pm060_rank_pct_max": 0.10}
+        return {"pm130_rank_pct_min": 0.90, "pm115_rank_pct_min": 0.75, "pm080_rank_pct_max": 0.25, "pm060_rank_pct_max": 0.10}
+
+    def _resolve(self, path: str | Path) -> Path:
+        candidate = Path(path)
+        return candidate if candidate.is_absolute() else self.root / candidate
+
+    def _load_feature_columns(self) -> list[str]:
+        path = self.model_dir / "feature_columns.json"
+        with path.open(encoding="utf-8") as fh:
+            payload = json.load(fh)
+        return [str(column) for column in payload]
+
+    def _assert_feature_columns(self) -> None:
+        if len(self.feature_columns) != self.expected_feature_count:
+            raise ValueError(
+                f"Portfolio Manager v3 feature_count mismatch: expected {self.expected_feature_count}, "
+                f"got {len(self.feature_columns)}"
+            )
+        leaked = sorted(column for column in self.feature_columns if _looks_forbidden(column) or _looks_like_label(column))
+        if leaked:
+            raise ValueError(f"Forbidden Portfolio Manager v3 feature columns: {', '.join(leaked)}")
+
+    def _load_model(self, filename: str) -> Any:
+        import joblib
+
+        return joblib.load(self.model_dir / filename)
+
+    def _load_optional_model(self, filename: str) -> Any | None:
+        path = self.model_dir / filename
+        if not path.exists():
+            return None
+        import joblib
+
+        return joblib.load(path)
+
+    def _load_decision_store(self) -> dict[tuple[str, str], dict[str, Any]]:
+        columns = ["prediction_date", "code", *self.feature_columns]
+        df = pd.read_parquet(self.dataset_path, columns=columns)
+        df["prediction_date"] = pd.to_datetime(df["prediction_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        df["code"] = df["code"].astype(str)
+        df = df.dropna(subset=["prediction_date", "code"]).drop_duplicates(["prediction_date", "code"], keep="last")
+        if df.empty:
+            return {}
+        x = df[self.feature_columns]
+        df["pm_v3_rank_score_pred"] = self.rank_model.predict(x)
+        if self.downside_model is not None:
+            df["pm_v3_downside_utility_pred"] = self.downside_model.predict(x)
+            downside_pct = pd.to_numeric(df["pm_v3_downside_utility_pred"], errors="coerce").rank(method="first", pct=True)
+        else:
+            df["pm_v3_downside_utility_pred"] = pd.NA
+            downside_pct = pd.Series(1.0, index=df.index)
+        if self.top_model is not None and hasattr(self.top_model, "predict_proba"):
+            df["pm_v3_top_utility_proba"] = self.top_model.predict_proba(x)[:, 1]
+        elif self.top_model is not None:
+            df["pm_v3_top_utility_proba"] = self.top_model.predict(x)
+        else:
+            df["pm_v3_top_utility_proba"] = pd.NA
+        rank_pct = pd.to_numeric(df["pm_v3_rank_score_pred"], errors="coerce").rank(method="first", pct=True)
+        df["pm_multiplier"] = self._map_multiplier(rank_pct, downside_pct)
+        return {
+            (str(row["prediction_date"]), str(row["code"])): {
+                "pm_v3_rank_score_pred": row.get("pm_v3_rank_score_pred"),
+                "pm_v3_downside_utility_pred": row.get("pm_v3_downside_utility_pred"),
+                "pm_v3_top_utility_proba": row.get("pm_v3_top_utility_proba"),
+                "pm_multiplier": row.get("pm_multiplier"),
+            }
+            for row in df.to_dict(orient="records")
+        }
+
+    def _map_multiplier(self, rank_pct: pd.Series, downside_pct: pd.Series) -> pd.Series:
+        out = pd.Series(1.00, index=rank_pct.index)
+        out.loc[rank_pct >= 0.75] = 1.15
+        if self.mapping_name == "mapping_a_half_pm130_candidates":
+            out.loc[rank_pct >= 0.95] = 1.30
+        elif self.mapping_name == "mapping_a_conservative_pm130_threshold":
+            out.loc[(rank_pct >= 0.90) & (downside_pct >= 0.50)] = 1.30
+        else:
+            out.loc[rank_pct >= 0.90] = 1.30
+        out.loc[rank_pct <= 0.25] = 0.80
+        out.loc[rank_pct <= 0.10] = 0.60
+        return out
+
+
 def multiplier_from_high_minus_avoid(high_proba: float | None, avoid_proba: float | None) -> float:
     high = 0.5 if high_proba is None or pd.isna(high_proba) else float(high_proba)
     avoid = 0.5 if avoid_proba is None or pd.isna(avoid_proba) else float(avoid_proba)
@@ -308,3 +461,8 @@ def multiplier_from_high_minus_avoid(high_proba: float | None, avoid_proba: floa
 def _looks_forbidden(column: str) -> bool:
     lowered = column.lower()
     return any(fragment in lowered for fragment in FORBIDDEN_FEATURE_FRAGMENTS)
+
+
+def _looks_like_label(column: str) -> bool:
+    lowered = column.lower()
+    return lowered.startswith("future_") or "label" in lowered or "target" in lowered

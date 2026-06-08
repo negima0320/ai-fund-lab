@@ -19,14 +19,18 @@ from ml.data_loader import JQuantsDataLoader
 from ml.portfolio_manager_sizing import (
     DEFAULT_PM_DATASET,
     DEFAULT_PM_MODEL_DIR,
+    DEFAULT_PM_V3_DATASET,
+    DEFAULT_PM_V3_MODEL_DIR,
     EXPECTED_CLEAN_FEATURE_COUNT,
+    EXPECTED_PM_V3_FEATURE_COUNT,
     PortfolioManagerSizingAdvisor,
+    PortfolioManagerV3SizingAdvisor,
 )
 from safety import can_trade, safety_event
 from tax import calculate_period_profit_summary
 
 
-_PM_SIZING_ADVISOR_CACHE: dict[tuple[Any, ...], PortfolioManagerSizingAdvisor] = {}
+_PM_SIZING_ADVISOR_CACHE: dict[tuple[Any, ...], PortfolioManagerSizingAdvisor | PortfolioManagerV3SizingAdvisor] = {}
 _EXIT_AI_V2_GATE_ADVISOR_CACHE: dict[tuple[str, str, str], "ExitAIV2GateAdvisor"] = {}
 _BEAR_PM_BOOSTER_REGIME_CACHE: dict[str, dict[str, str]] = {}
 
@@ -948,8 +952,23 @@ def _apply_high_pm_min_hold_exit_guard(
     return updated, fields
 
 
-def _portfolio_manager_sizing_advisor(config: dict[str, Any]) -> PortfolioManagerSizingAdvisor:
+def _portfolio_manager_sizing_advisor(config: dict[str, Any]) -> PortfolioManagerSizingAdvisor | PortfolioManagerV3SizingAdvisor:
     policy = _portfolio_manager_sizing_policy(config)
+    rule = str(policy.get("rule") or "")
+    if rule == "pm_ai_v3_candidate":
+        model_dir = str(policy.get("model_dir") or DEFAULT_PM_V3_MODEL_DIR)
+        dataset_path = str(policy.get("dataset_path") or DEFAULT_PM_V3_DATASET)
+        expected_feature_count = int(policy.get("expected_feature_count") or EXPECTED_PM_V3_FEATURE_COUNT)
+        mapping_name = str(policy.get("pm_v3_mapping") or "mapping_a_rank_score_only")
+        key = ("pm_v3", model_dir, dataset_path, expected_feature_count, mapping_name)
+        if key not in _PM_SIZING_ADVISOR_CACHE:
+            _PM_SIZING_ADVISOR_CACHE[key] = PortfolioManagerV3SizingAdvisor(
+                model_dir=model_dir,
+                dataset_path=dataset_path,
+                expected_feature_count=expected_feature_count,
+                mapping_name=mapping_name,
+            )
+        return _PM_SIZING_ADVISOR_CACHE[key]
     model_dir = str(policy.get("model_dir") or DEFAULT_PM_MODEL_DIR)
     dataset_path = str(policy.get("dataset_path") or DEFAULT_PM_DATASET)
     expected_feature_count = int(policy.get("expected_feature_count") or EXPECTED_CLEAN_FEATURE_COUNT)
