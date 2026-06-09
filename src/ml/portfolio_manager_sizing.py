@@ -14,6 +14,8 @@ DEFAULT_PM_MODEL_DIR = Path("models/ml/portfolio_manager/current_v2_73_phase3b_c
 DEFAULT_PM_DATASET = Path("data/ml/portfolio_manager/portfolio_manager_dataset_v2_73_clean_2023-01_to_2026-05.parquet")
 DEFAULT_PM_V3_MODEL_DIR = Path("models/ml/portfolio_manager_v3/candidate_phase9d")
 DEFAULT_PM_V3_DATASET = Path("data/ml/portfolio_manager_v3/portfolio_manager_v3_dataset_2023-01_to_2026-05.parquet")
+DEFAULT_PM_V3_PM_SIZING_UNIVERSE_MODEL_DIR = Path("models/ml/portfolio_manager_v3/candidate_phase9d2_pm_sizing_universe")
+DEFAULT_PM_V3_PM_SIZING_UNIVERSE_DATASET = Path("data/ml/portfolio_manager_v3/portfolio_manager_v3_dataset_pm_sizing_universe_2023-01_to_2026-05.parquet")
 EXPECTED_CLEAN_FEATURE_COUNT = 68
 EXPECTED_PM_V3_FEATURE_COUNT = 50
 FORBIDDEN_FEATURE_FRAGMENTS = (
@@ -317,7 +319,7 @@ class PortfolioManagerV3SizingAdvisor:
         self.decisions = self._load_decision_store()
 
     def decision_for(self, signal_date: str, code: str) -> PortfolioManagerSizingDecision:
-        key = (pd.Timestamp(signal_date).strftime("%Y-%m-%d"), str(code))
+        key = (pd.Timestamp(signal_date).strftime("%Y-%m-%d"), self._normalize_code(code))
         row = self.decisions.get(key)
         if row is None:
             return PortfolioManagerSizingDecision(
@@ -350,12 +352,21 @@ class PortfolioManagerV3SizingAdvisor:
 
     @property
     def model_version(self) -> str:
-        return f"pm_ai_v3_phase9d_{self.mapping_name}"
+        phase = "phase9d2_pm_sizing_universe" if "phase9d2" in str(self.model_dir) else "phase9d"
+        return f"pm_ai_v3_{phase}_{self.mapping_name}"
 
     @property
     def mapping_thresholds(self) -> dict[str, float]:
+        if self.mapping_name == "e_139_classifier_gate_recommended":
+            return {"classifier_gate_threshold": 0.80, "rank_threshold": 0.75, "downside_threshold": 0.80}
+        if self.mapping_name == "e_140_classifier_gate_more_pm130":
+            return {"classifier_gate_threshold": 0.80, "rank_threshold": 0.75, "downside_threshold": 0.75}
+        if self.mapping_name == "e_120_classifier_gate_wider":
+            return {"classifier_gate_threshold": 0.75, "rank_threshold": 0.75, "downside_threshold": 0.75}
         if self.mapping_name == "mapping_a_rank_score_only":
             return {"pm130_rank_pct_min": 0.90, "pm115_rank_pct_min": 0.75, "pm080_rank_pct_max": 0.25, "pm060_rank_pct_max": 0.10}
+        if self.mapping_name == "mapping_c_rank_plus_downside_blend":
+            return {"pm130_blend_pct_min": 0.90, "pm115_blend_pct_min": 0.75, "pm080_blend_pct_max": 0.25, "pm060_blend_pct_max": 0.10}
         if self.mapping_name == "mapping_a_conservative_pm130_threshold":
             return {"pm130_rank_pct_min": 0.90, "pm130_downside_pct_min": 0.50, "pm115_rank_pct_min": 0.75, "pm080_rank_pct_max": 0.25, "pm060_rank_pct_max": 0.10}
         if self.mapping_name == "mapping_a_half_pm130_candidates":
@@ -399,7 +410,7 @@ class PortfolioManagerV3SizingAdvisor:
         columns = ["prediction_date", "code", *self.feature_columns]
         df = pd.read_parquet(self.dataset_path, columns=columns)
         df["prediction_date"] = pd.to_datetime(df["prediction_date"], errors="coerce").dt.strftime("%Y-%m-%d")
-        df["code"] = df["code"].astype(str)
+        df["code"] = df["code"].map(self._normalize_code)
         df = df.dropna(subset=["prediction_date", "code"]).drop_duplicates(["prediction_date", "code"], keep="last")
         if df.empty:
             return {}
@@ -418,18 +429,37 @@ class PortfolioManagerV3SizingAdvisor:
         else:
             df["pm_v3_top_utility_proba"] = pd.NA
         rank_pct = pd.to_numeric(df["pm_v3_rank_score_pred"], errors="coerce").rank(method="first", pct=True)
-        df["pm_multiplier"] = self._map_multiplier(rank_pct, downside_pct)
+        top_pct = pd.to_numeric(df["pm_v3_top_utility_proba"], errors="coerce").rank(method="first", pct=True)
+        blend_pct = 0.5 * rank_pct + 0.5 * downside_pct
+        df["pm_v3_score_blend"] = 0.5 * pd.to_numeric(df["pm_v3_rank_score_pred"], errors="coerce") + 0.5 * pd.to_numeric(df["pm_v3_downside_utility_pred"], errors="coerce")
+        df["pm_multiplier"] = self._map_multiplier(rank_pct, downside_pct, top_pct, blend_pct)
         return {
             (str(row["prediction_date"]), str(row["code"])): {
                 "pm_v3_rank_score_pred": row.get("pm_v3_rank_score_pred"),
                 "pm_v3_downside_utility_pred": row.get("pm_v3_downside_utility_pred"),
                 "pm_v3_top_utility_proba": row.get("pm_v3_top_utility_proba"),
+                "pm_v3_score_blend": row.get("pm_v3_score_blend"),
                 "pm_multiplier": row.get("pm_multiplier"),
             }
             for row in df.to_dict(orient="records")
         }
 
-    def _map_multiplier(self, rank_pct: pd.Series, downside_pct: pd.Series) -> pd.Series:
+    def _map_multiplier(self, rank_pct: pd.Series, downside_pct: pd.Series, top_pct: pd.Series, blend_pct: pd.Series) -> pd.Series:
+        if self.mapping_name in {"e_139_classifier_gate_recommended", "e_140_classifier_gate_more_pm130", "e_120_classifier_gate_wider"}:
+            thresholds = self.mapping_thresholds
+            return self._map_classifier_gate(
+                rank_pct,
+                downside_pct,
+                top_pct,
+                blend_pct,
+                gate=float(thresholds["classifier_gate_threshold"]),
+                rank_t=float(thresholds["rank_threshold"]),
+                downside_t=float(thresholds["downside_threshold"]),
+            )
+        if self.mapping_name == "mapping_c_rank_plus_downside_blend":
+            return self._quantile_map(blend_pct)
+        if self.mapping_name == "mapping_a_rank_score_only":
+            return self._quantile_map(rank_pct)
         out = pd.Series(1.00, index=rank_pct.index)
         out.loc[rank_pct >= 0.75] = 1.15
         if self.mapping_name == "mapping_a_half_pm130_candidates":
@@ -441,6 +471,31 @@ class PortfolioManagerV3SizingAdvisor:
         out.loc[rank_pct <= 0.25] = 0.80
         out.loc[rank_pct <= 0.10] = 0.60
         return out
+
+    def _quantile_map(self, pct: pd.Series) -> pd.Series:
+        out = pd.Series(1.00, index=pct.index)
+        out.loc[pct >= 0.90] = 1.30
+        out.loc[(pct >= 0.75) & (pct < 0.90)] = 1.15
+        out.loc[pct <= 0.25] = 0.80
+        out.loc[pct <= 0.10] = 0.60
+        return out
+
+    def _map_classifier_gate(self, rank_pct: pd.Series, downside_pct: pd.Series, top_pct: pd.Series, blend_pct: pd.Series, *, gate: float, rank_t: float, downside_t: float) -> pd.Series:
+        out = pd.Series(1.00, index=rank_pct.index)
+        out.loc[(blend_pct >= 0.75) | (rank_pct >= rank_t)] = 1.15
+        out.loc[(rank_pct >= rank_t) & (downside_pct >= downside_t) & (top_pct >= gate)] = 1.30
+        out.loc[blend_pct <= 0.25] = 0.80
+        out.loc[(blend_pct <= 0.10) | (top_pct <= 0.10)] = 0.60
+        return out
+
+    def _normalize_code(self, value: Any) -> str:
+        if value is None or pd.isna(value):
+            return ""
+        text = str(value).strip()
+        if text.endswith(".0"):
+            text = text[:-2]
+        digits = "".join(ch for ch in text if ch.isdigit())
+        return digits.zfill(4) if digits else text
 
 
 def multiplier_from_high_minus_avoid(high_proba: float | None, avoid_proba: float | None) -> float:

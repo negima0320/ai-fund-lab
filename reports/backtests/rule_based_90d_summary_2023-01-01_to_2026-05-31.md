@@ -3,11 +3,11 @@
 ## 実行条件
 
 - 期間: 2023-01-01 〜 2026-05-31
-- profile: rookie_dealer_02_v2_93c_pm_ai_v3_candidate_half_pm130 新人ディーラー2号 v2.93c PM AI v3 candidate C
+- profile: rookie_dealer_02_v2_94e_pm_ai_v3_rank_downside_blend_candidate 新人ディーラー2号 v2.94e PM AI v3 rank downside blend candidate
 - provider: jquants
 - ChatGPT/OpenAI: disabled
 - broker: paper
-- config_version: cfg_ba6f161
+- config_version: cfg_3c47c2d
 
 ## Backtest Date Range Audit
 
@@ -20,51 +20,51 @@
 - price_fetch_clamped_start: 2022-07-05
 - first_fetch_attempt_date: None
 - raw_price_first_date: 2022-07-05
-- raw_price_last_date: 2026-05-29
+- raw_price_last_date: 2026-05-28
 - first_price_date: 2022-07-05
-- last_price_date: 2026-05-29
+- last_price_date: 2026-05-28
 - first_trading_day: 2023-01-04
-- last_trading_day: 2026-05-29
+- last_trading_day: 2026-05-28
 - target_trading_days: 890
 - target_trading_days_source: raw_price_cache
 - processed_first_date: 2023-01-04
-- processed_last_date: 2026-05-28
+- processed_last_date: 2026-05-27
 - missing_processed_dates_count: 1
-- first_missing_processed_date: 2026-05-29
-- last_missing_processed_date: 2026-05-29
-- processed_days: 830
+- first_missing_processed_date: 2026-05-28
+- last_missing_processed_date: 2026-05-28
+- processed_days: 829
 - skipped_days: 1
-- last_processed_day: 2026-05-28
+- last_processed_day: 2026-05-27
 - first_trade_date: 2023-01-05
-- last_trade_date: 2026-05-29
+- last_trade_date: 2026-05-28
 
 ### Data Coverage Audit
 
 - prices.requested_end_date: 2026-05-31
-- prices.latest_available_price_date: 2026-05-29
+- prices.latest_available_price_date: 2026-05-28
 - prices.coverage_ok: false
 - prices.warning: price data ends before requested_end_date; backtest can only process cached/fetched price dates
 
 ### Requested vs Effective Period
 
 - requested_period: 2023-01-01 to 2026-05-31
-- effective_period: 2023-01-04 to 2026-05-28
+- effective_period: 2023-01-04 to 2026-05-27
 - effective_range_warning: processed days end before requested_end_date; check latest_available_price_date and fetch-period-prices logs
 
 ### Hardcoded Date Audit
 
 - target: 2026-03-06
-- match_count: 318
+- match_count: 332
 - warning: 2026-03-06 remains in config/src/docs/reports/README
 
 ### Processed Data Audit
 
 - indicators_last_date: 2026-05-29
 - candidates_last_date: 2026-05-29
-- scored_candidates_last_date: 2026-05-29
+- scored_candidates_last_date: 2026-05-28
 - indicators_count: 1221
 - candidates_file_count: 1221
-- scored_candidates_file_count: 831
+- scored_candidates_file_count: 830
 - dates_with_indicators_but_no_candidates: 0
 - dates_with_candidates_but_no_scored: 0
 - match: config/provider.yaml
@@ -74,26 +74,26 @@
 - match: reports/backtest_2026-03-06_to_2026-03-06.json
 - match: reports/backtest_2026-03-06_to_2026-03-06.md
 - match: reports/day_2026-03-06.md
+- match: reports/rookie_dealer_02_v2_94_pm_ai_v3_e139_candidate/backtest_2023-01-01_to_2026-05-31.json
+- match: reports/rookie_dealer_02_v2_94_pm_ai_v3_e139_candidate/backtest_2023-01-01_to_2026-05-31.md
 - match: reports/rookie_dealer_02_v2_74_ml_ranked_exit_ai_affordable_fallback/backtest_2023-01-01_to_2026-05-31.json
-- match: reports/rookie_dealer_02_v2_74_ml_ranked_exit_ai_affordable_fallback/backtest_2023-01-01_to_2026-05-31.md
-- match: reports/rookie_dealer_02_v2_66/backtest_2026-02-01_to_2026-02-28.md
 
 ## 結果サマリ
 
 - 初期資金: 1,000,000円
-- 最終資産: 1,972,408円
-- 税引前損益: 983,508円
-- 税引後損益: 783,708円
-- 税引後損益率: 78.37%
-- 勝率: 43.97%
-- profit factor: 1.44
-- 最大ドローダウン: -18.13%
-- 総取引数: 514
-- 利確回数: 67
-- 損切り回数: 218
-- 最大保有期間売却回数: 202
+- 最終資産: 2,169,166円
+- 税引前損益: 1,166,966円
+- 税引後損益: 929,897円
+- 税引後損益率: 92.99%
+- 勝率: 43.76%
+- profit factor: 1.54
+- 最大ドローダウン: -19.22%
+- 総取引数: 505
+- 利確回数: 70
+- 損切り回数: 217
+- 最大保有期間売却回数: 193
 - no trade日数: 276
-- selected_count合計: 1375
+- selected_count合計: 1372
 
 ## 新人ディーラー1号コメント
 
