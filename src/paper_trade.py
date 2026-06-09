@@ -527,6 +527,15 @@ def _portfolio_manager_sizing_enabled(config: dict[str, Any]) -> bool:
     return bool(_portfolio_manager_sizing_policy(config).get("enabled", False))
 
 
+def _portfolio_manager_disabled_equal_weight_enabled(config: dict[str, Any]) -> bool:
+    policy = _portfolio_manager_sizing_policy(config)
+    rule = str(policy.get("rule") or "")
+    return _portfolio_manager_sizing_enabled(config) and rule in {
+        "disabled_equal_weight",
+        "pm_disabled_equal_weight",
+    }
+
+
 def _relative_allocator_policy(config: dict[str, Any]) -> dict[str, Any]:
     policy = config.get("relative_allocator")
     return policy if isinstance(policy, dict) else {}
@@ -955,6 +964,8 @@ def _apply_high_pm_min_hold_exit_guard(
 def _portfolio_manager_sizing_advisor(config: dict[str, Any]) -> PortfolioManagerSizingAdvisor | PortfolioManagerV3SizingAdvisor:
     policy = _portfolio_manager_sizing_policy(config)
     rule = str(policy.get("rule") or "")
+    if rule in {"disabled_equal_weight", "pm_disabled_equal_weight"}:
+        raise RuntimeError("PM sizing advisor is disabled by profile rule")
     if rule == "pm_ai_v3_candidate":
         model_dir = str(policy.get("model_dir") or DEFAULT_PM_V3_MODEL_DIR)
         dataset_path = str(policy.get("dataset_path") or DEFAULT_PM_V3_DATASET)
@@ -988,9 +999,54 @@ def _portfolio_manager_sizing_advisor(config: dict[str, Any]) -> PortfolioManage
     return _PM_SIZING_ADVISOR_CACHE[key]
 
 
+def _portfolio_manager_disabled_equal_weight_fields(
+    *,
+    base_shares: int | None = None,
+    entry_price: float | None = None,
+    cash: float | None = None,
+) -> dict[str, Any]:
+    shares = int(base_shares or 0)
+    price = float(entry_price or 0.0)
+    base_amount = max(0.0, shares * price)
+    fields: dict[str, Any] = {
+        "pm_ai_enabled": False,
+        "pm_status": "disabled",
+        "pm_missing_reason": "pm_disabled",
+        "pm_feature_count": 0,
+        "pm_high_conviction_proba": None,
+        "pm_avoid_proba": None,
+        "pm_score": 0.0,
+        "pm_multiplier": 1.0,
+        "pm_model_version": "disabled",
+        "pm_feature_found": False,
+        "pm_warning": "pm_disabled",
+        "pm_model_path": "",
+        "pm_api_only_candidate_enabled": False,
+        "pm_multiplier_source": "pm_disabled_equal_weight",
+    }
+    if base_shares is not None:
+        target_amount = min(max(0.0, float(cash or 0.0)), base_amount) if cash is not None else base_amount
+        fields.update(
+            {
+                "pm_base_planned_shares": shares,
+                "pm_base_planned_amount": round(base_amount, 2),
+                "pm_target_amount": round(base_amount, 2),
+                "pm_cash_capped_target_amount": round(target_amount, 2),
+                "pm_resized_shares": shares,
+                "pm_resized_amount": round(base_amount, 2),
+                "pm_resize_reason": "pm_disabled_equal_weight",
+            }
+        )
+    return fields
+
+
 def _ensure_portfolio_manager_decision_fields(item: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     if not _portfolio_manager_sizing_enabled(config):
         return {}
+    if _portfolio_manager_disabled_equal_weight_enabled(config):
+        fields = _portfolio_manager_disabled_equal_weight_fields()
+        item.update(fields)
+        return fields
     if "pm_score" in item and "pm_multiplier" in item and "pm_feature_found" in item:
         return _portfolio_manager_trade_fields(item)
     try:
@@ -1032,6 +1088,16 @@ def _apply_portfolio_manager_sizing(
         "pm_base_planned_shares": base_shares,
         "pm_base_planned_amount": round(base_amount, 2),
     }
+    if _portfolio_manager_disabled_equal_weight_enabled(config):
+        fields.update(
+            _portfolio_manager_disabled_equal_weight_fields(
+                base_shares=base_shares,
+                entry_price=entry_price,
+                cash=cash,
+            )
+        )
+        item.update(fields)
+        return shares, fields
     if base_shares <= 0 or entry_price <= 0:
         fields.update(
             {

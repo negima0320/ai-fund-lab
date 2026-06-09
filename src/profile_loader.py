@@ -102,6 +102,8 @@ PROFILE_ALIASES = {
     "rookie_dealer_02_v2_91": "rookie_dealer_02_v2_91_pm_ai_v2_calibrated_rule_e_cap38",
     "rookie_dealer_02_v2.92": "rookie_dealer_02_v2_92_relative_allocator_cap38",
     "rookie_dealer_02_v2_92": "rookie_dealer_02_v2_92_relative_allocator_cap38",
+    "rookie_dealer_02_v2.95": "rookie_dealer_02_v2_95_pm_disabled_equal_weight_cap38",
+    "rookie_dealer_02_v2_95": "rookie_dealer_02_v2_95_pm_disabled_equal_weight_cap38",
 }
 
 
