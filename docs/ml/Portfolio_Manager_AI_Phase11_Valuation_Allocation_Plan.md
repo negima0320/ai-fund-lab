@@ -628,3 +628,84 @@ Interpretation:
 - `recommended_candidate_threshold`: `top5`
 - Phase 11-Dへ進む場合は、full backtestではなく、strict limited-scope designでbudget 900k案とaffordability fallback案を分けて検証する。
 - Phase 11-C3を行うなら、top5が高価格で買えない日にだけp90+ affordable候補へfallbackするルールを検証する。
+
+## Phase 11-D Implementation Status
+
+実装済み:
+
+- `src/ml/phase11d_combined_backtest.py`
+- `scripts/ml/run_phase11d_combined_backtest.py`
+- `tests/test_ml_phase11d_combined_backtest.py`
+
+生成report:
+
+- `reports/ml/phase11d_combined_backtest_2025.md`
+- `reports/ml/phase11d_combined_backtest_2025.json`
+
+Scope:
+
+- Phase 11-C simulation parquetを使用
+- 必要な `close` / baseline rank scoreはPhase 11-A datasetから参照
+- 2025年entryのみのlimited combined backtest
+- 比較対象は2本のみ
+- full period backtestなし
+- profile追加/変更なし
+- 既存model上書きなし
+- historical prediction再生成なし
+
+Backtest条件:
+
+| item | value |
+| --- | ---: |
+| initial_cash | `1,000,000` |
+| daily_buy_budget | `900,000` |
+| max_positions | `5` |
+| round_lot | `100` |
+| holding_days | `20` |
+
+比較対象:
+
+| strategy | rank input | allocation |
+| --- | --- | --- |
+| `baseline_equal_allocation` | `stock_selection_rank_score` | equal allocation |
+| `candidate_valuation_top5` | `opportunity_top_decile_proba` | `equal_weight_top5` |
+
+実データ結果:
+
+| strategy | net_profit | PF | DD | win_rate | total_trades | final_assets | capital_utilization |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `baseline_equal_allocation` | `88,578` | `1.5829` | `-5.33%` | `50.91%` | `55` | `1,088,578` | `50.07%` |
+| `candidate_valuation_top5` | `187,018` | `1.6990` | `-16.83%` | `60.34%` | `58` | `1,187,018` | `49.89%` |
+
+BUY quality:
+
+| strategy | future_return_20d | future_max_return_20d | future_max_drawdown_20d | opportunity_value_20d | top_decile_rate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `baseline_equal_allocation` | `0.0104` | `0.0691` | `-0.0501` | `0.0190` | `0.0727` |
+| `candidate_valuation_top5` | `0.0314` | `0.1520` | `-0.0889` | `0.0631` | `0.2931` |
+
+Valuation effect:
+
+| metric | delta |
+| --- | ---: |
+| net_profit | `+98,440` |
+| PF | `+0.1161` |
+| DD | `-11.50%` |
+| capital_utilization | `-0.18%pt` |
+| opportunity_value_20d_mean | `+0.0441` |
+| future_return_20d_mean | `+0.0210` |
+
+Interpretation:
+
+- Valuation接続により、2025年限定では利益、PF、勝率、BUY qualityが改善した。
+- `opportunity_top_decile_20d` rateは `7.27%` から `29.31%` へ改善し、候補品質改善は確認できた。
+- 一方で、`future_max_drawdown_20d` 平均とBacktest DDは悪化している。
+- Phase 11-Dの目的である「Valuationが候補品質を改善するか」はyes。
+- ただし、Phase 11-EはExit/Risk guard付きの限定検証にする必要がある。
+
+推奨:
+
+- `ready_for_phase11e`: `true`
+- `dd_worsened`: `true`
+- `recommended_next_phase`: `Phase11-E limited exit integration with DD guard`
+- Phase 11-Eではfull backtestへ広げず、2025年限定でOpportunity消滅/expected downside/簡易DD guardのどれがDD悪化を抑えるかを先に検証する。

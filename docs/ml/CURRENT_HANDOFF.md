@@ -187,6 +187,57 @@ Important interpretation:
   budget and max-position constraints still select the same affordable top
   names.
 
+Phase 11-D Limited Combined Backtest is implemented:
+
+```text
+src/ml/phase11d_combined_backtest.py
+scripts/ml/run_phase11d_combined_backtest.py
+tests/test_ml_phase11d_combined_backtest.py
+```
+
+Latest generated report:
+
+```text
+reports/ml/phase11d_combined_backtest_2025.md
+reports/ml/phase11d_combined_backtest_2025.json
+```
+
+Core Phase 11-D result:
+
+- period: `2025-01-01` to `2025-12-31` entries only
+- source rows: `310,618`
+- candidate_days: `165`
+- leakage_risk: `low`
+- blocking_issues: `0`
+- full_period_backtest_executed: `false`
+- historical_predictions_regenerated: `false`
+- profile_changed: `false`
+
+Strategy comparison:
+
+| strategy | net_profit | PF | DD | win_rate | trades | final_assets | utilization |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| baseline equal allocation | `88,578` | `1.5829` | `-5.33%` | `50.91%` | `55` | `1,088,578` | `50.07%` |
+| valuation top5 | `187,018` | `1.6990` | `-16.83%` | `60.34%` | `58` | `1,187,018` | `49.89%` |
+
+BUY quality comparison:
+
+- baseline future_return_20d mean: `0.0104`
+- valuation future_return_20d mean: `0.0314`
+- baseline opportunity_value_20d mean: `0.0190`
+- valuation opportunity_value_20d mean: `0.0631`
+- baseline top-decile BUY rate: `7.27%`
+- valuation top-decile BUY rate: `29.31%`
+
+Important interpretation:
+
+- Phase 11-D confirms that Valuation improves candidate quality in the 2025
+  limited combined setup.
+- Net profit, PF, win rate, and BUY quality all improved versus the non-
+  Valuation baseline.
+- DD worsened materially, so Phase 11-E should proceed only as a limited
+  exit/risk guard experiment, not as a broad full-period backtest.
+
 Important reference profiles are:
 
 ```text
@@ -247,8 +298,9 @@ Phase 10 / Phase 11 decision:
 - Phase 11-B Valuation Engine Prototype is complete.
 - Phase 11-C Capital Allocation Engine Prototype is complete.
 - Phase 11-C2 Budget Usage Constraint Audit is complete.
-- Proceed toward strict limited-scope Phase 11-D design with explicit
-  `daily_buy_budget=900000` and affordability fallback sensitivity checks.
+- Phase 11-D Limited Combined Backtest is complete.
+- Proceed toward strict limited-scope Phase 11-E design with DD guard / exit
+  sensitivity checks.
 - Do not overwrite current PM AI, current Exit AI, or v2_82.
 - Do not use backtest results, trades, profit, cash, portfolio, selected,
   bought, affordable, or current PM multiplier as Phase 11 features.
@@ -296,6 +348,7 @@ Recent active work includes:
 - Phase 11-B Valuation Engine Prototype implementation
 - Phase 11-C Capital Allocation Engine Prototype implementation
 - Phase 11-C2 Budget Usage Constraint Audit implementation
+- Phase 11-D Limited Combined Backtest implementation
 
 Current generated reports of interest:
 
