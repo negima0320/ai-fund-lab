@@ -709,3 +709,85 @@ Interpretation:
 - `dd_worsened`: `true`
 - `recommended_next_phase`: `Phase11-E limited exit integration with DD guard`
 - Phase 11-Eではfull backtestへ広げず、2025年限定でOpportunity消滅/expected downside/簡易DD guardのどれがDD悪化を抑えるかを先に検証する。
+
+## Phase 11-E Implementation Status
+
+実装済み:
+
+- `src/ml/phase11e_exit_dd_guard.py`
+- `scripts/ml/run_phase11e_exit_dd_guard.py`
+- `tests/test_ml_phase11e_exit_dd_guard.py`
+
+生成report:
+
+- `reports/ml/phase11e_exit_dd_guard_2025.md`
+- `reports/ml/phase11e_exit_dd_guard_2025.json`
+
+Scope:
+
+- Phase 11-D Candidateをbaseline referenceとして使用
+- Phase 11-C simulation parquetとPhase 11-A closeを使用
+- 2025年のみのExit / DD Guard軽量backtest
+- full period backtestなし
+- profile追加/変更なし
+- 既存model上書きなし
+- historical prediction再生成なし
+- stop loss判定にfuture lowを使用しない
+
+Variant:
+
+| variant | definition |
+| --- | --- |
+| `E0_no_guard` | Phase 11-D Candidate相当のpath-based no guard |
+| `E1_stop_loss_8pct` | entry closeから `-8%` で売却 |
+| `E2_stop_loss_5pct` | entry closeから `-5%` で売却 |
+| `E3_opportunity_disappeared` | current probaがentry probaから `0.15` 以上低下、またはcurrent rank `< 0.50` で売却 |
+| `E4_stop_loss_8pct_plus_opportunity` | E1 + E3 |
+
+Phase 11-D Candidate reference:
+
+| net_profit | PF | DD | win_rate | trades | final_assets | utilization |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `187,018` | `1.6990` | `-16.83%` | `60.34%` | `58` | `1,187,018` | `49.89%` |
+
+実データ結果:
+
+| variant | net_profit | PF | DD | win_rate | trades | avg_holding_days |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `E0_no_guard` | `181,730` | `1.6869` | `-23.43%` | `58.62%` | `58` | `19.41` |
+| `E1_stop_loss_8pct` | `82,540` | `1.1993` | `-22.94%` | `47.83%` | `69` | `15.96` |
+| `E2_stop_loss_5pct` | `49,110` | `1.1185` | `-26.94%` | `42.11%` | `76` | `14.28` |
+| `E3_opportunity_disappeared` | `529,880` | `2.8160` | `-7.85%` | `54.74%` | `137` | `7.16` |
+| `E4_stop_loss_8pct_plus_opportunity` | `615,110` | `2.6219` | `-6.02%` | `52.26%` | `155` | `6.26` |
+
+Delta vs Phase 11-D Candidate:
+
+| variant | net_profit_delta | PF_delta | DD_delta | win_rate_delta |
+| --- | ---: | ---: | ---: | ---: |
+| `E1_stop_loss_8pct` | `-104,478` | `-0.4997` | `-6.11%pt` | `-12.52%pt` |
+| `E2_stop_loss_5pct` | `-137,908` | `-0.5805` | `-10.11%pt` | `-18.24%pt` |
+| `E3_opportunity_disappeared` | `+342,862` | `+1.1169` | `+8.98%pt` | `-5.60%pt` |
+| `E4_stop_loss_8pct_plus_opportunity` | `+428,092` | `+0.9229` | `+10.81%pt` | `-8.09%pt` |
+
+Exit reason counts:
+
+| variant | time_exit_20d | stop_loss | opportunity_rank_below_floor | opportunity_proba_drop | forced_end |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `E1_stop_loss_8pct` | `39` | `25` | `0` | `0` | `5` |
+| `E2_stop_loss_5pct` | `36` | `35` | `0` | `0` | `5` |
+| `E3_opportunity_disappeared` | `24` | `0` | `9` | `99` | `5` |
+| `E4_stop_loss_8pct_plus_opportunity` | `16` | `15` | `8` | `111` | `5` |
+
+Interpretation:
+
+- Simple Stop Loss単体のE1/E2は、利益、PF、DDを悪化させた。
+- Opportunity Disappeared ExitのE3は、DDを `-7.85%` まで改善し、PFと利益も大きく改善した。
+- E4はDDが最良の `-6.02%` で、Phase 11-Eの研究判定条件 `DD >= -10%`, `PF >= 1.5`, `net_profit >= 100,000` を満たした。
+- E3/E4は平均保有日数が大きく短くなり、取引数も増えるため、次は手数料・スリッページ・過剰回転のrobustness checkが必要。
+
+推奨:
+
+- `best_variant`: `E4_stop_loss_8pct_plus_opportunity`
+- `dd_improved_variant_found`: `true`
+- `recommended_next_phase`: `Phase11-F limited robustness check`
+- Phase 11-Fではfull periodへ広げず、2025年限定のままE3/E4について手数料、スリッページ、exit閾値感度、過剰回転を確認する。

@@ -238,6 +238,50 @@ Important interpretation:
 - DD worsened materially, so Phase 11-E should proceed only as a limited
   exit/risk guard experiment, not as a broad full-period backtest.
 
+Phase 11-E Limited Exit / DD Guard is implemented:
+
+```text
+src/ml/phase11e_exit_dd_guard.py
+scripts/ml/run_phase11e_exit_dd_guard.py
+tests/test_ml_phase11e_exit_dd_guard.py
+```
+
+Latest generated report:
+
+```text
+reports/ml/phase11e_exit_dd_guard_2025.md
+reports/ml/phase11e_exit_dd_guard_2025.json
+```
+
+Core Phase 11-E result:
+
+- period: `2025-01-01` to `2025-12-31` entries only
+- leakage_risk: `low`
+- blocking_issues: `0`
+- full_backtest_executed: `false`
+- profile_changed: `false`
+- historical_predictions_regenerated: `false`
+- stop_loss_uses_future_low: `false`
+
+Variant comparison:
+
+| variant | net_profit | PF | DD | win_rate | trades | avg holding |
+|---|---:|---:|---:|---:|---:|---:|
+| E0 no guard | `181,730` | `1.6869` | `-23.43%` | `58.62%` | `58` | `19.41` |
+| E1 stop -8% | `82,540` | `1.1993` | `-22.94%` | `47.83%` | `69` | `15.96` |
+| E2 stop -5% | `49,110` | `1.1185` | `-26.94%` | `42.11%` | `76` | `14.28` |
+| E3 opportunity disappeared | `529,880` | `2.8160` | `-7.85%` | `54.74%` | `137` | `7.16` |
+| E4 stop -8% + opportunity | `615,110` | `2.6219` | `-6.02%` | `52.26%` | `155` | `6.26` |
+
+Important interpretation:
+
+- Simple stop loss alone was harmful in this lightweight 2025 test.
+- Opportunity Disappeared Exit improved DD below `-10%` while preserving PF
+  and net profit.
+- E4 had the best DD, but it also increased trade count and shortened holding
+  days, so the next step should test transaction cost, slippage, and threshold
+  robustness before expanding scope.
+
 Important reference profiles are:
 
 ```text
@@ -299,8 +343,9 @@ Phase 10 / Phase 11 decision:
 - Phase 11-C Capital Allocation Engine Prototype is complete.
 - Phase 11-C2 Budget Usage Constraint Audit is complete.
 - Phase 11-D Limited Combined Backtest is complete.
-- Proceed toward strict limited-scope Phase 11-E design with DD guard / exit
-  sensitivity checks.
+- Phase 11-E Limited Exit / DD Guard is complete.
+- Proceed toward strict limited-scope Phase 11-F robustness checks for E3/E4
+  transaction cost, slippage, threshold sensitivity, and overtrading risk.
 - Do not overwrite current PM AI, current Exit AI, or v2_82.
 - Do not use backtest results, trades, profit, cash, portfolio, selected,
   bought, affordable, or current PM multiplier as Phase 11 features.
@@ -349,6 +394,7 @@ Recent active work includes:
 - Phase 11-C Capital Allocation Engine Prototype implementation
 - Phase 11-C2 Budget Usage Constraint Audit implementation
 - Phase 11-D Limited Combined Backtest implementation
+- Phase 11-E Limited Exit / DD Guard implementation
 
 Current generated reports of interest:
 
