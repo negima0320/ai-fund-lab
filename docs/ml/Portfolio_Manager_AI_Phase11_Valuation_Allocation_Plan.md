@@ -280,6 +280,16 @@ Confidence
 Opportunityに応じて購入金額を決定する
 ```
 
+### Phase 11-C2: Budget Usage Constraint Audit
+
+目的:
+
+```text
+Phase 11-Cのbudget usage proxyが低い理由を特定する
+```
+
+Phase 11-Dへ進む前に、単元株、候補価格、daily budget、max positions、candidate thresholdのどれが資金利用率を抑えているかを軽量監査する。
+
 ### Phase 11-D: Combined Backtest
 
 目的:
@@ -394,3 +404,227 @@ Phase 11-Aでは、backtest結果、trades.csv、損益、cash、portfolio、sel
 - primary label: `opportunity_value_20d`
 - secondary labels: `future_max_return_20d`, `future_max_drawdown_20d`, `opportunity_top_decile_20d`
 - next task: Phase 11-B Valuation Engine Prototype
+
+## Phase 11-B Implementation Status
+
+実装済み:
+
+- `src/ml/phase11b_valuation_engine_prototype.py`
+- `scripts/ml/train_phase11b_valuation_engine_prototype.py`
+- `tests/test_ml_phase11b_valuation_engine_prototype.py`
+
+生成report:
+
+- `reports/ml/phase11b_valuation_engine_prototype_2025_holdout.md`
+- `reports/ml/phase11b_valuation_engine_prototype_2025_holdout.json`
+
+candidate model:
+
+- `models/ml/valuation_engine/candidate_phase11b/`
+
+Scope:
+
+- Phase 11-A datasetを使用
+- train: `2023-01-04` to `2024-12-31`
+- test: `2025-01-01` to `2025-12-31`
+- trainは長時間化回避のため deterministic sample `250,000` rows
+- full backtestなし
+- profile追加/変更なし
+- 既存model上書きなし
+
+実データholdout結果:
+
+| item | value |
+| --- | ---: |
+| train_rows | `250,000` |
+| test_rows | `310,618` |
+| feature_count | `54` |
+| regression target | `opportunity_value_20d` |
+| regression MAE | `0.0865` |
+| regression RMSE | `0.1407` |
+| regression Pearson | `0.0559` |
+| regression Spearman | `-0.0028` |
+| classification target | `opportunity_top_decile_20d` |
+| classification AUC | `0.6478` |
+| classification PR-AUC | `0.1600` |
+| precision@top10% | `0.1998` |
+| base positive rate | `0.0997` |
+| leakage_risk | `low` |
+| blocking_issues | `0` |
+| ready_for_phase11c | `true` |
+
+Valuation output:
+
+- `opportunity_score`: `predicted_opportunity_value` のtest内percentile rankを0-100化
+- `predicted_opportunity_value`: `opportunity_value_20d` regression output
+- `opportunity_top_decile_proba`: top decile classification probability
+- `confidence`: `abs(opportunity_top_decile_proba - 0.5) * 200`
+- `expected_upside`: Phase 11-Bでは未実装
+- `expected_downside`: Phase 11-Bでは未実装
+
+Phase 11-Bでも、backtest結果、trades.csv、損益、cash、portfolio、selected/bought/affordable、current PM multiplierをfeatureとして使用していない。
+
+推奨:
+
+- Phase 11-C Capital Allocation Engine Prototypeへ進む
+- 初期入力は `opportunity_score`, `opportunity_top_decile_proba`, `confidence`
+- `expected_upside` / `expected_downside` は後続で別target modelとして追加検討
+
+## Phase 11-C Implementation Status
+
+実装済み:
+
+- `src/ml/phase11c_capital_allocation_prototype.py`
+- `scripts/ml/run_phase11c_capital_allocation_prototype.py`
+- `tests/test_ml_phase11c_capital_allocation_prototype.py`
+
+生成report:
+
+- `reports/ml/phase11c_capital_allocation_prototype_2025.md`
+- `reports/ml/phase11c_capital_allocation_prototype_2025.json`
+
+軽量artifact:
+
+- `data/ml/valuation_engine/phase11c_allocation_simulation_2025.parquet`
+
+Scope:
+
+- Phase 11-B candidate modelを使用
+- Phase 11-A datasetを使用
+- 2025年のみのallocation quality simulation
+- full backtestなし
+- 売却ロジックなし
+- Exit AI統合なし
+- profile追加/変更なし
+- 既存model上書きなし
+
+Simulation条件:
+
+| item | value |
+| --- | ---: |
+| initial_cash | `1,000,000` |
+| daily_buy_budget | `300,000` |
+| max_positions | `5` |
+| per_code_cap_rate | `0.38` |
+| round_lot | `100` |
+
+実データsimulation結果:
+
+| item | value |
+| --- | ---: |
+| rows | `310,618` |
+| unique_codes | `4,225` |
+| candidate_days | `165` |
+| date_range | `2025-01-07` to `2025-12-29` |
+| leakage_risk | `low` |
+| blocking_issues | `0` |
+| best_rule | `equal_weight_top5` |
+| ready_for_phase11d | `true` |
+
+Rule comparison:
+
+| rule | allocated/day | budget_usage | weighted_return_20d | weighted_max_return_20d | weighted_max_drawdown_20d | weighted_opportunity_value | weighted_top_decile_rate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `equal_weight_top5` | `1.2485` | `0.2072` | `0.0415` | `0.1466` | `-0.0878` | `0.0587` | `0.2403` |
+| `proba_rank_weighted` | `1.2485` | `0.2072` | `0.0415` | `0.1466` | `-0.0878` | `0.0587` | `0.2403` |
+| `proba_confidence_weighted` | `0.6909` | `0.1104` | `0.0242` | `0.1131` | `-0.0771` | `0.0360` | `0.1973` |
+| `conservative_top_only` | `1.2485` | `0.2072` | `0.0415` | `0.1466` | `-0.0878` | `0.0587` | `0.2403` |
+
+Interpretation:
+
+- `equal_weight_top5`, `proba_rank_weighted`, `conservative_top_only` は2025年条件では同じ候補集合に収束した。
+- `opportunity_top_decile_20d` のweighted rateは `0.2403` で、母集団約 `0.10` に対して約2.4倍。
+- ただしbudget usageは約 `20.7%` と低く、単元株・日次予算・候補価格により資金利用が強く制約されている。
+- `proba_confidence_weighted` はより保守的だが、qualityとbudget usageが低下した。
+
+推奨:
+
+- Phase 11-Dへ進む場合は、いきなりfull backtestではなく、strict limited scopeのCombined Backtest設計から始める。
+- Phase 11-C単体の改善案として、budget usage改善のために候補価格、単元株、daily budget、top-N制約の感度監査を行う余地がある。
+
+## Phase 11-C2 Implementation Status
+
+実装済み:
+
+- `src/ml/phase11c2_budget_usage_constraint_audit.py`
+- `scripts/ml/audit_phase11c2_budget_usage_constraints.py`
+- `tests/test_ml_phase11c2_budget_usage_constraint_audit.py`
+
+生成report:
+
+- `reports/ml/phase11c2_budget_usage_constraint_audit_2025.md`
+- `reports/ml/phase11c2_budget_usage_constraint_audit_2025.json`
+
+Scope:
+
+- Phase 11-C simulation parquetを使用
+- 必要な `close` / `turnover_value` はPhase 11-A datasetから参照
+- 2025年のみのbudget usage constraint audit
+- full backtestなし
+- profile追加/変更なし
+- 既存model上書きなし
+- historical prediction再生成なし
+
+実データ監査結果:
+
+| item | value |
+| --- | ---: |
+| rows | `310,618` |
+| unique_codes | `4,225` |
+| candidate_days | `165` |
+| date_range | `2025-01-07` to `2025-12-29` |
+| leakage_risk | `low` |
+| blocking_issues | `0` |
+| main_budget_bottleneck | `round_lot_and_top_candidate_affordability_limit_daily_budget_usage` |
+| ready_for_phase11d | `true` |
+
+Constraint reason summary:
+
+| reason | days |
+| --- | ---: |
+| `rank_filter_too_strict` | `128` |
+| `top_candidates_too_expensive` | `37` |
+
+Lot cost distribution:
+
+| subset | lot_cost_median | lot_cost_p90 | affordable_under_300k | affordable_under_500k | affordable_under_900k |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `top5` | `195,100` | `1,658,300` | `0.6145` | `0.6836` | `0.7964` |
+| `top10` | `244,350` | `1,545,600` | `0.5727` | `0.6545` | `0.7933` |
+| `p90+` | `169,400` | `764,820` | `0.6897` | `0.8192` | `0.9288` |
+| `p95+` | `172,250` | `867,600` | `0.6721` | `0.7890` | `0.9080` |
+
+Budget sensitivity:
+
+| daily_buy_budget | budget_usage | allocated_rows | allocated/day | weighted_opportunity_value | weighted_top_decile_rate |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| `300,000` | `0.2072` | `206` | `1.2485` | `0.0587` | `0.2403` |
+| `500,000` | `0.2895` | `283` | `1.7152` | `0.0396` | `0.2083` |
+| `900,000` | `0.4092` | `388` | `2.3515` | `0.0621` | `0.2403` |
+
+Max positions sensitivity:
+
+| max_positions | threshold | budget_usage | allocated/day | weighted_opportunity_value | weighted_top_decile_rate |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| `5` | `top5` | `0.2072` | `1.2485` | `0.0587` | `0.2403` |
+| `10` | `top10` | `0.0863` | `1.1212` | `0.0390` | `0.2724` |
+
+Candidate threshold sensitivity:
+
+- `top5`, `top10`, `p90+`, `p80+` は、base条件ではいずれも同じallocated candidatesに収束した。
+- max_positions `5` とdaily budget `300,000` が先に効くため、thresholdを緩めるだけではbudget usageは改善しなかった。
+
+Interpretation:
+
+- 主因は、同日上位候補の単元株コストがdaily budgetに対して大きく、top候補が高価格の日に買付余地が詰まること。
+- 全候補には十分なaffordable候補があるが、Valuation上位候補に絞ると買える候補数が少なくなる。
+- daily budgetを `900,000` に上げるとbudget usage proxyは `20.7%` から `40.9%` へ改善するが、Phase 11の最低目標 `60%` にはまだ届かない。
+- max_positionsを増やすだけでは、300k budget下では改善しない。
+
+推奨:
+
+- `recommended_daily_budget`: `900,000`
+- `recommended_max_positions`: `5`
+- `recommended_candidate_threshold`: `top5`
+- Phase 11-Dへ進む場合は、full backtestではなく、strict limited-scope designでbudget 900k案とaffordability fallback案を分けて検証する。
+- Phase 11-C3を行うなら、top5が高価格で買えない日にだけp90+ affordable候補へfallbackするルールを検証する。

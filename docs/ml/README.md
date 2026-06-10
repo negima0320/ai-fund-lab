@@ -90,7 +90,10 @@ adoption notes for the AI / ML stack.
   - Phase 11 plan to replace direct PM multiplier redevelopment with a two-layer Valuation Engine and Capital Allocation Engine
   - defines allowed inputs, forbidden leakage sources, Phase 11-A to 11-E roadmap, and success criteria
   - Phase 11-A Valuation Engine Dataset Audit implemented with low leakage risk, no blocking issues, and `ready_for_phase11b=true`
-  - current decision: proceed toward Phase 11-B prototype; keep `v2_82_cap38` as reference only
+  - Phase 11-B Valuation Engine Prototype implemented with low leakage risk, no blocking issues, candidate model saved, and `ready_for_phase11c=true`
+  - Phase 11-C Capital Allocation Engine Prototype implemented as a 2025-only allocation-quality simulation with low leakage risk and `ready_for_phase11d=true`
+  - Phase 11-C2 Budget Usage Constraint Audit identified round-lot / top-candidate affordability as the main budget usage bottleneck
+  - current decision: proceed toward strict limited-scope Phase 11-D design with budget/affordability sensitivity; keep `v2_82_cap38` as reference only
 
 ## Adoption Notes
 
@@ -111,6 +114,9 @@ Current strongest full-backtested research candidate:
   - PM AI / Phase 10 redevelopment is currently stopped and summarized in `Portfolio_Manager_AI_Phase10_Stop_and_Hold_Summary.md`
   - Phase 11 will explore Valuation Engine + Capital Allocation Engine as a new research direction, with v2_82 used as a reference record only
   - Phase 11-A confirmed a leakage-safe valuation dataset audit path and does not use backtest/trade outcomes as features
+  - Phase 11-B trained a separate research-only valuation candidate model under `models/ml/valuation_engine/candidate_phase11b/`
+  - Phase 11-C simulated allocation quality for 2025 only and did not run a strategy backtest
+  - Phase 11-C2 audited the low `20.7%` budget usage proxy and recommended a `900,000` daily budget sensitivity path before broad combined backtesting
   - still a backtest/research profile; not connected to live order placement
 
 Experimental next candidates:

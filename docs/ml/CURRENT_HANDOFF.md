@@ -66,6 +66,127 @@ Core result:
 - blocking_issues: `0`
 - ready_for_phase11b: `true`
 
+Phase 11-B Valuation Engine Prototype is implemented:
+
+```text
+src/ml/phase11b_valuation_engine_prototype.py
+scripts/ml/train_phase11b_valuation_engine_prototype.py
+tests/test_ml_phase11b_valuation_engine_prototype.py
+```
+
+Latest generated report and candidate model:
+
+```text
+reports/ml/phase11b_valuation_engine_prototype_2025_holdout.md
+reports/ml/phase11b_valuation_engine_prototype_2025_holdout.json
+models/ml/valuation_engine/candidate_phase11b/
+```
+
+Core Phase 11-B result:
+
+- train rows: `250,000`
+- test rows: `310,618`
+- feature_count: `54`
+- regression target: `opportunity_value_20d`
+- regression MAE/RMSE: `0.0865` / `0.1407`
+- regression Pearson/Spearman: `0.0559` / `-0.0028`
+- classification target: `opportunity_top_decile_20d`
+- AUC / PR-AUC: `0.6478` / `0.1600`
+- precision@top10%: `0.1998`
+- base positive rate: `0.0997`
+- leakage_risk: `low`
+- blocking_issues: `0`
+- ready_for_phase11c: `true`
+
+Valuation output:
+
+- `opportunity_score`
+- `predicted_opportunity_value`
+- `opportunity_top_decile_proba`
+- `confidence`
+
+`expected_upside` and `expected_downside` are intentionally not modeled yet in
+Phase 11-B.
+
+Phase 11-C Capital Allocation Engine Prototype is implemented:
+
+```text
+src/ml/phase11c_capital_allocation_prototype.py
+scripts/ml/run_phase11c_capital_allocation_prototype.py
+tests/test_ml_phase11c_capital_allocation_prototype.py
+```
+
+Latest generated report:
+
+```text
+reports/ml/phase11c_capital_allocation_prototype_2025.md
+reports/ml/phase11c_capital_allocation_prototype_2025.json
+data/ml/valuation_engine/phase11c_allocation_simulation_2025.parquet
+```
+
+Core Phase 11-C result:
+
+- period: `2025-01-07` to `2025-12-29`
+- rows: `310,618`
+- candidate_days: `165`
+- leakage_risk: `low`
+- blocking_issues: `0`
+- best rule: `equal_weight_top5`
+- weighted opportunity top-decile rate: `0.2403`
+- weighted opportunity value: `0.0587`
+- average budget usage: `20.7%`
+- ready_for_phase11d: `true`
+
+Important interpretation:
+
+- `equal_weight_top5`, `proba_rank_weighted`, and `conservative_top_only`
+  converged to the same allocated candidates under the current daily budget,
+  max positions, round-lot, and affordability assumptions.
+- Budget usage is low, so Phase 11-D should start with strict limited-scope
+  design rather than a broad full backtest.
+
+Phase 11-C2 Budget Usage Constraint Audit is implemented:
+
+```text
+src/ml/phase11c2_budget_usage_constraint_audit.py
+scripts/ml/audit_phase11c2_budget_usage_constraints.py
+tests/test_ml_phase11c2_budget_usage_constraint_audit.py
+```
+
+Latest generated report:
+
+```text
+reports/ml/phase11c2_budget_usage_constraint_audit_2025.md
+reports/ml/phase11c2_budget_usage_constraint_audit_2025.json
+```
+
+Core Phase 11-C2 result:
+
+- period: `2025-01-07` to `2025-12-29`
+- rows: `310,618`
+- candidate_days: `165`
+- leakage_risk: `low`
+- blocking_issues: `0`
+- main bottleneck: `round_lot_and_top_candidate_affordability_limit_daily_budget_usage`
+- constraint reasons: `rank_filter_too_strict=128 days`, `top_candidates_too_expensive=37 days`
+- top5 lot cost median / p90: `195,100` / `1,658,300`
+- top5 affordable rate under `300,000`: `61.45%`
+- budget usage sensitivity: `20.7%` at `300,000`, `28.9%` at `500,000`, `40.9%` at `900,000`
+- recommended_daily_budget: `900,000`
+- recommended_max_positions: `5`
+- recommended_candidate_threshold: `top5`
+- ready_for_phase11d: `true`
+
+Important interpretation:
+
+- The low usage is not caused by lack of candidate days or missing affordable
+  names in the full universe.
+- It is mainly caused by the interaction between Valuation top candidates,
+  round lots, and a `300,000` daily budget.
+- Loosening candidate thresholds alone did not improve usage because the base
+  budget and max-position constraints still select the same affordable top
+  names.
+
 Important reference profiles are:
 
 ```text
@@ -123,7 +244,11 @@ Phase 10 / Phase 11 decision:
 - Stop PM AI multiplier redevelopment for now.
 - Do not promote PM AI v3, PM-disabled baseline, or score-based PM rules.
 - Phase 11-A Valuation Engine Dataset Audit is complete.
-- Proceed toward Phase 11-B Valuation Engine Prototype.
+- Phase 11-B Valuation Engine Prototype is complete.
+- Phase 11-C Capital Allocation Engine Prototype is complete.
+- Phase 11-C2 Budget Usage Constraint Audit is complete.
+- Proceed toward strict limited-scope Phase 11-D design with explicit
+  `daily_buy_budget=900000` and affordability fallback sensitivity checks.
 - Do not overwrite current PM AI, current Exit AI, or v2_82.
 - Do not use backtest results, trades, profit, cash, portfolio, selected,
   bought, affordable, or current PM multiplier as Phase 11 features.
@@ -168,6 +293,9 @@ Recent active work includes:
 - Phase 10 stop-and-hold decision
 - Phase 11 Valuation Engine + Capital Allocation Engine plan
 - Phase 11-A Valuation Engine Dataset Audit implementation
+- Phase 11-B Valuation Engine Prototype implementation
+- Phase 11-C Capital Allocation Engine Prototype implementation
+- Phase 11-C2 Budget Usage Constraint Audit implementation
 
 Current generated reports of interest:
 
@@ -176,6 +304,8 @@ reports/ml/phase9a_pm_ai_rearchitecture_audit_2023-01_to_2026-05.md
 reports/ml/phase9g_pm_disabled_equal_weight_backtest_2023-01_to_2026-05.md
 reports/ml/phase10a_score_based_pm_rule_backtest_2023-01_to_2026-05.md
 reports/ml/phase11a_valuation_dataset_audit_2023-01_to_2026-05.md
+reports/ml/phase11b_valuation_engine_prototype_2025_holdout.md
+reports/ml/phase11c_capital_allocation_prototype_2025.md
 ```
 
 ## Important Artifacts
