@@ -1,14 +1,16 @@
 # Current ML Handoff
 
-Last updated: `2026-06-08`
+Last updated: `2026-06-11`
 
 This document is the short handoff for continuing the AI / ML work in a fresh
 chat. It intentionally summarizes only the current state, key constraints, and
 next useful actions. For the full history, see
 `docs/ml/ML_Phase_25_to_Portfolio_Manager_AI_Summary.md`,
 `docs/ml/Exit_AI_v2_Phase5A_to_5F_Retraining_Summary.md`,
-`docs/ml/Portfolio_Manager_AI_Phase7A_to_7G_Final_Summary.md`, and
-`docs/ml/Portfolio_Manager_AI_Phase8A_to_8H_PM_AI_Redesign_Summary.md`.
+`docs/ml/Portfolio_Manager_AI_Phase7A_to_7G_Final_Summary.md`,
+`docs/ml/Portfolio_Manager_AI_Phase8A_to_8H_PM_AI_Redesign_Summary.md`,
+`docs/ml/Portfolio_Manager_AI_Phase10_Stop_and_Hold_Summary.md`, and
+`docs/ml/Portfolio_Manager_AI_Phase11_Valuation_Allocation_Plan.md`.
 
 ## Current State
 
@@ -17,6 +19,52 @@ The latest full-backtested Version 1.0 Candidate remains:
 ```text
 rookie_dealer_02_v2_82_cap38
 ```
+
+Phase 10 / PM AI redevelopment is stopped and held. Phase 11 starts a new
+research direction:
+
+```text
+Valuation Engine
+↓
+Capital Allocation Engine
+```
+
+The goal is not to mimic current PM multipliers. Phase 11 will first audit
+whether API-derived, prediction-time-safe features can explain opportunity:
+
+- `opportunity_score`
+- `expected_upside`
+- `expected_downside`
+- `confidence`
+
+`v2_82_cap38` is a reference record for comparison, not the Phase 11 adoption
+target.
+
+Phase 11-A Valuation Engine Dataset Audit is implemented:
+
+```text
+src/ml/phase11a_valuation_dataset_audit.py
+scripts/ml/audit_phase11a_valuation_dataset.py
+tests/test_ml_phase11a_valuation_dataset_audit.py
+```
+
+Latest generated report:
+
+```text
+reports/ml/phase11a_valuation_dataset_audit_2023-01_to_2026-05.md
+reports/ml/phase11a_valuation_dataset_audit_2023-01_to_2026-05.json
+```
+
+Core result:
+
+- rows: `930,243`
+- unique_codes: `4,234`
+- date range: `2023-01-04` to `2026-04-23`
+- feature_count: `55`
+- label_count: `5`
+- leakage_risk: `low`
+- blocking_issues: `0`
+- ready_for_phase11b: `true`
 
 Important reference profiles are:
 
@@ -46,6 +94,8 @@ Profile lineage:
 - v2_90: integrates API-only PM AI v2 raw; rejected because PM 1.30 disappeared and utilization collapsed.
 - v2_91: calibrates PM AI v2 to recover PM 1.30 count; rejected because PM 1.30 quality did not recover.
 - v2_92: rule-based same-day relative allocator using Stock Selection ranks; operationally valid but rejected after underperforming v2_82.
+- v2_95: PM-disabled equal-weight baseline; rejected because PM/allocator behavior is necessary.
+- v2_96 / v2_97: score-based PM rule research; not promoted because bucket quality and headline metrics were insufficient.
 
 Current v2_82 core result:
 
@@ -67,6 +117,16 @@ Phase 8 decision:
 - Do not promote calibrated PM AI v2.
 - Do not promote v2_92 relative allocator.
 - Do not overwrite current PM AI or Exit AI model directories.
+
+Phase 10 / Phase 11 decision:
+
+- Stop PM AI multiplier redevelopment for now.
+- Do not promote PM AI v3, PM-disabled baseline, or score-based PM rules.
+- Phase 11-A Valuation Engine Dataset Audit is complete.
+- Proceed toward Phase 11-B Valuation Engine Prototype.
+- Do not overwrite current PM AI, current Exit AI, or v2_82.
+- Do not use backtest results, trades, profit, cash, portfolio, selected,
+  bought, affordable, or current PM multiplier as Phase 11 features.
 
 Portfolio Manager AI score:
 
@@ -98,31 +158,24 @@ and adds a per-code exposure cap to address v2_76's drawdown concentration.
 
 ## Latest Commit and Working Tree
 
-This handoff was updated after Phase 8-H and is intended to be committed with
-the Phase 8 PM AI redesign / relative allocator work.
+This handoff was updated at the start of Phase 11 and should be kept aligned
+with the Phase 11 Valuation + Allocation plan.
 
 Recent active work includes:
 
-- Phase 8-A System Understanding Audit
-- Phase 8-B PM AI Candidate Integration Audit
-- Phase 8-C PM AI v2 raw integration backtest
-- Phase 8-D PM AI v2 calibration audit
-- Phase 8-E calibrated PM AI v2 backtest
-- Phase 8-F PM AI label redesign audit
-- Phase 8-G ranking / relative allocation audit
-- Phase 8-H rule-based relative allocator implementation and backtest
+- Phase 9 PM AI v3 research and rejection
+- Phase 10-A score-based PM rule research
+- Phase 10 stop-and-hold decision
+- Phase 11 Valuation Engine + Capital Allocation Engine plan
+- Phase 11-A Valuation Engine Dataset Audit implementation
 
 Current generated reports of interest:
 
 ```text
-reports/ml/phase8a_system_understanding_audit_2023-01_to_2026-05.md
-reports/ml/phase8b_pm_candidate_integration_audit_2023-01_to_2026-05.md
-reports/ml/phase8c_pm_ai_v2_backtest_2023-01_to_2026-05.md
-reports/ml/phase8d_pm_ai_v2_calibration_audit_2023-01_to_2026-05.md
-reports/ml/phase8e_pm_ai_v2_calibrated_backtest_2023-01_to_2026-05.md
-reports/ml/phase8f_pm_ai_label_redesign_audit_2023-01_to_2026-05.md
-reports/ml/phase8g_pm_ai_ranking_audit_2023-01_to_2026-05.md
-reports/ml/phase8h_relative_allocator_backtest_2023-01_to_2026-05.md
+reports/ml/phase9a_pm_ai_rearchitecture_audit_2023-01_to_2026-05.md
+reports/ml/phase9g_pm_disabled_equal_weight_backtest_2023-01_to_2026-05.md
+reports/ml/phase10a_score_based_pm_rule_backtest_2023-01_to_2026-05.md
+reports/ml/phase11a_valuation_dataset_audit_2023-01_to_2026-05.md
 ```
 
 ## Important Artifacts

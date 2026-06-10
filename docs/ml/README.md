@@ -86,6 +86,12 @@ adoption notes for the AI / ML stack.
   - Phase 7 through Phase 10 PM research timeline and rejection rationale
   - current decision: stop PM AI redevelopment for now; keep `v2_82_cap38`; do not promote v2_96 / v2_97
 
+- `Portfolio_Manager_AI_Phase11_Valuation_Allocation_Plan.md`
+  - Phase 11 plan to replace direct PM multiplier redevelopment with a two-layer Valuation Engine and Capital Allocation Engine
+  - defines allowed inputs, forbidden leakage sources, Phase 11-A to 11-E roadmap, and success criteria
+  - Phase 11-A Valuation Engine Dataset Audit implemented with low leakage risk, no blocking issues, and `ready_for_phase11b=true`
+  - current decision: proceed toward Phase 11-B prototype; keep `v2_82_cap38` as reference only
+
 ## Adoption Notes
 
 - `v2_66_ml_ranked_adoption_notes.md`
@@ -103,6 +109,8 @@ Current strongest full-backtested research candidate:
   - Phase 7-G full pytest after triage: `825 passed, 15 warnings`
   - latest audits are summarized in `Portfolio_Manager_AI_Phase7A_to_7G_Final_Summary.md`
   - PM AI / Phase 10 redevelopment is currently stopped and summarized in `Portfolio_Manager_AI_Phase10_Stop_and_Hold_Summary.md`
+  - Phase 11 will explore Valuation Engine + Capital Allocation Engine as a new research direction, with v2_82 used as a reference record only
+  - Phase 11-A confirmed a leakage-safe valuation dataset audit path and does not use backtest/trade outcomes as features
   - still a backtest/research profile; not connected to live order placement
 
 Experimental next candidates:
