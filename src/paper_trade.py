@@ -26,6 +26,7 @@ from ml.portfolio_manager_sizing import (
     PortfolioManagerSizingAdvisor,
     PortfolioManagerV3SizingAdvisor,
 )
+from ml.portfolio_manager_score_based_rule import apply_score_based_pm_rule, is_score_based_rule
 from safety import can_trade, safety_event
 from tax import calculate_period_profit_summary
 
@@ -536,6 +537,11 @@ def _portfolio_manager_disabled_equal_weight_enabled(config: dict[str, Any]) -> 
     }
 
 
+def _portfolio_manager_score_based_rule_enabled(config: dict[str, Any]) -> bool:
+    policy = _portfolio_manager_sizing_policy(config)
+    return _portfolio_manager_sizing_enabled(config) and is_score_based_rule(str(policy.get("rule") or ""))
+
+
 def _relative_allocator_policy(config: dict[str, Any]) -> dict[str, Any]:
     policy = config.get("relative_allocator")
     return policy if isinstance(policy, dict) else {}
@@ -966,6 +972,8 @@ def _portfolio_manager_sizing_advisor(config: dict[str, Any]) -> PortfolioManage
     rule = str(policy.get("rule") or "")
     if rule in {"disabled_equal_weight", "pm_disabled_equal_weight"}:
         raise RuntimeError("PM sizing advisor is disabled by profile rule")
+    if is_score_based_rule(rule):
+        raise RuntimeError("PM sizing advisor is disabled for score-based PM rule")
     if rule == "pm_ai_v3_candidate":
         model_dir = str(policy.get("model_dir") or DEFAULT_PM_V3_MODEL_DIR)
         dataset_path = str(policy.get("dataset_path") or DEFAULT_PM_V3_DATASET)
@@ -1047,6 +1055,27 @@ def _ensure_portfolio_manager_decision_fields(item: dict[str, Any], config: dict
         fields = _portfolio_manager_disabled_equal_weight_fields()
         item.update(fields)
         return fields
+    if _portfolio_manager_score_based_rule_enabled(config):
+        if "pm_score" in item and "pm_multiplier" in item and item.get("pm_multiplier_source") == "score_based_pm_rule":
+            return _portfolio_manager_trade_fields(item)
+        fields = {
+            "pm_ai_enabled": False,
+            "pm_status": "missing",
+            "pm_missing_reason": "score_based_pm_fields_missing",
+            "pm_feature_count": 0,
+            "pm_high_conviction_proba": None,
+            "pm_avoid_proba": None,
+            "pm_score": 0.0,
+            "pm_multiplier": 1.0,
+            "pm_model_version": "score_based_pm_missing",
+            "pm_feature_found": False,
+            "pm_warning": "score_based_pm_fields_missing",
+            "pm_model_path": "",
+            "pm_api_only_candidate_enabled": False,
+            "pm_multiplier_source": "score_based_pm_rule",
+        }
+        item.update(fields)
+        return fields
     if "pm_score" in item and "pm_multiplier" in item and "pm_feature_found" in item:
         return _portfolio_manager_trade_fields(item)
     try:
@@ -1116,7 +1145,27 @@ def _apply_portfolio_manager_sizing(
         )
         item.update(fields)
         return shares, fields
-    if _relative_allocator_enabled(config):
+    if _portfolio_manager_score_based_rule_enabled(config):
+        score_fields = _portfolio_manager_trade_fields(item)
+        fields.update(
+            {
+                "pm_ai_enabled": False,
+                "pm_status": score_fields.get("pm_status", "ok"),
+                "pm_missing_reason": score_fields.get("pm_missing_reason", ""),
+                "pm_feature_count": score_fields.get("pm_feature_count", 0),
+                "pm_high_conviction_proba": None,
+                "pm_avoid_proba": None,
+                "pm_score": score_fields.get("pm_score", 0.0),
+                "pm_multiplier": score_fields.get("pm_multiplier", 1.0),
+                "pm_model_version": score_fields.get("pm_model_version", "score_based_pm_missing"),
+                "pm_feature_found": score_fields.get("pm_feature_found", False),
+                "pm_warning": score_fields.get("pm_warning", ""),
+                "pm_model_path": "",
+                "pm_api_only_candidate_enabled": False,
+                "pm_multiplier_source": "score_based_pm_rule",
+            }
+        )
+    elif _relative_allocator_enabled(config):
         multiplier = float(item.get("relative_multiplier") or item.get("pm_multiplier") or 1.0)
         relative_score = _optional_float(item.get("relative_score"))
         fields.update(
@@ -1323,6 +1372,24 @@ def _portfolio_manager_trade_fields(source: dict[str, Any]) -> dict[str, Any]:
         "relative_source_score",
         "relative_multiplier",
         "relative_multiplier_reason",
+        "score_based_pm_enabled",
+        "score_based_pm_rule",
+        "score_based_pm_threshold_variant",
+        "score_based_pm_weight_variant",
+        "score_based_pm_candidate_count",
+        "score_based_pm_rank",
+        "score_based_pm_score",
+        "score_based_pm_multiplier",
+        "pm_rule_score",
+        "pm_rule_score_percentile",
+        "pm_rule_source",
+        "pm_rule_threshold_variant",
+        "pm_rule_weight_variant",
+        "pm_rule_bucket",
+        "pm_rule_risk_adjusted_score_percentile",
+        "pm_rule_expected_return_percentile",
+        "pm_rule_stock_selection_rank_score_percentile",
+        "pm_rule_candidate_strength_percentile",
         "pm_multiplier_source",
         "buy_ordering_mode",
         "original_candidate_order",
@@ -2230,6 +2297,17 @@ def _apply_relative_allocator_to_candidates(selected: list[dict[str, Any]], conf
     return items
 
 
+def _apply_score_based_pm_rule_to_candidates(selected: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
+    if not selected:
+        return selected
+    if not _portfolio_manager_score_based_rule_enabled(config):
+        for item in selected:
+            item.setdefault("score_based_pm_enabled", False)
+        return selected
+    policy = _portfolio_manager_sizing_policy(config)
+    return apply_score_based_pm_rule(selected, policy)
+
+
 def _relative_percentiles(items: list[dict[str, Any]], column: str, *, lower_is_better: bool = False) -> dict[str, float]:
     values: list[tuple[str, float]] = []
     for item in items:
@@ -2453,6 +2531,24 @@ def _purchase_audit_event(
         "relative_source_score",
         "relative_multiplier",
         "relative_multiplier_reason",
+        "score_based_pm_enabled",
+        "score_based_pm_rule",
+        "score_based_pm_threshold_variant",
+        "score_based_pm_weight_variant",
+        "score_based_pm_candidate_count",
+        "score_based_pm_rank",
+        "score_based_pm_score",
+        "score_based_pm_multiplier",
+        "pm_rule_score",
+        "pm_rule_score_percentile",
+        "pm_rule_source",
+        "pm_rule_threshold_variant",
+        "pm_rule_weight_variant",
+        "pm_rule_bucket",
+        "pm_rule_risk_adjusted_score_percentile",
+        "pm_rule_expected_return_percentile",
+        "pm_rule_stock_selection_rank_score_percentile",
+        "pm_rule_candidate_strength_percentile",
         "pm_multiplier_source",
         "bear_pm_booster_enabled",
         "bear_pm_booster_applied",
@@ -2851,6 +2947,24 @@ def _position_feature_snapshot(position: dict[str, Any]) -> dict[str, Any]:
         "relative_source_score",
         "relative_multiplier",
         "relative_multiplier_reason",
+        "score_based_pm_enabled",
+        "score_based_pm_rule",
+        "score_based_pm_threshold_variant",
+        "score_based_pm_weight_variant",
+        "score_based_pm_candidate_count",
+        "score_based_pm_rank",
+        "score_based_pm_score",
+        "score_based_pm_multiplier",
+        "pm_rule_score",
+        "pm_rule_score_percentile",
+        "pm_rule_source",
+        "pm_rule_threshold_variant",
+        "pm_rule_weight_variant",
+        "pm_rule_bucket",
+        "pm_rule_risk_adjusted_score_percentile",
+        "pm_rule_expected_return_percentile",
+        "pm_rule_stock_selection_rank_score_percentile",
+        "pm_rule_candidate_strength_percentile",
         "pm_multiplier_source",
         "bear_pm_booster_enabled",
         "bear_pm_booster_applied",
@@ -2958,6 +3072,7 @@ def execute_real_data_paper_trade(
         if item.get("selected") and float(item["total_score"]) >= min_score and float(item["confidence"]) >= min_confidence
     ]
     selected = _sort_selected_candidates(selected, config)
+    selected = _apply_score_based_pm_rule_to_candidates(selected, config)
     selected = _apply_relative_allocator_to_candidates(selected, config)
     selected_codes_for_hold = {str(item.get("code") or "") for item in selected if item.get("code")}
     pending_orders = list(state.get("pending_orders", []))

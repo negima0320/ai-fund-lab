@@ -104,6 +104,16 @@ PROFILE_ALIASES = {
     "rookie_dealer_02_v2_92": "rookie_dealer_02_v2_92_relative_allocator_cap38",
     "rookie_dealer_02_v2.95": "rookie_dealer_02_v2_95_pm_disabled_equal_weight_cap38",
     "rookie_dealer_02_v2_95": "rookie_dealer_02_v2_95_pm_disabled_equal_weight_cap38",
+    "rookie_dealer_02_v2.96": "rookie_dealer_02_v2_96_score_based_pm_rule_a",
+    "rookie_dealer_02_v2_96": "rookie_dealer_02_v2_96_score_based_pm_rule_a",
+    "rookie_dealer_02_v2_96b": "rookie_dealer_02_v2_96b_score_based_pm_rule_b",
+    "rookie_dealer_02_v2_96c": "rookie_dealer_02_v2_96c_score_based_pm_rule_c",
+    "rookie_dealer_02_v2.97": "rookie_dealer_02_v2_97_score_based_pm_rule_c_opt1",
+    "rookie_dealer_02_v2_97": "rookie_dealer_02_v2_97_score_based_pm_rule_c_opt1",
+    "rookie_dealer_02_v2_97b": "rookie_dealer_02_v2_97b_score_based_pm_rule_c_opt2",
+    "rookie_dealer_02_v2_97c": "rookie_dealer_02_v2_97c_score_based_pm_rule_c_opt3",
+    "rookie_dealer_02_v2_97d": "rookie_dealer_02_v2_97d_score_based_pm_rule_c_opt4",
+    "rookie_dealer_02_v2_97e": "rookie_dealer_02_v2_97e_score_based_pm_rule_c_opt5",
 }
 
 

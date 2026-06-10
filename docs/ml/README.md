@@ -75,6 +75,17 @@ adoption notes for the AI / ML stack.
   - v2_93 / v2_94 PM AI v3 candidate rejection and v2_95 PM-disabled equal-weight baseline rejection
   - current decision: keep `v2_82_cap38`; PM AI v3 and PM-disabled baseline remain research-only
 
+- `Portfolio_Manager_AI_Phase10A_Score_Based_PM_Rule_Summary.md`
+  - leakage-safe rule-based PM using only Stock Selection prediction-time scores
+  - v2_96 Rule A/B/C score-based PM backtests versus v2_95 PM-disabled baseline and v2_82 reference
+  - Phase 9 PM AI v3 generated artifact cleanup
+  - current decision: Rule C is a review candidate versus v2_95 but not a strong adoption candidate; keep `v2_82_cap38`
+
+- `Portfolio_Manager_AI_Phase10_Stop_and_Hold_Summary.md`
+  - PM AI / Phase 10 development stop-and-hold decision
+  - Phase 7 through Phase 10 PM research timeline and rejection rationale
+  - current decision: stop PM AI redevelopment for now; keep `v2_82_cap38`; do not promote v2_96 / v2_97
+
 ## Adoption Notes
 
 - `v2_66_ml_ranked_adoption_notes.md`
@@ -91,6 +102,7 @@ Current strongest full-backtested research candidate:
   - improved profit, PF, DD, win rate, monthly win rate, capital utilization, and cap skip/reduction count versus v2_78
   - Phase 7-G full pytest after triage: `825 passed, 15 warnings`
   - latest audits are summarized in `Portfolio_Manager_AI_Phase7A_to_7G_Final_Summary.md`
+  - PM AI / Phase 10 redevelopment is currently stopped and summarized in `Portfolio_Manager_AI_Phase10_Stop_and_Hold_Summary.md`
   - still a backtest/research profile; not connected to live order placement
 
 Experimental next candidates:
