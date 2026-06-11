@@ -121,7 +121,15 @@ adoption notes for the AI / ML stack.
   - Phase 12-D1 audited C2c trade paths and found 7 trades that had peak profit `>= +5%` but ended as losses, with realized loss `-157,341` and estimated peak-to-final leakage `328,000`
   - Phase 12-D2 Buy Quality Reality Audit found Valuation and Downside add BUY-quality value, while Stock Selection top5 alone did not beat the universe on top-decile rate; main bottleneck is Exit/risk control
   - Phase 12-D3 Prediction Lineage / Strict OOS Integrity Audit confirmed Stock Selection, Valuation, and Downside inputs are strict OOS for 2025 by existing artifact evidence, with no blocking issues
-  - current decision: proceed to Phase 12-D4 Exit AI Dataset Audit; Phase 12 2025 results are lineage-trustworthy, but still do not run broad/full backtests yet
+  - Phase 12-E1 Stock Selection Reality Audit found `stock_selection_adds_value=false`, `stock_selection_top5_valid=false`, and `stock_selection_prefilter_hurts_valuation=true`
+  - Phase 12-E2 Stock Selection Architecture Audit found Stock Selection is a short-horizon LightGBM walk-forward composite, while Phase 12 evaluates 20d opportunity + downside; the suspected failure reason is objective mismatch
+  - current decision: proceed to Phase 12-E3 Remove Stock Selection Prefilter Test; Phase 12 2025 results are lineage-trustworthy, but still do not run broad/full backtests yet
+
+- `Portfolio_Manager_AI_Phase11_12_Research_Summary.md`
+  - consolidated Phase 11 / Phase 12 research narrative
+  - explains why Valuation + Downside replaced direct PM multiplier redevelopment
+  - summarizes strict OOS findings, allocation/execution bottlenecks, Exit bottlenecks, and Stock Selection objective mismatch
+  - current decision: no adoption-ready Phase 12 strategy yet; next limited research step is removing or replacing the Stock Selection prefilter
 
 ## Adoption Notes
 
@@ -169,6 +177,8 @@ Current strongest full-backtested research candidate:
   - Phase 12-D1 found winning-to-losing conversion is real: peak `>=+5%` then final loss occurred 7 times, main leakage source was `stop_loss`, and estimated recoverable profit was `328,000`
   - Phase 12-D2 Reality Audit found Opportunity top5 top-decile rate `0.2400` versus universe `0.1053` and Stock Selection top5 `0.0885`; A3_3 reduced weighted downside to `0.1432`, but S4 DD remained `-18.26%`
   - Phase 12-D3 confirmed `phase12_results_trustworthy=true`: Stock Selection uses walk-forward predictions with 2025 fold train end before test start, and Valuation/Downside use Phase 11-B3 strict split models
+  - Phase 12-E1 found Stock Selection top5 does not add buy-quality value: `stock_selection_rank_score_top5` top-decile rate `0.0885` vs universe `0.1053`, while Candidate Strength top5 reached `0.2000`
+  - Phase 12-E2 found `stock_selection_rank_score` is derived from `ml_score`, not a direct 20d Opportunity target; `candidate_strength` aligns better because it includes `expected_max_return_20d` and `swing_success_probability_20d`
   - still a backtest/research profile; not connected to live order placement
 
 Experimental next candidates:

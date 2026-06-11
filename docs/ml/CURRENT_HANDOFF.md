@@ -9,29 +9,31 @@ next useful actions. For the full history, see
 `docs/ml/Exit_AI_v2_Phase5A_to_5F_Retraining_Summary.md`,
 `docs/ml/Portfolio_Manager_AI_Phase7A_to_7G_Final_Summary.md`,
 `docs/ml/Portfolio_Manager_AI_Phase8A_to_8H_PM_AI_Redesign_Summary.md`,
-`docs/ml/Portfolio_Manager_AI_Phase10_Stop_and_Hold_Summary.md`, and
-`docs/ml/Portfolio_Manager_AI_Phase11_Valuation_Allocation_Plan.md`.
+`docs/ml/Portfolio_Manager_AI_Phase10_Stop_and_Hold_Summary.md`,
+`docs/ml/Portfolio_Manager_AI_Phase11_Valuation_Allocation_Plan.md`,
+`docs/ml/Portfolio_Manager_AI_Phase12_Dynamic_Capital_Allocation_Summary.md`,
+and `docs/ml/Portfolio_Manager_AI_Phase11_12_Research_Summary.md`.
 
-## Latest Phase 12-D3 Handoff
+## Latest Phase 12-E2 Handoff
 
-Phase 12-D3 Prediction Lineage / Strict OOS Integrity Audit is implemented:
+Phase 12-E2 Stock Selection Architecture Audit is implemented:
 
 ```text
-src/ml/phase12d3_prediction_lineage_oos_audit.py
-scripts/ml/run_phase12d3_prediction_lineage_oos_audit.py
-tests/test_ml_phase12d3_prediction_lineage_oos_audit.py
+src/ml/phase12e2_stock_selection_architecture_audit.py
+scripts/ml/run_phase12e2_stock_selection_architecture_audit.py
+tests/test_ml_phase12e2_stock_selection_architecture_audit.py
 ```
 
 Latest generated report:
 
 ```text
-reports/ml/phase12d3_prediction_lineage_oos_audit.md
-reports/ml/phase12d3_prediction_lineage_oos_audit.json
+reports/ml/phase12e2_stock_selection_architecture_audit.md
+reports/ml/phase12e2_stock_selection_architecture_audit.json
 ```
 
 Scope and constraints:
 
-- 既存artifact / model metadata / report JSONのみ監査
+- 既存code / artifact / model metadata / report JSONのみ監査
 - 新規AI学習なし
 - prediction再生成なし
 - full backtestなし
@@ -41,43 +43,64 @@ Scope and constraints:
 - future系は評価指標のみ
 - leakage_risk `low`, blocking_issues `0`
 
-Final trust decision:
+Current Stock Selection architecture:
 
 | item | value |
 | --- | --- |
-| `stock_selection_strict_oos_for_2025` | `true` |
-| `valuation_strict_oos_for_2025` | `true` |
-| `downside_strict_oos_for_2025` | `true` |
-| `phase12_results_trustworthy` | `true` |
-| `blocking_issues` | `[]` |
+| model family | LightGBM `LGBMRegressor` + `LGBMClassifier` |
+| training code | `src/ml/model_trainer.py::ModelTrainer.train_all` |
+| prediction code | `src/ml/predictor.py::Predictor.predict_daily` |
+| walk-forward code | `src/ml/walk_forward.py::MLWalkForwardRunner` |
+| feature count | `48` |
+| strict_oos_for_2025 | `true` |
+
+Output interpretation:
+
+| column | meaning |
+| --- | --- |
+| `expected_return` | alias of `expected_return_10d` |
+| `risk_adjusted_score` | `expected_return_10d - 0.5 * bad_entry_probability_10d` |
+| `stock_selection_rank_score` | derived from `ml_score`; not a direct 20d Opportunity target |
+| `candidate_strength` | `expected_max_return_20d + swing_success_probability_20d - bad_entry_probability_10d` |
+
+Phase 12-E1 Reality Audit immediately before E2:
+
+| item | value |
+| --- | --- |
+| `stock_selection_adds_value` | `false` |
+| `stock_selection_top5_valid` | `false` |
+| `stock_selection_prefilter_hurts_valuation` | `true` |
+| `stock_selection_rank_score_top5_top_decile_rate` | `0.0885` |
+| `candidate_universe_top_decile_rate` | `0.1053` |
+| `candidate_strength_top5_top_decile_rate` | `0.2000` |
+| `opportunity_top5_reference` | `0.2400` |
 
 Interpretation:
 
-- Stock Selection columns come from `data/ml/walk_forward_predictions` via the
-  Phase 11-A dataset builder.
-- Walk-forward audit evidence: prediction root is walk-forward, fold-specific
-  model is used by code path, current model is not used, and all 2025 folds
-  have effective train end before test start.
-- Warning: 831 walk-forward prediction files have no `model_id` metadata, so
-  evidence relies on the walk-forward audit code path rather than per-file
-  model_id metadata.
-- Valuation and Downside both come from
-  `models/ml/valuation_engine/research_phase11b3_downside/` with train 2023,
-  validation 2024, test 2025, strict_model_oos true.
-- No Phase 12 report indicated new model training, historical prediction
-  regeneration, existing model overwrite, profile change, or full backtest.
+- Stock Selection AI is clean from a lineage/leakage perspective, but its
+  objective is not aligned with Phase 12.
+- It is a short-horizon composite selector: 5d/10d returns, 10d upside,
+  10d bad-entry risk, 10d/20d max-return, and 20d swing success.
+- Phase 12 is evaluating 20d Opportunity + Downside + allocation/exit behavior.
+- `stock_selection_rank_score` comes from `ml_score`, so it is not a direct
+  20d Opportunity model.
+- `candidate_strength` performed better because it includes
+  `expected_max_return_20d` and `swing_success_probability_20d`.
+- Phase 12-D3 already confirmed Phase 12 inputs are strict OOS and
+  `phase12_results_trustworthy=true`.
 
 Current decision:
 
 ```text
 ready_for_phase13 = false
 phase12_results_trustworthy = true
-recommended_next_phase = Phase12-D4 Exit AI Dataset Audit
+stock_selection_prefilter_hurts_valuation = true
+recommended_next_phase = Phase12-E3 Remove Stock Selection Prefilter Test
 ```
 
-Phase 12 input lineage is trustworthy enough to continue. Do not run broad/full
-backtests yet; next should audit/design Exit AI / profit protection using the
-validated 2025-limited setup.
+Do not run broad/full backtests yet. The next useful step is a 2025-limited
+test that removes Stock Selection prefilter, or compares Candidate Strength
+rebasing against direct Valuation + Downside candidate generation.
 
 ## Current State
 

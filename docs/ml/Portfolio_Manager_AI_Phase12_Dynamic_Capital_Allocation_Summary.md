@@ -1520,3 +1520,217 @@ Decision:
 - `recommended_next_phase`: `Phase12-D4 Exit AI Dataset Audit`
 
 Phase 12-D3により、D2のBUY品質Reality Auditを止める理由はなくなった。次はExit AI Dataset Audit、またはprofit protection / break-even guardを設計するためのExit dataset監査へ進む。
+
+## Phase 12-E1 Stock Selection Reality Audit Implementation Status
+
+実装済み:
+
+- `src/ml/phase12e1_stock_selection_reality_audit.py`
+- `scripts/ml/run_phase12e1_stock_selection_reality_audit.py`
+- `tests/test_ml_phase12e1_stock_selection_reality_audit.py`
+
+生成report:
+
+- `reports/ml/phase12e1_stock_selection_reality_audit_2025.md`
+- `reports/ml/phase12e1_stock_selection_reality_audit_2025.json`
+
+Scope:
+
+- 2025年のみ
+- 既存Phase12-A artifactを使用
+- BUY品質監査 + 軽量strategy comparison
+- 新規AI学習なし
+- historical prediction再生成なし
+- full backtestなし
+- 既存model/profile変更なし
+- future系は評価指標のみ
+
+## Phase 12-E1 Result
+
+Final judgment:
+
+| item | value |
+| --- | --- |
+| `stock_selection_adds_value` | `false` |
+| `stock_selection_top5_valid` | `false` |
+| `stock_selection_prefilter_hurts_valuation` | `true` |
+| `best_stock_selection_signal` | `candidate_strength_top5` |
+| `best_candidate_generation_method` | `B_opportunity_top5` |
+| `recommended_next_phase` | `Phase12-E2 Remove Stock Selection Prefilter Test` |
+
+Rank quality focus:
+
+| selection | top_decile_rate | downside_bad_rate | opportunity_value |
+| --- | ---: | ---: | ---: |
+| `candidate_universe` | `0.1053` | `0.1650` | `0.0211` |
+| `random_top5_per_day` | `0.0885` | `0.1782` | `0.0111` |
+| `stock_selection_rank_score_top5` | `0.0885` | `0.1358` | `0.0185` |
+| `stock_selection_rank_score_top20` | `0.0673` | `0.1182` | `0.0156` |
+| `candidate_strength_top5` | `0.2000` | `0.2788` | `0.0358` |
+| `expected_return_top5` | `0.1455` | `0.2230` | `0.0224` |
+
+Strategy comparison:
+
+| strategy | net_profit | PF | DD | utilization |
+| --- | ---: | ---: | ---: | ---: |
+| `S0_stock_selection_rank_score_top5_equal_20d` | `66,840` | `1.2506` | `-13.56%` | `86.46%` |
+| `S1_risk_adjusted_score_top5_equal_20d` | `87,570` | `1.6617` | `-6.50%` | `92.01%` |
+| `S2_expected_return_top5_equal_20d` | `-24,872` | `0.9409` | `-15.06%` | `85.04%` |
+| `S3_candidate_strength_top5_equal_20d` | `-151,603` | `0.7056` | `-25.99%` | `83.52%` |
+| `S4_opportunity_top5_equal_20d` | `-58,049` | `0.9116` | `-24.26%` | `90.07%` |
+| `S5_stock_top5_prefilter_opportunity_downside_dynamic_B5_2_exit` | `52,751` | `1.1371` | `-11.96%` | `87.44%` |
+| `S6_no_stock_prefilter_opportunity_downside_dynamic_B5_2_exit` | `234,676` | `1.7543` | `-16.38%` | `98.54%` |
+| `S7_stock_top20_prefilter_opportunity_downside_dynamic_B5_2_exit` | `139,582` | `1.3615` | `-10.04%` | `95.04%` |
+
+Interpretation:
+
+- Stock Selection top5 does not beat the candidate universe on the Phase 12 target.
+- `stock_selection_rank_score` top5 is roughly random-top5 quality for top-decile capture.
+- `candidate_strength` is the strongest Stock Selection-derived top5 signal by BUY quality, but it also has high downside.
+- Stock Selection prefilter hurts Valuation / Downside selection: no-prefilter S6 produces much higher profit than stock-top5 or stock-top20 prefiltered variants, though DD remains too high.
+
+Leakage:
+
+| item | value |
+| --- | --- |
+| future_columns_used_as_features | `[]` |
+| future_columns_used_only_for_evaluation | `future_return_20d`, `future_max_return_20d`, `future_max_drawdown_20d`, `opportunity_value_20d`, `opportunity_top_decile_20d`, `downside_bad_20d` |
+| new_model_trained | `false` |
+| existing_model_overwritten | `false` |
+| profile_changed | `false` |
+| full_backtest_executed | `false` |
+| historical_predictions_regenerated | `false` |
+| leakage_risk | `low` |
+| blocking_issues | `[]` |
+
+Decision:
+
+- `stock_selection_adds_value`: `false`
+- `stock_selection_top5_valid`: `false`
+- `stock_selection_prefilter_hurts_valuation`: `true`
+- `recommended_next_phase`: `Phase12-E2 Stock Selection Architecture Audit`
+
+Phase 12-E1により、Stock Selectionを当然の前段filterとして使う前提は崩れた。次は改善ではなく、現在のStock Selection AIが何を見て何を予測しているかを監査する。
+
+## Phase 12-E2 Stock Selection Architecture Audit Implementation Status
+
+実装済み:
+
+- `src/ml/phase12e2_stock_selection_architecture_audit.py`
+- `scripts/ml/run_phase12e2_stock_selection_architecture_audit.py`
+- `tests/test_ml_phase12e2_stock_selection_architecture_audit.py`
+
+生成report:
+
+- `reports/ml/phase12e2_stock_selection_architecture_audit.md`
+- `reports/ml/phase12e2_stock_selection_architecture_audit.json`
+
+Scope:
+
+- 既存コード / artifact / model metadata / report JSONのみ監査
+- 新規AI学習なし
+- prediction再生成なし
+- full backtestなし
+- profile追加/変更なし
+- 既存model上書きなし
+- J-Quants / OpenAI API呼び出しなし
+
+## Phase 12-E2 Result
+
+Architecture summary:
+
+| item | value |
+| --- | --- |
+| system | Stock Selection AI / walk-forward ML |
+| model family | LightGBM `LGBMRegressor` + `LGBMClassifier` |
+| training code | `src/ml/model_trainer.py::ModelTrainer.train_all` |
+| prediction code | `src/ml/predictor.py::Predictor.predict_daily` |
+| walk-forward code | `src/ml/walk_forward.py::MLWalkForwardRunner` |
+| feature count | `48` |
+| strict_oos_for_2025 | `true` |
+
+Feature categories:
+
+| category | count | examples |
+| --- | ---: | --- |
+| Price | `12` | `close`, `return_1d`, `return_5d`, `ma25_gap`, `ma75_gap` |
+| Candle | `6` | `body_ratio`, `upper_shadow_ratio`, `lower_shadow_ratio`, `gap_up_ratio`, `daily_range_ratio` |
+| Volume | `6` | `volume`, `turnover_value`, `volume_ratio_5d`, `turnover_ratio_20d` |
+| Financial | `10` | `EPS`, `BPS`, `EqAR`, `Sales_growth`, `OP_growth`, `NP_growth` |
+| Market | `11` | `market`, `sector_name`, `topix_return_5d`, `relative_return_20d` |
+| Other | `3` | `days_to_earnings`, `days_after_earnings`, `is_near_earnings` |
+
+Training labels:
+
+| model | target | task |
+| --- | --- | --- |
+| `future_5d_return_regression` | `future_5d_return` | regression |
+| `future_10d_return_regression` | `future_10d_return` | regression |
+| `upside_10d_classification` | `upside_10d` | classification |
+| `bad_entry_10d_classification` | `bad_entry_10d` | classification |
+| `future_max_return_10d_regression` | `future_max_return_10d` | regression |
+| `future_max_return_20d_regression` | `future_max_return_20d` | regression |
+| `future_swing_success_20d_classification` | `future_swing_success_20d` | classification |
+
+Output column meaning:
+
+| column | meaning |
+| --- | --- |
+| `expected_return_10d` | regression prediction for `future_10d_return`; Phase11/12 aliases this to `expected_return` |
+| `bad_entry_probability_10d` | probability of bad entry label; used as risk penalty |
+| `ml_score` | `expected_return_10d * 100 + upside_probability_10d * 10 - bad_entry_probability_10d * 15` |
+| `risk_adjusted_score` | `expected_return_10d - 0.5 * bad_entry_probability_10d` |
+| `stock_selection_rank_score` | derived from `ml_score`; sorted descending, not a direct 20d Opportunity model |
+| `candidate_strength` | `expected_max_return_20d + swing_success_probability_20d - bad_entry_probability_10d` |
+
+Suspected failure reason:
+
+```text
+Objective mismatch
+```
+
+Stock Selection AI is currently a short-horizon composite selector:
+
+- 5d / 10d return
+- 10d upside
+- 10d bad-entry risk
+- 10d / 20d max return
+- 20d swing success
+
+Phase 12 evaluates:
+
+- 20d opportunity
+- downside_bad_20d
+- allocation / exit behavior
+
+This explains why:
+
+- `stock_selection_rank_score` was weak in E1.
+- `candidate_strength` was relatively stronger, because it contains 20d max-return and swing-success signals.
+- Valuation + Downside can replace the old Stock Selection prefilter for the current Phase 12 objective.
+
+Leakage:
+
+| item | value |
+| --- | --- |
+| future_columns_used_as_features | `[]` |
+| future_columns_used_only_as_labels | `future_5d_return`, `future_10d_return`, `future_max_return_10d`, `future_max_return_20d`, `future_swing_success_20d` |
+| backtest_columns_used_as_features | `[]` |
+| trade_result_columns_used_as_features | `[]` |
+| new_model_trained | `false` |
+| existing_model_overwritten | `false` |
+| profile_changed | `false` |
+| full_backtest_executed | `false` |
+| historical_predictions_regenerated | `false` |
+| jquants_api_called | `false` |
+| openai_api_called | `false` |
+| leakage_risk | `low` |
+| blocking_issues | `[]` |
+
+Decision:
+
+- Stock Selection AI is clean enough from a lineage/leakage perspective.
+- It is not aligned enough with the Phase 12 objective to remain a mandatory prefilter.
+- `recommended_next_phase`: `Phase12-E3 Remove Stock Selection Prefilter Test`
+
+Phase 12-E2の結論として、Stock Selectionを「本番で無条件に使うべき前段AI」とは扱わない。次は、Stock Selection prefilterを外した候補生成を限定検証する。
