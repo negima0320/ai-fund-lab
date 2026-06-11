@@ -618,6 +618,61 @@ Important interpretation:
 - B3 validates the need for Opportunity + Downside, but does not yet provide a
   final ranking rule.
 
+Phase 12-A Dynamic Capital Allocation Research is implemented:
+
+```text
+src/ml/phase12a_dynamic_capital_allocation.py
+scripts/ml/run_phase12a_dynamic_capital_allocation.py
+tests/test_ml_phase12a_dynamic_capital_allocation.py
+```
+
+Latest generated report and artifact:
+
+```text
+reports/ml/phase12a_dynamic_capital_allocation_2025.md
+reports/ml/phase12a_dynamic_capital_allocation_2025.json
+data/ml/valuation_engine/phase12a_dynamic_capital_allocation_2025.parquet
+```
+
+Core Phase 12-A result:
+
+- scope: 2025 allocation quality audit only
+- model source: `models/ml/valuation_engine/research_phase11b3_downside/`
+- strategy_backtest_executed: `false`
+- existing_model_overwritten: `false`
+- profile_changed: `false`
+- historical_predictions_regenerated: `false`
+- leakage_risk: `low`
+- blocking_issues: `0`
+- ready_for_phase12b: `false`
+- recommended next phase: `Phase12-A2 allocation score refinement`
+
+Allocation quality:
+
+| rule | weighted top-decile | weighted downside bad | weighted opportunity value | weighted max drawdown |
+|---|---:|---:|---:|---:|
+| baseline equal top5 | `0.0885` | `0.1358` | `0.0185` | `-0.0514` |
+| downside safe top5 | `0.0436` | `0.0412` | `0.0103` | `-0.0241` |
+| opportunity only top5 | `0.2400` | `0.3794` | `0.0269` | `-0.1042` |
+| score_a weighted | `0.1537` | `0.2260` | `0.0282` | `-0.0724` |
+| score_b weighted | `0.0814` | `0.1209` | `0.0209` | `-0.0483` |
+| score_c weighted | `0.1374` | `0.1933` | `0.0267` | `-0.0655` |
+| score_d weighted | `0.0780` | `0.1166` | `0.0203` | `-0.0481` |
+| score_e weighted | `0.1349` | `0.1958` | `0.0267` | `-0.0659` |
+
+Important interpretation:
+
+- No rule met the Phase 12-A minimum line:
+  weighted top-decile rate `>= 0.20` and weighted downside bad rate `<= 0.25`.
+- `score_a_weighted` reduced downside to `22.60%`, but top-decile rate was
+  only `15.37%`.
+- `score_c_weighted` / `score_e_weighted` kept opportunity value close to
+  opportunity-only while controlling downside near `20%`, but top-decile rate
+  remained too low.
+- The p70-or-higher weight design selects too many candidates per day and
+  dilutes opportunity concentration.
+- Do not move to Phase 12-B strategy checks yet.
+
 Important reference profiles are:
 
 ```text
@@ -686,11 +741,12 @@ Phase 10 / Phase 11 decision:
 - Phase 11-I Strict Walk-Forward OOS Prototype is complete.
 - Phase 11-B2 Strict OOS Failure Diagnosis is complete.
 - Phase 11-B3 Expected Downside Model Prototype is complete.
+- Phase 12-A Dynamic Capital Allocation Research is complete.
 - Do not proceed to broader backtests or adoption from Phase 11-I results.
-- Recommended next step is Phase 11-B4 combined ranking threshold tuning.
+- Recommended next step is Phase 12-A2 allocation score refinement.
 - Do not overwrite current PM AI, current Exit AI, or v2_82.
 - Do not use backtest results, trades, profit, cash, portfolio, selected,
-  bought, affordable, or current PM multiplier as Phase 11 features.
+  bought, affordable, or current PM multiplier as Phase 11 / Phase 12 features.
 
 Portfolio Manager AI score:
 
