@@ -98,7 +98,8 @@ adoption notes for the AI / ML stack.
   - Phase 11-F Limited Robustness Check found E4 resilient to `0.2%` one-way cost and Opportunity Exit threshold sensitivity, with overtrading risk still present
   - Phase 11-G Limited 2024 Year Check supported E4 on an additional year, but flagged that 2024 overlaps the Phase 11-B model training period and is not strict model OOS
   - Phase 11-H Cooldown / Minimum Holding Guard found `H2_cooldown_10d` and `H3_min_hold_3d` passed 2024/2025 guard checks and produced a strict walk-forward OOS design
-  - current decision: proceed toward Phase 11-I strict walk-forward OOS prototype; keep `v2_82_cap38` as reference only
+  - Phase 11-I Strict Walk-Forward OOS Prototype trained a research-only 2023 model and found strict OOS rank lift remained, but 2025 strategy checks did not beat the equal-allocation baseline
+  - current decision: return to Phase 11-B2 valuation model improvement before any broader backtest or adoption; keep `v2_82_cap38` as reference only
 
 ## Adoption Notes
 
@@ -127,6 +128,8 @@ Current strongest full-backtested research candidate:
   - Phase 11-F showed E4 remains above PF `2.0`, DD within `-10%`, and net profit above `300,000` under `0.2%` one-way cost, but has `115` same-code reentries and `88` reentries within 5 business days
   - Phase 11-G checked 2024 only: E4 net profit `699,520`, PF `2.7918`, DD `-8.25%`; E4 with `0.2%` cost net profit `574,984`, PF `2.3421`, DD `-9.11%`; strict model OOS remains false because Phase 11-B trained through 2024
   - Phase 11-H checked cooldown/min-hold guards on 2024/2025 with `0.2%` cost; `H2_cooldown_10d` and `H3_min_hold_3d` passed both years, while combined cooldown+min-hold was unstable in 2025
+  - Phase 11-I strict OOS trained a separate research model on 2023 only, validated on 2024, and tested on 2025; test AUC `0.6297`, PR-AUC `0.1514`, precision@top10% `0.1837`, strict_model_oos `true`
+  - Phase 11-I strategy check with `0.2%` cost did not pass strict OOS adoption criteria: baseline net profit `180,876`, PF `2.2930`, DD `-6.39%`; strict OOS E4 net profit `116,049`, PF `1.2501`, DD `-13.14%`
   - still a backtest/research profile; not connected to live order placement
 
 Experimental next candidates:

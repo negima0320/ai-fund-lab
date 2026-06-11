@@ -449,6 +449,68 @@ Important interpretation:
   train `2023`, validation `2024`, test `2025`, with a separate research-only
   model directory.
 
+Phase 11-I Strict Walk-Forward OOS Prototype is implemented:
+
+```text
+src/ml/phase11i_strict_oos.py
+scripts/ml/run_phase11i_strict_oos.py
+tests/test_ml_phase11i_strict_oos.py
+```
+
+Latest generated report and research-only model:
+
+```text
+reports/ml/phase11i_strict_walk_forward_oos_2025.md
+reports/ml/phase11i_strict_walk_forward_oos_2025.json
+models/ml/valuation_engine/research_phase11i_strict_oos/
+```
+
+Core Phase 11-I setup:
+
+- train: `2023-01-04` to `2023-12-31`
+- validation: `2024-01-01` to `2024-12-31`
+- test: `2025-01-01` to `2025-12-31`
+- classification target: `opportunity_top_decile_20d`
+- model: `HistGradientBoostingClassifier`
+- feature_count: `54`
+- strict_model_oos: `true`
+- train_validation_test_overlap: `false`
+- existing_model_overwritten: `false`
+- profile_changed: `false`
+- full_backtest_executed: `false`
+- historical_predictions_regenerated: `false`
+- leakage_risk: `low`
+- blocking_issues: `0`
+
+Model quality:
+
+| split | AUC | PR-AUC | precision@top10% | base positive rate |
+|---|---:|---:|---:|---:|
+| validation 2024 | `0.6055` | `0.1445` | `0.1754` | `0.0996` |
+| test 2025 | `0.6297` | `0.1514` | `0.1837` | `0.0997` |
+| Phase 11-B reference 2025 | `0.6478` | `0.1600` | `0.1998` | `0.0997` |
+
+2025 strict OOS strategy check with `0.2%` one-way cost:
+
+| strategy | net_profit | PF | DD | trades | avg hold | reentry within 5d |
+|---|---:|---:|---:|---:|---:|---:|
+| baseline equal allocation | `180,876` | `2.2930` | `-6.39%` | `55` | `19.93` | `22` |
+| strict OOS valuation top5 no guard | `-85,275` | `0.8169` | `-22.35%` | `60` | `19.70` | `26` |
+| strict OOS E4 | `116,049` | `1.2501` | `-13.14%` | `141` | `7.67` | `74` |
+| strict OOS H2 cooldown 10d | `-75,507` | `0.8230` | `-14.27%` | `114` | `8.45` | `37` |
+| strict OOS H3 min hold 3d | `42,411` | `1.0923` | `-15.26%` | `129` | `8.71` | `67` |
+
+Important interpretation:
+
+- Strict split still preserves classification lift, but the 2023-only model is
+  weaker than the Phase 11-B model trained through 2024.
+- Strategy checks do not pass strict OOS criteria. E4 remains positive, but it
+  does not beat the baseline and DD is worse than the `-12%` provisional guard.
+- H2 reduces short reentries but breaks profit/PF under the strict OOS model.
+- H3 remains positive but also fails PF/DD and does not beat baseline.
+- Phase 11-D/E/F/H remain useful strategy/path evidence, but Phase 11-I shows
+  the valuation model itself needs improvement before broader adoption work.
+
 Important reference profiles are:
 
 ```text
@@ -514,8 +576,9 @@ Phase 10 / Phase 11 decision:
 - Phase 11-F Limited Robustness Check is complete.
 - Phase 11-G Limited Out-of-Sample Year Check is complete.
 - Phase 11-H Cooldown / Minimum Holding Guard is complete.
-- Proceed toward Phase 11-I strict walk-forward OOS prototype with no current
-  model overwrite.
+- Phase 11-I Strict Walk-Forward OOS Prototype is complete.
+- Do not proceed to broader backtests or adoption from Phase 11-I results.
+- Recommended next step is Phase 11-B2 valuation model improvement.
 - Do not overwrite current PM AI, current Exit AI, or v2_82.
 - Do not use backtest results, trades, profit, cash, portfolio, selected,
   bought, affordable, or current PM multiplier as Phase 11 features.
