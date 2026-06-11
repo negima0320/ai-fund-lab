@@ -623,3 +623,78 @@ Decision:
 
 - `recommended_next_phase`: `Phase12-B4 trailing_exit_prototype`
 - フルバックテストではなく、まず2025年限定でS3aにtrailing exit / profit decay guardを少数追加する。
+
+## Phase 12-B4 Implementation Status
+
+実装済み:
+
+- `src/ml/phase12b4_trailing_exit_prototype.py`
+- `scripts/ml/run_phase12b4_trailing_exit_prototype.py`
+- `tests/test_ml_phase12b4_trailing_exit_prototype.py`
+
+生成report:
+
+- `reports/ml/phase12b4_trailing_exit_prototype_2025.md`
+- `reports/ml/phase12b4_trailing_exit_prototype_2025.json`
+
+Scope:
+
+- Phase 12-A artifactを使用
+- 2025年のみ
+- S3a Dynamic Raw WeightのBUY/allocationは固定
+- exit variantのみ少数比較
+- full backtestなし
+- 既存model上書きなし
+- profile追加/変更なし
+- historical prediction再生成なし
+- future系は評価指標のみ
+
+## Phase 12-B4 Result
+
+Variant results:
+
+| variant | net_profit | PF | DD | capital_utilization | avg_holding_days | exit reasons |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `T0_current_opportunity_plus_stop` | `39,770` | `1.5971` | `-2.66%` | `0.1007` | `6.20` | opportunity_exit `47`, stop_loss `5` |
+| `T1_stop_loss_only` | `14,489` | `1.1587` | `-6.83%` | `0.1856` | `17.49` | time_exit_20d `24`, stop_loss `8` |
+| `T2_trailing_5pct` | `-7,503` | `0.9111` | `-5.52%` | `0.1662` | `13.66` | trailing_exit `23`, stop_loss `5` |
+| `T3_trailing_8pct` | `9,149` | `1.1017` | `-5.50%` | `0.1806` | `16.84` | trailing_exit `6`, time_exit_20d `20` |
+| `T4_trailing_10pct` | `15,387` | `1.1702` | `-6.74%` | `0.1854` | `17.46` | time_exit_20d `24`, stop_loss `7` |
+| `T5_opportunity_plus_trailing_8pct` | `43,962` | `1.7044` | `-2.50%` | `0.0998` | `6.09` | opportunity_exit `47`, stop_loss `3`, trailing_exit `2` |
+
+Hold quality:
+
+| variant | avg_profit_capture | avg_max_profit_before_exit | profit_capture_ratio |
+| --- | ---: | ---: | ---: |
+| `T0_current_opportunity_plus_stop` | `0.0044` | `0.0386` | `-0.4070` |
+| `T1_stop_loss_only` | `0.0105` | `0.0741` | `-0.6280` |
+| `T3_trailing_8pct` | `0.0081` | `0.0738` | `-0.7800` |
+| `T5_opportunity_plus_trailing_8pct` | `0.0066` | `0.0386` | `-0.3633` |
+
+Interpretation:
+
+- Opportunity Exitを無効化すると保有期間と利用率は上がるが、PFが`1.1587`まで落ち、利益も伸びない。
+- Trailing単独は5%/8%/10%いずれもT0を上回らない。
+- `T5_opportunity_plus_trailing_8pct`はT0よりnet profit、PF、DDを少し改善したが、capital utilizationは`0.0998`で改善せず、最低ライン未達。
+- Trailing Exitはstop_loss件数を減らす補助にはなるが、Opportunity Exitの早さが支配的で、保有期間延長にはつながらなかった。
+
+Leakage:
+
+| item | value |
+| --- | --- |
+| future_columns_used_only_for_evaluation | `future_return_20d`, `future_max_return_20d`, `future_max_drawdown_20d`, `opportunity_value_20d`, `opportunity_top_decile_20d`, `downside_bad_20d` |
+| future_columns_used_as_features | `[]` |
+| existing_model_overwritten | `false` |
+| profile_changed | `false` |
+| full_backtest_executed | `false` |
+| leakage_risk | `low` |
+| blocking_issues | `0` |
+
+Decision:
+
+- `best_variant`: `T5_opportunity_plus_trailing_8pct`
+- `trailing_exit_improved_vs_opportunity_exit`: `false`
+- `ready_for_phase12c`: `false`
+- `recommended_next_phase`: `Phase12-B5 exit threshold recalibration`
+
+Phase 12-B4の結果から、利益を伸ばすにはTrailing単独ではなく、Opportunity Exitの発火条件を遅らせる/緩める検証が必要。

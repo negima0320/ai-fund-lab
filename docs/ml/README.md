@@ -112,7 +112,8 @@ adoption notes for the AI / ML stack.
   - Phase 12-B connected A3_3 to a 2025-only lightweight strategy check; raw dynamic weighting improved PF/DD versus S2 but did not beat the baseline, while normalized weighting raised profit but worsened DD
   - Phase 12-B2 tested partial normalization, min usage guards, and capped normalized execution; no strategy met the minimum line
   - Phase 12-B3 audited S3a/S2 exits and found both early and late exit issues, with late profit decay before stop-loss the main problem
-  - current decision: proceed to Phase 12-B4 trailing exit prototype, not Phase 12-C or broad/full backtests
+  - Phase 12-B4 tested stop-loss-only and trailing exits; trailing alone did not beat current Opportunity Exit, while Opportunity + trailing 8% gave only a small improvement without utilization gain
+  - current decision: proceed to Phase 12-B5 exit threshold recalibration, not Phase 12-C or broad/full backtests
 
 ## Adoption Notes
 
@@ -151,6 +152,7 @@ Current strongest full-backtested research candidate:
   - Phase 12-B found `S3a_dynamic_raw_weight` had net profit `39,770`, PF `1.5971`, DD `-2.66%`, and downside_bad_rate `17.86%`, but did not beat baseline net profit; `S3b_dynamic_normalized_weight` earned `135,752` but DD worsened to `-19.16%`
   - Phase 12-B2 found no execution adjustment met the minimum line; `S5_partial_normalized_30` improved utilization to `39.10%` and DD to `-11.75%` but PF stayed at `1.0094`
   - Phase 12-B3 found S3a stop-loss trades had avg profit decay before exit `17.03%`, while opportunity exits still had avg post-exit 20d return `5.77%`; recommended `Phase12-B4 trailing_exit_prototype`
+  - Phase 12-B4 found `T5_opportunity_plus_trailing_8pct` improved net profit to `43,962`, PF to `1.7044`, and DD to `-2.50%`, but capital utilization stayed `9.98%`; `ready_for_phase12c=false`
   - still a backtest/research profile; not connected to live order placement
 
 Experimental next candidates:

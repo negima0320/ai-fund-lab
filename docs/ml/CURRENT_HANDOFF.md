@@ -935,6 +935,56 @@ Important interpretation:
 - Next should be a 2025-only B4 trailing exit / profit-decay guard prototype,
   not a broad backtest or profile change.
 
+Phase 12-B4 Trailing Exit Prototype is implemented:
+
+```text
+src/ml/phase12b4_trailing_exit_prototype.py
+scripts/ml/run_phase12b4_trailing_exit_prototype.py
+tests/test_ml_phase12b4_trailing_exit_prototype.py
+```
+
+Latest generated report:
+
+```text
+reports/ml/phase12b4_trailing_exit_prototype_2025.md
+reports/ml/phase12b4_trailing_exit_prototype_2025.json
+```
+
+Core Phase 12-B4 result:
+
+- scope: 2025 trailing exit prototype only
+- base BUY/allocation: `S3a_dynamic_raw_weight`
+- full_backtest_executed: `false`
+- existing_model_overwritten: `false`
+- profile_changed: `false`
+- historical_predictions_regenerated: `false`
+- leakage_risk: `low`
+- blocking_issues: `0`
+- best_variant: `T5_opportunity_plus_trailing_8pct`
+- trailing_exit_improved_vs_opportunity_exit: `false`
+- ready_for_phase12c: `false`
+- recommended next phase: `Phase12-B5 exit threshold recalibration`
+
+Key results:
+
+| variant | net profit | PF | DD | utilization | avg holding days |
+|---|---:|---:|---:|---:|---:|
+| `T0_current_opportunity_plus_stop` | `39,770` | `1.5971` | `-2.66%` | `0.1007` | `6.20` |
+| `T1_stop_loss_only` | `14,489` | `1.1587` | `-6.83%` | `0.1856` | `17.49` |
+| `T3_trailing_8pct` | `9,149` | `1.1017` | `-5.50%` | `0.1806` | `16.84` |
+| `T5_opportunity_plus_trailing_8pct` | `43,962` | `1.7044` | `-2.50%` | `0.0998` | `6.09` |
+
+Important interpretation:
+
+- Trailing exit alone did not improve over the current Opportunity Exit setup.
+- Disabling Opportunity Exit raised holding days and utilization but hurt PF and
+  profit.
+- Opportunity + trailing 8% is a small improvement over T0 but does not solve
+  utilization.
+- The next useful step is not broader testing; it is recalibrating Opportunity
+  Exit thresholds so the strategy can hold winners longer without normalizing
+  into high DD.
+
 Important reference profiles are:
 
 ```text
@@ -1009,8 +1059,9 @@ Phase 10 / Phase 11 decision:
 - Phase 12-B Limited Allocation Strategy Check is complete.
 - Phase 12-B2 Allocation Execution Adjustment is complete.
 - Phase 12-B3 Exit / Hold Decision Audit is complete.
+- Phase 12-B4 Trailing Exit Prototype is complete.
 - Do not proceed to broader backtests or adoption from Phase 11-I results.
-- Recommended next step is Phase 12-B4 trailing exit prototype.
+- Recommended next step is Phase 12-B5 exit threshold recalibration.
 - Do not overwrite current PM AI, current Exit AI, or v2_82.
 - Do not use backtest results, trades, profit, cash, portfolio, selected,
   bought, affordable, or current PM multiplier as Phase 11 / Phase 12 features.
