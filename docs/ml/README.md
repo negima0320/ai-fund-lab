@@ -100,7 +100,8 @@ adoption notes for the AI / ML stack.
   - Phase 11-H Cooldown / Minimum Holding Guard found `H2_cooldown_10d` and `H3_min_hold_3d` passed 2024/2025 guard checks and produced a strict walk-forward OOS design
   - Phase 11-I Strict Walk-Forward OOS Prototype trained a research-only 2023 model and found strict OOS rank lift remained, but 2025 strategy checks did not beat the equal-allocation baseline
   - Phase 11-B2 Strict OOS Failure Diagnosis found the strict OOS top5 improved top-decile rate but also concentrated high-downside candidates, supporting an expected_downside model next
-  - current decision: proceed to Phase 11-B3 expected_downside model prototype before any broader backtest or adoption; keep `v2_82_cap38` as reference only
+  - Phase 11-B3 Expected Downside Model Prototype showed downside risk can be reduced with combined ranking, but opportunity retention needs threshold / weight tuning
+  - current decision: proceed to Phase 11-B4 combined ranking threshold tuning before any strategy backtest or adoption; keep `v2_82_cap38` as reference only
 
 ## Adoption Notes
 
@@ -132,6 +133,7 @@ Current strongest full-backtested research candidate:
   - Phase 11-I strict OOS trained a separate research model on 2023 only, validated on 2024, and tested on 2025; test AUC `0.6297`, PR-AUC `0.1514`, precision@top10% `0.1837`, strict_model_oos `true`
   - Phase 11-I strategy check with `0.2%` cost did not pass strict OOS adoption criteria: baseline net profit `180,876`, PF `2.2930`, DD `-6.39%`; strict OOS E4 net profit `116,049`, PF `1.2501`, DD `-13.14%`
   - Phase 11-B2 diagnosed the failure: strict OOS valuation top5 top-decile rate `24.00%` versus baseline `8.85%`, but downside_bad_rate `37.94%` versus baseline `13.58%`; feature drift was also detected in score and market/financial features
+  - Phase 11-B3 trained a strict OOS downside model; downside model test AUC `0.6180`, PR-AUC `0.2323`, precision@top10% `0.2992`; `score_v1` reduced downside_bad_rate to `19.76%` but top-decile rate fell to `15.27%`
   - still a backtest/research profile; not connected to live order placement
 
 Experimental next candidates:

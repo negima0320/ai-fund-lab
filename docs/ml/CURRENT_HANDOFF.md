@@ -560,6 +560,64 @@ Important interpretation:
 - Daily range filtering reduced downside in a quick audit, but it removed too
   many candidates to be treated as a final rule.
 
+Phase 11-B3 Expected Downside Model Prototype is implemented:
+
+```text
+src/ml/phase11b3_expected_downside_model.py
+scripts/ml/run_phase11b3_expected_downside_model.py
+tests/test_ml_phase11b3_expected_downside_model.py
+```
+
+Latest generated report and research-only model:
+
+```text
+reports/ml/phase11b3_expected_downside_model_2025.md
+reports/ml/phase11b3_expected_downside_model_2025.json
+models/ml/valuation_engine/research_phase11b3_downside/
+```
+
+Core Phase 11-B3 result:
+
+- strict split: train `2023`, validation `2024`, test `2025`
+- downside target: `downside_bad_20d = future_max_drawdown_20d <= -0.10`
+- strategy_backtest_executed: `false`
+- existing_model_overwritten: `false`
+- profile_changed: `false`
+- historical_predictions_regenerated: `false`
+- strict_model_oos: `true`
+- leakage_risk: `low`
+- blocking_issues: `0`
+- recommended next phase: `Phase11-B4 combined ranking threshold tuning`
+
+Downside model quality:
+
+| split | AUC | PR-AUC | precision@top10% | base downside rate |
+|---|---:|---:|---:|---:|
+| validation 2024 | `0.6288` | `0.2788` | `0.3318` | `0.1942` |
+| test 2025 | `0.6180` | `0.2323` | `0.2992` | `0.1495` |
+
+Combined ranking audit:
+
+| set | future return | max return | max drawdown | opportunity value | top-decile rate | downside bad rate |
+|---|---:|---:|---:|---:|---:|---:|
+| opportunity only top5 | `0.0063` | `0.1311` | `-0.1042` | `0.0269` | `0.2400` | `0.3794` |
+| score_v1 top5 | `0.0155` | `0.0911` | `-0.0653` | `0.0258` | `0.1527` | `0.1976` |
+| score_v2 top5 | `0.0172` | `0.1196` | `-0.0863` | `0.0332` | `0.2267` | `0.2921` |
+| score_v3 top5 | `0.0133` | `0.0647` | `-0.0471` | `0.0177` | `0.0618` | `0.1297` |
+
+Important interpretation:
+
+- Downside model works as a separate risk axis; top10% downside precision is
+  about 2x the 2025 base downside rate.
+- `score_v1 = opportunity - downside` passes the downside target
+  (`19.76%`) but loses too much opportunity top-decile rate (`15.27%`).
+- `score_v2 = opportunity * (1 - downside)` retains more opportunity
+  (`22.67%`) but downside remains above target (`29.21%`).
+- `score_v3 = opportunity_rank - downside_rank` controls downside strongly
+  (`12.97%`) but removes too much opportunity (`6.18%`).
+- B3 validates the need for Opportunity + Downside, but does not yet provide a
+  final ranking rule.
+
 Important reference profiles are:
 
 ```text
@@ -627,8 +685,9 @@ Phase 10 / Phase 11 decision:
 - Phase 11-H Cooldown / Minimum Holding Guard is complete.
 - Phase 11-I Strict Walk-Forward OOS Prototype is complete.
 - Phase 11-B2 Strict OOS Failure Diagnosis is complete.
+- Phase 11-B3 Expected Downside Model Prototype is complete.
 - Do not proceed to broader backtests or adoption from Phase 11-I results.
-- Recommended next step is Phase 11-B3 expected_downside model prototype.
+- Recommended next step is Phase 11-B4 combined ranking threshold tuning.
 - Do not overwrite current PM AI, current Exit AI, or v2_82.
 - Do not use backtest results, trades, profit, cash, portfolio, selected,
   bought, affordable, or current PM multiplier as Phase 11 features.

@@ -1261,3 +1261,92 @@ Interpretation:
 - `recommended_model_improvement`: expected_downside / drawdown-risk targetを追加する。
 - `recommended_next_phase`: `Phase11-B3 expected_downside model prototype`
 - Phase 11-B3ではclassification top-decile modelを置き換えるのではなく、downside risk modelを追加し、`opportunity_top_decile_proba` と `expected_downside` の2軸で候補を評価する。
+
+## Phase 11-B3 Implementation Status
+
+実装済み:
+
+- `src/ml/phase11b3_expected_downside_model.py`
+- `scripts/ml/run_phase11b3_expected_downside_model.py`
+- `tests/test_ml_phase11b3_expected_downside_model.py`
+
+生成report / artifact:
+
+- `reports/ml/phase11b3_expected_downside_model_2025.md`
+- `reports/ml/phase11b3_expected_downside_model_2025.json`
+- `models/ml/valuation_engine/research_phase11b3_downside/`
+
+Scope:
+
+- Phase 11-A datasetを読む
+- research-only Opportunity classifier + Downside classifierをstrict splitで学習
+- train `2023`, validation `2024`, test `2025`
+- 2025年のみBUY品質比較
+- strategy backtestなし
+- 既存model上書きなし
+- profile追加/変更なし
+- historical prediction再生成なし
+- future系はlabel / 評価のみ
+
+Downside target:
+
+```text
+downside_bad_20d = future_max_drawdown_20d <= -0.10
+```
+
+Downside model quality:
+
+| split | AUC | PR-AUC | precision@top10% | base downside rate |
+| --- | ---: | ---: | ---: | ---: |
+| validation 2024 | `0.6288` | `0.2788` | `0.3318` | `0.1942` |
+| test 2025 | `0.6180` | `0.2323` | `0.2992` | `0.1495` |
+
+Interpretation:
+
+- Downside modelは2025 strict OOSでdownside badを濃縮できた。
+- test top10% precisionは `29.92%` で、base downside rate `14.95%` に対して約2倍。
+- Opportunity classifierだけでは見えていなかった下落リスクの軸を、別modelとして持てる見込みがある。
+
+Combined ranking audit:
+
+| candidate_set | future_return_20d | future_max_return_20d | future_max_drawdown_20d | opportunity_value_20d | top_decile_rate | downside_bad_rate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `opportunity_only_top5` | `0.0063` | `0.1311` | `-0.1042` | `0.0269` | `0.2400` | `0.3794` |
+| `score_v1_top5` = opportunity - downside | `0.0155` | `0.0911` | `-0.0653` | `0.0258` | `0.1527` | `0.1976` |
+| `score_v2_top5` = opportunity * (1 - downside) | `0.0172` | `0.1196` | `-0.0863` | `0.0332` | `0.2267` | `0.2921` |
+| `score_v3_top5` = opportunity_rank - downside_rank | `0.0133` | `0.0647` | `-0.0471` | `0.0177` | `0.0618` | `0.1297` |
+
+Pass / fail:
+
+| condition | result |
+| --- | --- |
+| downside_bad_rate <= `25%` | `score_v1_top5`, `score_v3_top5` pass |
+| top_decile_rate >= `24%` also maintained | no set passes |
+| `ready_for_phase11b4` | `true` |
+| `ideal_condition_passed` | `false` |
+
+Interpretation:
+
+- `score_v1` はdownside_bad_rateを `37.94%` から `19.76%` に大きく改善したが、top_decile_rateは `15.27%` まで低下した。
+- `score_v2` はtop_decile_rate `22.67%` とopportunity_value `0.0332` を比較的残すが、downside_bad_rateは `29.21%` で目標の `25%` 未満に届かない。
+- `score_v3` はdownside_bad_rate `12.97%` まで落とすが、top_decile_rate `6.18%` まで機会を削りすぎる。
+- Downside model自体は有効だが、Opportunity維持との両立にはscore weight / threshold tuningが必要。
+
+Leakage checklist:
+
+| item | value |
+| --- | --- |
+| future_columns_used_as_features | `[]` |
+| future_columns_used_only_as_labels | `future_max_drawdown_20d`, `opportunity_top_decile_20d`, `downside_bad_20d` |
+| existing_model_overwritten | `false` |
+| profile_changed | `false` |
+| strict_model_oos | `true` |
+| leakage_risk | `low` |
+| blocking_issues | `0` |
+
+推奨:
+
+- `ready_for_phase11b4`: `true`
+- `ideal_condition_passed`: `false`
+- `recommended_next_phase`: `Phase11-B4 combined ranking threshold tuning`
+- Phase 11-B4ではbacktestへ進まず、まずscore_v1 / score_v2の重みやdownside proba thresholdをvalidation 2024で固定し、2025 BUY品質で確認する。
