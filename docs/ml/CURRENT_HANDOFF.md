@@ -836,6 +836,53 @@ Important interpretation:
 - Phase 12-B2 should test a small number of execution adjustments between raw
   and normalized weighting, not new models or broad backtests.
 
+Phase 12-B2 Allocation Execution Adjustment is implemented:
+
+```text
+src/ml/phase12b2_allocation_execution_adjustment.py
+scripts/ml/run_phase12b2_allocation_execution_adjustment.py
+tests/test_ml_phase12b2_allocation_execution_adjustment.py
+```
+
+Latest generated report:
+
+```text
+reports/ml/phase12b2_allocation_execution_adjustment_2025.md
+reports/ml/phase12b2_allocation_execution_adjustment_2025.json
+```
+
+Core Phase 12-B2 result:
+
+- scope: 2025 allocation execution adjustment only
+- source artifact: `data/ml/valuation_engine/phase12a_dynamic_capital_allocation_2025.parquet`
+- tested: partial normalization, min usage guard, capped normalized execution
+- full_backtest_executed: `false`
+- existing_model_overwritten: `false`
+- profile_changed: `false`
+- historical_predictions_regenerated: `false`
+- leakage_risk: `low`
+- blocking_issues: `0`
+- ready_for_phase12c: `false`
+- recommended next phase: `Phase12-B3 execution adjustment or Phase12-A4 risk score refinement`
+
+Key results:
+
+| strategy | net profit | PF | DD | utilization |
+|---|---:|---:|---:|---:|
+| `S3a_dynamic_raw_weight` | `39,770` | `1.5971` | `-2.66%` | `0.1007` |
+| `S3b_dynamic_normalized_weight` | `135,752` | `1.2712` | `-19.16%` | `0.7506` |
+| `S5_partial_normalized_30` | `2,434` | `1.0094` | `-11.75%` | `0.3910` |
+| `S8_capped_normalized` | `-34,065` | `0.9120` | `-17.16%` | `0.5922` |
+
+Important interpretation:
+
+- No B2 strategy met the minimum target of net_profit > 0, PF >= 1.5, DD >=
+  -12%, and capital_utilization >= 0.20.
+- Partial normalization increased utilization but lost PF.
+- Usage guards and caps did not recover PF.
+- The issue is no longer only allocation amount; the dynamic high-quality BUY
+  set may need exit/churn adjustment or a richer risk score before Phase 12-C.
+
 Important reference profiles are:
 
 ```text
@@ -908,8 +955,9 @@ Phase 10 / Phase 11 decision:
 - Phase 12-A2 Allocation Score Refinement is complete.
 - Phase 12-A3 Top5 Penalty Refinement is complete.
 - Phase 12-B Limited Allocation Strategy Check is complete.
+- Phase 12-B2 Allocation Execution Adjustment is complete.
 - Do not proceed to broader backtests or adoption from Phase 11-I results.
-- Recommended next step is Phase 12-B2 allocation execution adjustment.
+- Recommended next step is Phase 12-B3 execution adjustment or Phase 12-A4 risk score refinement.
 - Do not overwrite current PM AI, current Exit AI, or v2_82.
 - Do not use backtest results, trades, profit, cash, portfolio, selected,
   bought, affordable, or current PM multiplier as Phase 11 / Phase 12 features.
