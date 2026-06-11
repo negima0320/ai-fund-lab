@@ -1,0 +1,110 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pandas as pd
+
+from ml.phase12a_dynamic_capital_allocation import ARTIFACT_PATH
+from ml.phase13d3_hold_exit_rule_prototype import (
+    EXCLUSIVE_ACTION_PRIORITY,
+    REQUIRED_REPORT_KEYS,
+    Phase13D3HoldExitRulePrototype,
+)
+
+
+def _write_artifacts(root: Path) -> None:
+    artifact_path = root / ARTIFACT_PATH
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    label_dir = root / "data/ml/labels"
+    label_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    labels_by_date: dict[str, list[dict[str, object]]] = {}
+    for date in pd.bdate_range("2025-01-07", periods=30):
+        date_text = date.date().isoformat()
+        labels_by_date[date_text] = []
+        for rank in range(60):
+            code = f"{10000 + rank}"
+            profit_protect = rank < 8
+            break_even = 8 <= rank < 16
+            stop_rework = 16 <= rank < 24
+            extend_hold = 24 <= rank < 32
+            hold = 32 <= rank < 45
+            ret20 = -0.03 if profit_protect else -0.005 if break_even else -0.04 if stop_rework else 0.08 if extend_hold else 0.02 if hold else 0.0
+            max20 = 0.08 if profit_protect else 0.04 if break_even else 0.02 if stop_rework else 0.12 if extend_hold else 0.04 if hold else 0.02
+            dd20 = -0.08 if profit_protect else -0.04 if break_even else -0.12 if stop_rework else -0.04 if extend_hold else -0.03 if hold else -0.06
+            rows.append(
+                {
+                    "date": date,
+                    "code": code,
+                    "close": 100.0 + rank,
+                    "turnover_value": 1_000_000 + rank,
+                    "stock_selection_rank_score": (59 - rank) / 59,
+                    "risk_adjusted_score": (59 - rank) / 59,
+                    "expected_return": (59 - rank) / 590,
+                    "candidate_strength": 1.0 - rank / 100,
+                    "opportunity_proba": 0.85 if rank < 20 else 0.40,
+                    "downside_bad_proba": 0.60 if stop_rework else 0.20,
+                    "opportunity_rank_percentile": 1.0 - rank / 100,
+                    "downside_rank_percentile": 0.80 if stop_rework else 0.20,
+                    "future_return_20d": ret20,
+                    "future_max_return_20d": max20,
+                    "future_max_drawdown_20d": dd20,
+                    "opportunity_value_20d": ret20 + max20,
+                    "opportunity_top_decile_20d": 1 if extend_hold else 0,
+                    "downside_bad_20d": 1 if dd20 <= -0.10 else 0,
+                }
+            )
+            labels_by_date[date_text].append(
+                {
+                    "date": date,
+                    "code": code,
+                    "future_5d_return": 0.02 if extend_hold else -0.01,
+                    "future_10d_return": 0.04 if extend_hold else -0.02 if profit_protect else 0.0,
+                    "bad_entry_10d": 1 if stop_rework else 0,
+                    "future_max_return_10d": 0.09 if extend_hold else 0.03,
+                    "future_max_return_20d": max20,
+                }
+            )
+    pd.DataFrame(rows).to_parquet(artifact_path, index=False)
+    for date_text, rows_for_date in labels_by_date.items():
+        pd.DataFrame(rows_for_date).to_parquet(label_dir / f"labels_{date_text}.parquet", index=False)
+
+
+def test_phase13d3_builds_required_report(tmp_path: Path) -> None:
+    _write_artifacts(tmp_path)
+
+    report = Phase13D3HoldExitRulePrototype(tmp_path).build_report()
+
+    assert report["metadata"]["phase"] == "13-D3"
+    assert report["metadata"]["primary_candidate_set"] == "candidate_strength_top50"
+    assert report["metadata"]["new_model_trained"] is False
+    assert report["metadata"]["full_backtest_executed"] is False
+    assert report["input_artifact_summary"]["date_min"].startswith("2025")
+    assert report["input_artifact_summary"]["date_max"].startswith("2025")
+    assert "candidate_strength_top50" in report["input_artifact_summary"]["candidate_sets"]
+    assert report["exclusive_action_priority"] == EXCLUSIVE_ACTION_PRIORITY
+    assert report["leakage_checklist"]["future_columns_used_as_features"] == []
+    assert report["leakage_checklist"]["existing_model_overwritten"] is False
+    assert report["leakage_checklist"]["profile_changed"] is False
+    assert report["leakage_checklist"]["full_backtest_executed"] is False
+    assert report["leakage_risk"] == "low"
+    assert "blocking_issues" in report
+    for key in REQUIRED_REPORT_KEYS:
+        assert key in report
+    primary_rules = {row["rule"] for row in report["candidate_strength_top50_summary"]}
+    assert "rule_d_combined_conservative" in primary_rules
+    assert "rule_e_combined_aggressive" in primary_rules
+
+
+def test_phase13d3_saves_json_report(tmp_path: Path) -> None:
+    _write_artifacts(tmp_path)
+
+    paths = Phase13D3HoldExitRulePrototype(tmp_path).run()
+
+    assert paths.markdown.exists()
+    assert paths.json.exists()
+    loaded = json.loads(paths.json.read_text(encoding="utf-8"))
+    assert loaded["metadata"]["phase"] == "13-D3"
+    assert loaded["leakage_checklist"]["historical_predictions_regenerated"] is False
+    assert loaded["leakage_checklist"]["future_columns_used_as_features"] == []

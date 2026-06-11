@@ -1,3 +1,392 @@
+
+# AI Fund Lab ML開発 原則・目的・評価基準
+
+## 最重要目的
+
+AI Fund Lab の最終目的は以下である。
+
+```text
+年率50%以上の収益を達成すること
+```
+
+すべてのAI、モデル、ルール、バックテスト、評価はこの目的に従う。
+
+---
+
+## 評価指標の優先順位
+
+### Primary Metric
+
+最重要指標
+
+```text
+Annual Return（年率収益率）
+```
+
+最終的な判断基準は年率収益率とする。
+
+---
+
+### Secondary Metrics
+
+以下は補助指標である。
+
+```text
+Profit Factor (PF)
+
+Drawdown (DD)
+
+Win Rate
+
+Capital Utilization
+
+Trade Count
+
+Holding Period
+```
+
+これらは目的ではない。
+
+以下を診断するために利用する。
+
+```text
+なぜ年率収益率が伸びないのか
+
+どこに問題があるのか
+
+どのレイヤーが利益を失っているのか
+```
+
+---
+
+## やってはいけないこと
+
+以下のような状態を避ける。
+
+### 悪い例
+
+```text
+PFが改善した
+
+だから成功
+```
+
+---
+
+```text
+DDが改善した
+
+だから成功
+```
+
+---
+
+```text
+Top Decile Rateが改善した
+
+だから成功
+```
+
+---
+
+### 正しい考え方
+
+```text
+年率収益率が改善したか？
+```
+
+を最初に見る。
+
+---
+
+その後、
+
+```text
+なぜ改善したのか
+
+なぜ改善しなかったのか
+```
+
+を分析するために、
+
+```text
+PF
+DD
+Win Rate
+Utilization
+```
+
+を利用する。
+
+---
+
+# Phase11〜12で学んだこと
+
+## 問題点
+
+途中から、
+
+```text
+PF
+
+DD
+
+Top Decile
+
+Utilization
+```
+
+を最適化することが目的になりかけた。
+
+しかし本来の目的は、
+
+```text
+年率50%
+```
+
+である。
+
+---
+
+## 今後のルール
+
+すべてのPhaseの先頭に以下を書く。
+
+### Goal
+
+```text
+このPhaseは何によって
+年率50%達成へ近づくのか
+```
+
+---
+
+### Prediction Horizon
+
+```text
+何日先を対象にするのか
+```
+
+例
+
+```text
+5日
+
+10日
+
+20日
+
+40日
+```
+
+---
+
+### Primary Metric
+
+```text
+Annual Return
+```
+
+---
+
+### Secondary Metrics
+
+```text
+PF
+DD
+Win Rate
+Capital Utilization
+```
+
+---
+
+# AIごとの役割
+
+## Stock Selection AI
+
+役割
+
+```text
+候補銘柄生成
+```
+
+目的
+
+```text
+全銘柄から有望候補を抽出する
+```
+
+---
+
+## Valuation Engine
+
+役割
+
+```text
+お買い得判定
+```
+
+目的
+
+```text
+今買う価値があるか
+```
+
+---
+
+## Capital Allocation Engine
+
+役割
+
+```text
+資金配分
+```
+
+目的
+
+```text
+どれだけ買うか
+```
+
+---
+
+## Hold / Exit AI
+
+役割
+
+```text
+保有・売却判断
+```
+
+目的
+
+```text
+利益を伸ばす
+
+損失を抑える
+```
+
+---
+
+# Reality Audit原則
+
+改善実装を行う前に、
+
+```text
+本当にそのレイヤーが問題か？
+```
+
+を監査する。
+
+---
+
+例
+
+```text
+PFが悪い
+
+↓
+
+Allocationが悪い
+```
+
+と決めつけない。
+
+---
+
+まず、
+
+```text
+Buy
+
+Valuation
+
+Allocation
+
+Hold
+
+Exit
+```
+
+どこが利益を失っているかを確認する。
+
+---
+
+# Strict OOS原則
+
+将来運用を前提とするため、
+
+```text
+Train
+
+Validation
+
+Test
+```
+
+は厳格に分離する。
+
+例
+
+```text
+Train:
+2023
+
+Validation:
+2024
+
+Test:
+2025
+```
+
+---
+
+以下は禁止。
+
+```text
+2025評価
+
+↓
+
+2025学習済みモデル
+```
+
+---
+
+# 最終判断基準
+
+どれだけ良い指標が出ても、
+
+以下を満たせなければ成功ではない。
+
+```text
+年率50%以上
+```
+
+逆に、
+
+年率50%以上を安定して達成できるなら、
+
+PFやDDは診断指標として扱う。
+
+---
+
+## 開発時の自問
+
+新しいPhaseを始める前に必ず確認する。
+
+```text
+この実験は
+
+年率50%達成に
+どう繋がるのか？
+```
+
+答えられない場合、
+
+実験の目的を再確認すること。
+
+
 # ML Documentation Index
 
 This directory contains implementation notes, validation summaries, and
