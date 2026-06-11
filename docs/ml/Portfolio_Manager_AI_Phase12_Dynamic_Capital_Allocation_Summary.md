@@ -905,3 +905,111 @@ Decision:
 - `recommended_next_phase`: `Phase12-C2 allocation utilization refinement`
 
 Phase 12-Cでは、Dynamic Allocation + Recalibrated Exitの統合による決定的改善は確認できなかった。Phase 13へ進まず、次は利用率を上げてもDDを壊さない実行制約を検討する。
+
+## Phase 12-C2 Implementation Status
+
+実装済み:
+
+- `src/ml/phase12c2_utilization_without_dd_explosion.py`
+- `scripts/ml/run_phase12c2_utilization_without_dd_explosion.py`
+- `tests/test_ml_phase12c2_utilization_without_dd_explosion.py`
+
+生成report:
+
+- `reports/ml/phase12c2_utilization_without_dd_explosion_2025.md`
+- `reports/ml/phase12c2_utilization_without_dd_explosion_2025.json`
+
+Scope:
+
+- Phase 12-A artifactを使用
+- 2025年のみ
+- C2 normalized + B5_2 ExitをbaseにDD attributionを監査
+- normalized系の少数variantのみ比較
+- full backtestなし
+- 既存model上書きなし
+- profile追加/変更なし
+- historical prediction再生成なし
+- future系は評価指標のみ
+
+## Phase 12-C2 Result
+
+Base DD attribution:
+
+| item | value |
+| --- | ---: |
+| `main_dd_cause` | `single_name_concentration` |
+| `max_concurrent_positions` | `5` |
+| `largest_position_weight_mean` | `0.5049` |
+| `largest_position_weight_p90` | `0.7585` |
+| `largest_position_weight_max` | `0.8011` |
+| `top2_weight_mean` | `0.7565` |
+| `top3_weight_mean` | `0.8230` |
+| `largest_within_invested_weight_mean` | `0.6035` |
+| `loss_contribution_pct_top20` | `1.0000` |
+
+Downside exposure:
+
+| bucket | trades | avg_buy_amount | avg_realized_return | loss_rate | avg_normalized_weight |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `downside_proba_lt_0.40` | `44` | `315,016` | `0.0226` | `0.4545` | `0.3991` |
+
+Interpretation:
+
+- C2のDD悪化は、`downside_bad_proba >= 0.40`銘柄へ大きく張ったことが主因ではない。
+- 実際のtradeはすべて`downside_bad_proba < 0.40` bucketに入り、downside model上は極端に危険な候補ではなかった。
+- 一方でnormalized allocationが候補数の少ない日やweight分布の偏った日に1銘柄へ大きく寄せ、largest position weightが最大`80.11%`まで上がった。
+- top2平均weightも`75.65%`で、DDは「高downside銘柄」より「normalizedによる単一/少数銘柄集中」が主因。
+
+Variant results:
+
+| variant | net_profit | PF | DD | utilization | avg_holding_days |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `C2_base_dynamic_normalized_B5_2_exit` | `306,382` | `2.0680` | `-18.88%` | `0.9076` | `14.64` |
+| `C2a_normalized_cap_20pct` | `132,958` | `1.4752` | `-17.99%` | `0.5799` | `15.50` |
+| `C2b_normalized_cap_15pct` | `103,392` | `1.4541` | `-14.99%` | `0.4242` | `14.76` |
+| `C2c_normalized_downside_penalty_squared` | `315,227` | `2.1172` | `-18.26%` | `0.9157` | `14.89` |
+| `C2d_normalized_top_weight_cap_30pct` | `64,548` | `1.2234` | `-16.19%` | `0.5064` | `14.47` |
+| `C2e_normalized_cash_reserve_80pct` | `118,114` | `1.3973` | `-21.08%` | `0.6152` | `14.16` |
+
+Minimum target:
+
+```text
+PF >= 1.8
+DD >= -12%
+utilization >= 0.50
+```
+
+Minimum targetを満たしたvariant:
+
+```text
+none
+```
+
+Best variant:
+
+```text
+C2c_normalized_downside_penalty_squared
+```
+
+ただし、C2cはnet profit/PF/utilizationを改善したものの、DDは`-18.26%`で最低ライン未達。
+
+Leakage:
+
+| item | value |
+| --- | --- |
+| future_columns_used_only_for_evaluation | `future_return_20d`, `future_max_return_20d`, `future_max_drawdown_20d`, `opportunity_value_20d`, `opportunity_top_decile_20d`, `downside_bad_20d` |
+| future_columns_used_as_features | `[]` |
+| existing_model_overwritten | `false` |
+| profile_changed | `false` |
+| full_backtest_executed | `false` |
+| leakage_risk | `low` |
+| blocking_issues | `0` |
+
+Decision:
+
+- `main_dd_cause`: `single_name_concentration`
+- `best_variant`: `C2c_normalized_downside_penalty_squared`
+- `ready_for_phase13`: `false`
+- `recommended_next_phase`: `Phase12-C3 DD guard refinement`
+
+Phase 12-C2では、利用率を維持したままDDを`-12%`以内へ抑える候補は見つからなかった。次はdownside penaltyではなく、1銘柄集中を直接抑えるposition concentration guard / rebalancing capを検証する。

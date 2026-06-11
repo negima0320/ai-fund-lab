@@ -12,28 +12,28 @@ next useful actions. For the full history, see
 `docs/ml/Portfolio_Manager_AI_Phase10_Stop_and_Hold_Summary.md`, and
 `docs/ml/Portfolio_Manager_AI_Phase11_Valuation_Allocation_Plan.md`.
 
-## Latest Phase 12-C Handoff
+## Latest Phase 12-C2 Handoff
 
-Phase 12-C Dynamic Allocation + Recalibrated Exit is implemented:
+Phase 12-C2 Utilization Without DD Explosion is implemented:
 
 ```text
-src/ml/phase12c_dynamic_allocation_recalibrated_exit.py
-scripts/ml/run_phase12c_dynamic_allocation_recalibrated_exit.py
-tests/test_ml_phase12c_dynamic_allocation_recalibrated_exit.py
+src/ml/phase12c2_utilization_without_dd_explosion.py
+scripts/ml/run_phase12c2_utilization_without_dd_explosion.py
+tests/test_ml_phase12c2_utilization_without_dd_explosion.py
 ```
 
 Latest generated report:
 
 ```text
-reports/ml/phase12c_dynamic_allocation_recalibrated_exit_2025.md
-reports/ml/phase12c_dynamic_allocation_recalibrated_exit_2025.json
+reports/ml/phase12c2_utilization_without_dd_explosion_2025.md
+reports/ml/phase12c2_utilization_without_dd_explosion_2025.json
 ```
 
 Scope and constraints:
 
 - 2025年のみ
-- B5_2 recalibrated Opportunity Exitを固定
-- Dynamic Allocation execution方式を少数比較
+- C2 normalized + B5_2 ExitをbaseにDD attributionを監査
+- normalized系の少数variantのみ比較
 - full backtestなし
 - profile追加/変更なし
 - 既存model上書きなし
@@ -43,37 +43,45 @@ Scope and constraints:
 
 Core result:
 
-| strategy | net_profit | PF | DD | utilization |
+| variant | net_profit | PF | DD | utilization |
 | --- | ---: | ---: | ---: | ---: |
-| `C0_baseline_equal_allocation` | `138,402` | `1.6472` | `-9.78%` | `0.9138` |
-| `C1_dynamic_raw_B5_2_exit` | `71,922` | `2.1827` | `-3.24%` | `0.1613` |
-| `C2_dynamic_normalized_B5_2_exit` | `306,382` | `2.0680` | `-18.88%` | `0.9076` |
-| `C3_partial_normalized_30_B5_2_exit` | `113,140` | `1.4931` | `-12.36%` | `0.5041` |
-| `C4_partial_normalized_50_B5_2_exit` | `74,741` | `1.2070` | `-19.15%` | `0.6343` |
+| `C2_base_dynamic_normalized_B5_2_exit` | `306,382` | `2.0680` | `-18.88%` | `0.9076` |
+| `C2a_normalized_cap_20pct` | `132,958` | `1.4752` | `-17.99%` | `0.5799` |
+| `C2b_normalized_cap_15pct` | `103,392` | `1.4541` | `-14.99%` | `0.4242` |
+| `C2c_normalized_downside_penalty_squared` | `315,227` | `2.1172` | `-18.26%` | `0.9157` |
+| `C2d_normalized_top_weight_cap_30pct` | `64,548` | `1.2234` | `-16.19%` | `0.5064` |
+| `C2e_normalized_cash_reserve_80pct` | `118,114` | `1.3973` | `-21.08%` | `0.6152` |
 
-Phase 12-C minimum line:
+Phase 12-C2 minimum line:
 
 ```text
 PF >= 1.8
-DD >= -10%
-net_profit > 0
-capital_utilization >= 0.20
+DD >= -12%
+capital_utilization >= 0.50
 ```
 
-No strategy met the minimum line. `C2` had strong profit and PF, but DD
-worsened to `-18.88%`. `C1` kept PF/DD healthy, but utilization stayed below
-the `20%` line.
+No variant met the minimum line. `C2c` improved profit/PF/utilization, but DD
+remained `-18.26%`.
+
+DD attribution:
+
+- `main_dd_cause`: `single_name_concentration`
+- largest position weight mean / p90 / max: `50.49%` / `75.85%` / `80.11%`
+- top2 average weight: `75.65%`
+- top3 average weight: `82.30%`
+- all base C2 trades were in `downside_proba_lt_0.40`; high-downside exposure
+  was not the main DD cause.
 
 Current decision:
 
 ```text
 ready_for_phase13 = false
-recommended_next_phase = Phase12-C2 allocation utilization refinement
+recommended_next_phase = Phase12-C3 DD guard refinement
 ```
 
 Do not proceed to Phase 13 broad/OOS checks yet. Continue with a 2025-limited
-allocation execution refinement that raises utilization without recreating the
-normalized-allocation DD problem.
+DD guard focused on direct position concentration controls, because downside
+penalty and simple caps did not solve the DD problem.
 
 ## Current State
 
