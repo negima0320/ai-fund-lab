@@ -12,74 +12,75 @@ next useful actions. For the full history, see
 `docs/ml/Portfolio_Manager_AI_Phase10_Stop_and_Hold_Summary.md`, and
 `docs/ml/Portfolio_Manager_AI_Phase11_Valuation_Allocation_Plan.md`.
 
-## Latest Phase 12-D1 Handoff
+## Latest Phase 12-D2 Handoff
 
-Phase 12-D1 Winning Trades Turned Into Losers Audit is implemented:
+Phase 12-D2 Buy Quality Reality Audit is implemented:
 
 ```text
-src/ml/phase12d1_winning_to_losing_audit.py
-scripts/ml/run_phase12d1_winning_to_losing_audit.py
-tests/test_ml_phase12d1_winning_to_losing_audit.py
+src/ml/phase12d2_buy_quality_reality_audit.py
+scripts/ml/run_phase12d2_buy_quality_reality_audit.py
+tests/test_ml_phase12d2_buy_quality_reality_audit.py
 ```
 
 Latest generated report:
 
 ```text
-reports/ml/phase12d1_winning_to_losing_audit_2025.md
-reports/ml/phase12d1_winning_to_losing_audit_2025.json
+reports/ml/phase12d2_buy_quality_reality_audit_2025.md
+reports/ml/phase12d2_buy_quality_reality_audit_2025.json
 ```
 
 Scope and constraints:
 
 - 2025年のみ
-- C2c normalized downside-squared allocation + B5_2 Exitを対象
-- strategy改善ではなくtrade path監査のみ
+- BUY品質 / strategy layer contributionのReality Auditのみ
+- 新規AI学習なし
 - full backtestなし
 - profile追加/変更なし
 - 既存model上書きなし
 - historical prediction再生成なし
-- future系は監査指標のみ
+- future系は評価指標のみ
 - leakage_risk `low`, blocking_issues `0`
 
-Core result:
+BUY quality layer comparison:
 
-| metric | value |
-| --- | ---: |
-| target net_profit | `315,227` |
-| target PF | `2.1172` |
-| target DD | `-18.26%` |
-| target utilization | `91.57%` |
-| total trades | `46` |
-| average holding days | `14.89` |
+| layer | top_decile | downside | opportunity_value |
+| --- | ---: | ---: | ---: |
+| universe | `0.1053` | `0.1650` | `0.0211` |
+| Stock Selection top5 | `0.0885` | `0.1358` | `0.0185` |
+| Opportunity top5 | `0.2400` | `0.3794` | `0.0269` |
+| Opportunity+Downside A3_3 | `0.2963` unweighted / `0.2614` weighted | `0.1481` unweighted / `0.1432` weighted | `0.0771` |
 
-Winning-to-losing audit:
+Strategy comparison:
 
-| condition | count | avg_peak | avg_final | decay | realized_loss | recoverable |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| peak `>= +5%`, final loss | `7` | `+7.39%` | `-6.23%` | `13.23%` | `-157,341` | `328,000` |
-| peak `>= +10%`, final loss | `1` | `+10.03%` | `-0.40%` | `10.03%` | `-1,783` | `44,700` |
+| strategy | net_profit | PF | DD | utilization |
+| --- | ---: | ---: | ---: | ---: |
+| `S0_stock_selection_only` | `138,402` | `1.6472` | `-9.78%` | `0.9138` |
+| `S1_stock_selection_plus_B5_2_exit` | `187,059` | `1.4158` | `-12.35%` | `0.9532` |
+| `S2_opportunity_only` | `-21,755` | `0.9675` | `-32.29%` | `0.8658` |
+| `S3_opportunity_plus_B5_2_exit` | `388,607` | `1.5009` | `-25.02%` | `1.0454` |
+| `S4_opportunity_downside_dynamic_allocation_B5_2_exit` | `315,227` | `2.1172` | `-18.26%` | `0.9157` |
 
 Interpretation:
 
-- Winning-to-losing conversion is clearly present.
-- The main profit leakage source for winning-to-losing trades is `stop_loss`.
-- Stop-loss trades had avg peak profit `+5.25%`, avg final return `-10.11%`,
-  and profit decay amount `315,900`.
-- Time exits also have large total decay, but they remain profitable on
-  average and are not the main winning-to-losing source.
+- Stock Selection top5 alone did not beat the universe on top-decile rate.
+- Valuation adds clear BUY-quality value: top-decile `0.0885 -> 0.2400`.
+- Opportunity alone also picks too much downside: downside `0.1358 -> 0.3794`.
+- Downside penalty fixes much of that: weighted downside `0.1432` while
+  weighted top-decile remains `0.2614`.
+- Therefore the buy side is not the main blocker. The current blocker remains
+  Exit / risk control, because S4 keeps PF high but DD is still `-18.26%`.
 
 Current decision:
 
 ```text
 ready_for_phase13 = false
-recommended_next_phase = Phase12-D2
-recommended_exit_improvement = profit_protection_exit or break_even_guard
+main_bottleneck = exit
+recommended_next_phase = Phase12-D3 Exit AI Dataset Audit
 ```
 
 Do not proceed to Phase 13 broad/OOS checks yet. Continue with a 2025-limited
-exit improvement that prevents trades once up `+5%` or more from falling all
-the way to stop-loss. Candidate next variants: profit protection exit,
-trailing profit lock, break-even guard.
+Exit dataset/profit-protection audit. Buy Model Revisit is not the immediate
+priority because Valuation + Downside improved BUY quality.
 
 ## Current State
 

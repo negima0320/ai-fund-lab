@@ -1286,3 +1286,120 @@ Decision:
 - `recommended_next_phase`: `Phase12-D2`
 
 Phase 12-D2では、profit protection exit、break-even guard、またはtrailing profit lockを2025年限定で検証する。特に、一度`+5%`以上乗ったtradeをstop_lossまで落とさないguardを優先する。
+
+## Phase 12-D2 Buy Quality Reality Audit Implementation Status
+
+実装済み:
+
+- `src/ml/phase12d2_buy_quality_reality_audit.py`
+- `scripts/ml/run_phase12d2_buy_quality_reality_audit.py`
+- `tests/test_ml_phase12d2_buy_quality_reality_audit.py`
+
+生成report:
+
+- `reports/ml/phase12d2_buy_quality_reality_audit_2025.md`
+- `reports/ml/phase12d2_buy_quality_reality_audit_2025.json`
+
+Scope:
+
+- Phase 12-A artifactを使用
+- 2025年のみ
+- BUY品質 / strategy layer contributionのReality Auditのみ
+- 新規AI学習なし
+- full backtestなし
+- 既存model上書きなし
+- profile追加/変更なし
+- historical prediction再生成なし
+- future系は評価指標のみ
+
+## Phase 12-D2 Buy Quality Reality Audit Result
+
+40d/60d future return:
+
+```text
+future_return_40d: skipped, column_not_available_in_existing_artifact
+future_return_60d: skipped, column_not_available_in_existing_artifact
+```
+
+BUY quality layer comparison:
+
+| layer | rows | avg/day | future_return_20d | opportunity_value | top_decile_rate | downside_bad_rate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `L0_candidate_universe` | `168,329` | `1020.18` | `0.0148` | `0.0211` | `0.1053` | `0.1650` |
+| `L1_stock_selection_top5` | `825` | `5.00` | `0.0162` | `0.0185` | `0.0885` | `0.1358` |
+| `L2_opportunity_top5` | `825` | `5.00` | `0.0063` | `0.0269` | `0.2400` | `0.3794` |
+| `L3_opportunity_downside_top5_A3_3` | `216` | `1.96` | `0.0500` | `0.0771` | `0.2963` | `0.1481` |
+| `L4_dynamic_normalized_C2c_candidates` | `216` | `1.96` | `0.0500` | `0.0771` | `0.2963` | `0.1481` |
+
+Weighted quality:
+
+| layer | weighted_top_decile_rate | weighted_downside_bad_rate |
+| --- | ---: | ---: |
+| `L3_opportunity_downside_top5_A3_3` | `0.2614` | `0.1432` |
+| `L4_dynamic_normalized_C2c_candidates` | `0.2505` | `0.1500` |
+
+Strategy layer comparison:
+
+| strategy | net_profit | PF | DD | utilization | trades | avg_holding_days |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `S0_stock_selection_only` | `138,402` | `1.6472` | `-9.78%` | `0.9138` | `64` | `19.09` |
+| `S1_stock_selection_plus_B5_2_exit` | `187,059` | `1.4158` | `-12.35%` | `0.9532` | `145` | `8.08` |
+| `S2_opportunity_only` | `-21,755` | `0.9675` | `-32.29%` | `0.8658` | `73` | `16.49` |
+| `S3_opportunity_plus_B5_2_exit` | `388,607` | `1.5009` | `-25.02%` | `1.0454` | `94` | `12.90` |
+| `S4_opportunity_downside_dynamic_allocation_B5_2_exit` | `315,227` | `2.1172` | `-18.26%` | `0.9157` | `46` | `14.89` |
+
+Layer contribution:
+
+| effect | interpretation |
+| --- | --- |
+| `stock_selection_effect` | Stock Selection top5はuniverseよりdownsideは低いが、top-decile rateは`0.1053 -> 0.0885`で改善せず |
+| `valuation_effect` | Opportunity top5はtop-decile rateを`0.0885 -> 0.2400`へ改善するが、downside_bad_rateも`0.1358 -> 0.3794`へ悪化 |
+| `downside_effect` | A3_3 Downside penaltyはweighted downsideを`0.3794 -> 0.1432`へ改善し、weighted top-decileも`0.2614`を維持 |
+| `allocation_effect` | S4はS3よりprofitは低いがPF/DDを改善。net_profit/utilizationは劣化 |
+| `exit_effect` | B5_2 ExitはOpportunity onlyに対しprofit/PF/DD/utilizationを改善 |
+
+Judgment:
+
+| item | value | reason |
+| --- | --- | --- |
+| `buy_quality_good_enough` | `true` | Opportunity top5 top-decile `0.2400` vs universe `0.1053` |
+| `stock_selection_is_valid` | `false` | Stock Selection top5 top-decile `0.0885` vs universe `0.1053` |
+| `valuation_adds_value` | `true` | Opportunity top5 top-decile `0.2400` vs Stock Selection `0.0885` |
+| `downside_adds_value` | `true` | weighted downside `0.1432` vs opportunity-only downside `0.3794` |
+| `allocation_adds_value` | `true` | S4はS3よりPF/DDを改善。ただしprofit/utilizationは低下 |
+| `exit_is_current_bottleneck` | `true` | BUY品質は改善しているがS4 DDは`-18.26%` |
+
+Interpretation:
+
+- 「買いが全く効いていない」わけではない。Valuationはtop-decile検出を明確に改善している。
+- Stock Selection top5単体は2025 artifact上ではtop-decile率が候補全体を下回り、単独の買い軸としては強いとは言えない。
+- Opportunity単独は上昇候補を拾えるが、downsideも強く拾う。
+- Downside penaltyはOpportunityの質をかなり改善しており、Phase 12の方向性はBUY品質上は成立している。
+- それでもDDが残るため、現時点の主ボトルネックはExit / risk control側。
+
+Leakage:
+
+| item | value |
+| --- | --- |
+| future_columns_used_only_for_evaluation | `future_return_20d`, `future_max_return_20d`, `future_max_drawdown_20d`, `opportunity_value_20d`, `opportunity_top_decile_20d`, `downside_bad_20d`, `future_return_40d`, `future_return_60d` |
+| future_columns_used_as_features | `[]` |
+| existing_model_overwritten | `false` |
+| profile_changed | `false` |
+| full_backtest_executed | `false` |
+| new_model_trained | `false` |
+| historical_predictions_regenerated | `false` |
+| leakage_risk | `low` |
+| blocking_issues | `0` |
+
+Decision:
+
+- `main_bottleneck`: `exit`
+- `buy_quality_good_enough`: `true`
+- `stock_selection_is_valid`: `false`
+- `valuation_adds_value`: `true`
+- `downside_adds_value`: `true`
+- `allocation_adds_value`: `true`
+- `exit_is_current_bottleneck`: `true`
+- `recommended_next_phase`: `Phase12-D3 Exit AI Dataset Audit`
+
+Phase 12-D2 Reality Auditの結論として、買い側はValuation + Downsideで一定の妥当性が確認された。次はBuy Model Revisitではなく、Exit AI / profit protection / break-even guardに進むのが自然。

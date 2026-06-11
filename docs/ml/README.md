@@ -119,7 +119,8 @@ adoption notes for the AI / ML stack.
   - Phase 12-C3 tested direct position concentration guards; per-name caps reduced largest position max to `29.78%`, but PF/DD deteriorated and no variant met minimum targets
   - Phase 12-C4 tested capped redistribution, score-gap dynamic caps, and staged-buy proxies; none met minimum targets, though dynamic cap and staged 70% preserved more profit than blunt caps
   - Phase 12-D1 audited C2c trade paths and found 7 trades that had peak profit `>= +5%` but ended as losses, with realized loss `-157,341` and estimated peak-to-final leakage `328,000`
-  - current decision: do not proceed to Phase 13 yet; continue with Phase 12-D2 profit protection / break-even guard, still 2025-limited before any broad/full backtests
+  - Phase 12-D2 Buy Quality Reality Audit found Valuation and Downside add BUY-quality value, while Stock Selection top5 alone did not beat the universe on top-decile rate; main bottleneck is Exit/risk control
+  - current decision: do not proceed to Phase 13 yet; continue with Phase 12-D3 Exit AI Dataset Audit or profit-protection exit design, still 2025-limited before any broad/full backtests
 
 ## Adoption Notes
 
@@ -165,6 +166,7 @@ Current strongest full-backtested research candidate:
   - Phase 12-C3 found simple concentration caps reduced concentration but did not improve DD enough: `C3_3_per_name_cap_25pct` largest max `29.78%`, PF `1.2799`, DD `-19.56%`; `ready_for_phase13=false`
   - Phase 12-C4 found capped redistribution and staged-buy proxies still failed the PF/DD/utilization minimum; `C4_4_dynamic_cap_by_score_gap` kept profit `292,483` but DD worsened to `-25.78%`
   - Phase 12-D1 found winning-to-losing conversion is real: peak `>=+5%` then final loss occurred 7 times, main leakage source was `stop_loss`, and estimated recoverable profit was `328,000`
+  - Phase 12-D2 Reality Audit found Opportunity top5 top-decile rate `0.2400` versus universe `0.1053` and Stock Selection top5 `0.0885`; A3_3 reduced weighted downside to `0.1432`, but S4 DD remained `-18.26%`
   - still a backtest/research profile; not connected to live order placement
 
 Experimental next candidates:
