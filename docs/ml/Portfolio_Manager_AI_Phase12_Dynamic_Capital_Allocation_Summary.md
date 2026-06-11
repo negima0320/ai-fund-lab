@@ -340,3 +340,96 @@ Decision:
 - `recommended_next_phase`: `Phase12-B limited allocation strategy check`
 
 Phase 12-Bでは、フルバックテストではなく、2025年限定で`A3_3_rank_medium_floor_zero`を実売買ロジックへ最小接続する。
+
+## Phase 12-B Implementation Status
+
+実装済み:
+
+- `src/ml/phase12b_limited_allocation_strategy_check.py`
+- `scripts/ml/run_phase12b_limited_allocation_strategy_check.py`
+- `tests/test_ml_phase12b_limited_allocation_strategy_check.py`
+
+生成report:
+
+- `reports/ml/phase12b_limited_allocation_strategy_check_2025.md`
+- `reports/ml/phase12b_limited_allocation_strategy_check_2025.json`
+
+Scope:
+
+- Phase 12-A artifactを使用
+- 2025年のみ
+- 少数strategy比較のみ
+- full backtestなし
+- 既存model上書きなし
+- profile追加/変更なし
+- historical prediction再生成なし
+- future系は評価指標のみ
+
+Conditions:
+
+```text
+initial_cash = 1,000,000
+daily_buy_budget = 900,000
+max_positions = 5
+holding_days = 20
+round_lot = 100
+cost_rate = 0.2% one-way
+stop_loss = -8%
+opportunity_exit = enabled for S2/S3
+```
+
+## Phase 12-B Result
+
+Strategy results:
+
+| strategy | net_profit | PF | DD | trades | utilization | cost_paid |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `S0_baseline_equal_allocation` | `66,840` | `1.2506` | `-13.56%` | `60` | `0.8646` | `43,070` |
+| `S1_opportunity_top5_equal` | `-58,049` | `0.9116` | `-24.26%` | `63` | `0.9007` | `46,049` |
+| `S2_opportunity_top5_E4` | `7,724` | `1.0094` | `-23.86%` | `149` | `0.8771` | `114,536` |
+| `S3a_dynamic_raw_weight` | `39,770` | `1.5971` | `-2.66%` | `56` | `0.1007` | `16,730` |
+| `S3b_dynamic_normalized_weight` | `135,752` | `1.2712` | `-19.16%` | `75` | `0.7506` | `97,248` |
+
+BUY quality:
+
+| strategy | top_decile_rate | downside_bad_rate | opportunity_value | average_allocation_weight |
+| --- | ---: | ---: | ---: | ---: |
+| `S0_baseline_equal_allocation` | `0.1500` | `0.1333` | `0.0274` | `1.0000` |
+| `S1_opportunity_top5_equal` | `0.2381` | `0.3333` | `0.0313` | `1.0000` |
+| `S2_opportunity_top5_E4` | `0.2282` | `0.3423` | `0.0378` | `1.0000` |
+| `S3a_dynamic_raw_weight` | `0.2321` | `0.1786` | `0.0616` | `0.5411` |
+| `S3b_dynamic_normalized_weight` | `0.2533` | `0.1867` | `0.0650` | `0.4453` |
+
+Interpretation:
+
+- Dynamic allocation clearly improved BUY quality versus S2: downside_bad_rate fell from `0.3423` to `0.1786` / `0.1867`, and opportunity_value rose from `0.0378` to `0.0616` / `0.0650`.
+- `S3a_dynamic_raw_weight` improved PF and DD versus S2, with PF `1.5971` and DD `-2.66%`, but capital utilization was only `0.1007` and net profit did not beat baseline.
+- `S3b_dynamic_normalized_weight` produced the highest net profit `135,752`, but PF `1.2712` and DD `-19.16%` failed the Phase 12-B thresholds.
+- Raw weighting is too conservative; normalized weighting over-concentrates risk. The next useful step is an execution adjustment between raw and normalized.
+
+Leakage:
+
+| item | value |
+| --- | --- |
+| future_columns_used_as_features | `[]` |
+| future_columns_used_only_for_evaluation | `future_return_20d`, `future_max_return_20d`, `future_max_drawdown_20d`, `opportunity_value_20d`, `opportunity_top_decile_20d`, `downside_bad_20d` |
+| existing_model_overwritten | `false` |
+| profile_changed | `false` |
+| full_backtest_executed | `false` |
+| leakage_risk | `low` |
+| blocking_issues | `0` |
+
+Decision:
+
+- `best_strategy`: `S3a_dynamic_raw_weight`
+- `dynamic_allocation_improved_vs_s2`: `true`
+- `dynamic_allocation_improved_vs_baseline`: `false`
+- `ready_for_phase12c`: `false`
+- `recommended_next_phase`: `Phase12-B2 allocation execution adjustment`
+
+Phase 12-B2では、strategy universeやmodelを増やさず、以下のような実行配分だけを少数比較する。
+
+- raw weightとnormalized weightの中間
+- minimum budget usage floor
+- max allocation cap per candidate
+- weight 0銘柄の扱いは維持

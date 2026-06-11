@@ -109,7 +109,8 @@ adoption notes for the AI / ML stack.
   - Phase 12-A found no rule meeting the minimum line of weighted top-decile rate `>= 0.20` and weighted downside bad rate `<= 0.25`
   - Phase 12-A2 narrowed candidate universes to opportunity top5/top10/top20 and used downside only as a penalty
   - Phase 12-A3 fixed the universe to opportunity top5 and found `A3_3_rank_medium_floor_zero` passed the ideal line with weighted top-decile rate `0.2614` and weighted downside bad rate `0.1432`
-  - current decision: proceed to Phase 12-B limited allocation strategy check, not broad/full backtests
+  - Phase 12-B connected A3_3 to a 2025-only lightweight strategy check; raw dynamic weighting improved PF/DD versus S2 but did not beat the baseline, while normalized weighting raised profit but worsened DD
+  - current decision: proceed to Phase 12-B2 allocation execution adjustment, not Phase 12-C or broad/full backtests
 
 ## Adoption Notes
 
@@ -145,6 +146,7 @@ Current strongest full-backtested research candidate:
   - Phase 12-A allocation audit found `score_a_weighted` reduced weighted downside_bad_rate to `22.60%` but weighted top-decile rate was only `15.37%`; no rule was ready for Phase 12-B
   - Phase 12-A2 found `opportunity_top5__penalty_rank_medium` kept weighted top-decile rate `24.54%` and reduced downside to `26.64%`, narrowly missing the `25%` downside target
   - Phase 12-A3 found `A3_3_rank_medium_floor_zero` improved weighted top-decile rate to `26.14%`, reduced weighted downside_bad_rate to `14.32%`, and set `ready_for_phase12b=true`
+  - Phase 12-B found `S3a_dynamic_raw_weight` had net profit `39,770`, PF `1.5971`, DD `-2.66%`, and downside_bad_rate `17.86%`, but did not beat baseline net profit; `S3b_dynamic_normalized_weight` earned `135,752` but DD worsened to `-19.16%`
   - still a backtest/research profile; not connected to live order placement
 
 Experimental next candidates:

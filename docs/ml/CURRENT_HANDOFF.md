@@ -780,6 +780,62 @@ Important interpretation:
   `A3_3_rank_medium_floor_zero`; it should not be a full backtest or profile
   change.
 
+Phase 12-B Limited Allocation Strategy Check is implemented:
+
+```text
+src/ml/phase12b_limited_allocation_strategy_check.py
+scripts/ml/run_phase12b_limited_allocation_strategy_check.py
+tests/test_ml_phase12b_limited_allocation_strategy_check.py
+```
+
+Latest generated report:
+
+```text
+reports/ml/phase12b_limited_allocation_strategy_check_2025.md
+reports/ml/phase12b_limited_allocation_strategy_check_2025.json
+```
+
+Core Phase 12-B result:
+
+- scope: 2025 limited allocation strategy check only
+- source artifact: `data/ml/valuation_engine/phase12a_dynamic_capital_allocation_2025.parquet`
+- strategies: S0 baseline, S1 opportunity equal, S2 opportunity E4, S3a dynamic raw, S3b dynamic normalized
+- cost_rate: `0.2%` one-way
+- full_backtest_executed: `false`
+- existing_model_overwritten: `false`
+- profile_changed: `false`
+- historical_predictions_regenerated: `false`
+- leakage_risk: `low`
+- blocking_issues: `0`
+- ready_for_phase12c: `false`
+- recommended next phase: `Phase12-B2 allocation execution adjustment`
+
+Strategy results:
+
+| strategy | net profit | PF | DD | utilization |
+|---|---:|---:|---:|---:|
+| `S0_baseline_equal_allocation` | `66,840` | `1.2506` | `-13.56%` | `0.8646` |
+| `S2_opportunity_top5_E4` | `7,724` | `1.0094` | `-23.86%` | `0.8771` |
+| `S3a_dynamic_raw_weight` | `39,770` | `1.5971` | `-2.66%` | `0.1007` |
+| `S3b_dynamic_normalized_weight` | `135,752` | `1.2712` | `-19.16%` | `0.7506` |
+
+BUY quality:
+
+| strategy | top-decile | downside bad | opportunity value |
+|---|---:|---:|---:|
+| `S2_opportunity_top5_E4` | `0.2282` | `0.3423` | `0.0378` |
+| `S3a_dynamic_raw_weight` | `0.2321` | `0.1786` | `0.0616` |
+| `S3b_dynamic_normalized_weight` | `0.2533` | `0.1867` | `0.0650` |
+
+Important interpretation:
+
+- Dynamic allocation improved BUY quality and improved PF/DD versus S2.
+- It did not satisfy Phase 12-B forward criteria because S3a did not beat the
+  baseline net profit, and S3b failed PF/DD thresholds.
+- Raw weighting is too capital-light; normalized weighting is too aggressive.
+- Phase 12-B2 should test a small number of execution adjustments between raw
+  and normalized weighting, not new models or broad backtests.
+
 Important reference profiles are:
 
 ```text
@@ -851,8 +907,9 @@ Phase 10 / Phase 11 decision:
 - Phase 12-A Dynamic Capital Allocation Research is complete.
 - Phase 12-A2 Allocation Score Refinement is complete.
 - Phase 12-A3 Top5 Penalty Refinement is complete.
+- Phase 12-B Limited Allocation Strategy Check is complete.
 - Do not proceed to broader backtests or adoption from Phase 11-I results.
-- Recommended next step is Phase 12-B limited allocation strategy check.
+- Recommended next step is Phase 12-B2 allocation execution adjustment.
 - Do not overwrite current PM AI, current Exit AI, or v2_82.
 - Do not use backtest results, trades, profit, cash, portfolio, selected,
   bought, affordable, or current PM multiplier as Phase 11 / Phase 12 features.
