@@ -698,3 +698,120 @@ Decision:
 - `recommended_next_phase`: `Phase12-B5 exit threshold recalibration`
 
 Phase 12-B4の結果から、利益を伸ばすにはTrailing単独ではなく、Opportunity Exitの発火条件を遅らせる/緩める検証が必要。
+
+## Phase 12-B5 Implementation Status
+
+実装済み:
+
+- `src/ml/phase12b5_exit_threshold_recalibration.py`
+- `scripts/ml/run_phase12b5_exit_threshold_recalibration.py`
+- `tests/test_ml_phase12b5_exit_threshold_recalibration.py`
+
+生成report:
+
+- `reports/ml/phase12b5_exit_threshold_recalibration_2025.md`
+- `reports/ml/phase12b5_exit_threshold_recalibration_2025.json`
+
+Scope:
+
+- Phase 12-A artifactを使用
+- 2025年のみ
+- S3a Dynamic Raw WeightのBUY/allocationは固定
+- stop_loss `-8%` は固定
+- Opportunity Exit条件だけを少数比較
+- full backtestなし
+- 既存model上書きなし
+- profile追加/変更なし
+- historical prediction再生成なし
+- future系は評価指標のみ
+
+## Phase 12-B5 Result
+
+Variant results:
+
+| variant | net_profit | PF | DD | capital_utilization | avg_holding_days | opportunity_exit | stop_loss |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `B5_0_baseline` | `39,770` | `1.5971` | `-2.66%` | `0.1007` | `6.20` | `47` | `5` |
+| `B5_1_rank_floor_lower` | `39,770` | `1.5971` | `-2.66%` | `0.1007` | `6.20` | `47` | `5` |
+| `B5_2_proba_drop_larger` | `71,922` | `2.1827` | `-3.24%` | `0.1613` | `13.34` | `19` | `4` |
+| `B5_3_both_relaxed` | `71,450` | `2.0482` | `-4.02%` | `0.1755` | `14.15` | `17` | `5` |
+| `B5_4_confirmation_2days` | `29,107` | `1.3509` | `-3.41%` | `0.1466` | `10.85` | `29` | `5` |
+| `B5_5_confirmation_3days` | `7,287` | `1.0853` | `-4.71%` | `0.1594` | `14.18` | `13` | `7` |
+| `B5_6_profit_protected_exit` | `15,868` | `1.2099` | `-3.75%` | `0.1310` | `8.71` | `30` | `8` |
+| `B5_7_loss_only_hard_exit` | `9,747` | `1.1021` | `-6.70%` | `0.1773` | `17.11` | `5` | `7` |
+
+Hold / Exit quality:
+
+| variant | avg_profit_capture | avg_max_profit_before_exit | avg_post_exit_20d_return |
+| --- | ---: | ---: | ---: |
+| `B5_0_baseline` | `0.0044` | `0.0386` | `0.0653` |
+| `B5_2_proba_drop_larger` | `0.0275` | `0.0724` | `0.0782` |
+| `B5_3_both_relaxed` | `0.0280` | `0.0749` | `0.0821` |
+
+Minimum target:
+
+```text
+PF >= 1.5
+DD >= -12%
+net_profit > 0
+capital_utilization > B5-0 baseline
+average_holding_days > B5-0 baseline
+```
+
+Minimum targetを満たしたvariant:
+
+- `B5_2_proba_drop_larger`
+- `B5_3_both_relaxed`
+
+Best variant:
+
+```text
+B5_2_proba_drop_larger
+```
+
+理由:
+
+- net_profitが`39,770`から`71,922`へ改善。
+- PFが`1.5971`から`2.1827`へ改善。
+- DDは`-3.24%`で十分低い。
+- capital utilizationが`0.1007`から`0.1613`へ改善。
+- average holding daysが`6.20`から`13.34`へ伸びた。
+- opportunity_exit_countが`47`から`19`へ減り、早売りを抑えられた。
+
+Interpretation:
+
+- rank floorを`0.50`から`0.30`へ下げても結果は変わらなかった。exit発火の主因はrank floorではなくproba drop threshold。
+- proba drop thresholdを`0.15`から`0.30`へ広げると、保有期間・利用率・PF・利益が同時に改善した。
+- 2日/3日confirmationは保有期間を伸ばすがPFが落ちた。
+- profit protected / loss only hard exitは、Exitを遅らせすぎて利益化に失敗した。
+- B5により、Opportunity Exitは「少し弱くなったら即売り」ではなく「大きく崩れたら売り」に寄せる方が良い可能性が高い。
+
+Leakage:
+
+| item | value |
+| --- | --- |
+| future_columns_used_only_for_evaluation | `future_return_20d`, `future_max_return_20d`, `future_max_drawdown_20d`, `opportunity_value_20d`, `opportunity_top_decile_20d`, `downside_bad_20d` |
+| future_columns_used_as_features | `[]` |
+| backtest_columns_used_as_features | `[]` |
+| trade_result_columns_used_as_features | `[]` |
+| cash_or_portfolio_columns_used_as_model_features | `[]` |
+| existing_model_overwritten | `false` |
+| profile_changed | `false` |
+| full_backtest_executed | `false` |
+| leakage_risk | `low` |
+| blocking_issues | `0` |
+
+Decision:
+
+- `best_variant`: `B5_2_proba_drop_larger`
+- `variants_meeting_minimum_target`: `B5_2_proba_drop_larger`, `B5_3_both_relaxed`
+- `ready_for_phase12c`: `true`
+- `recommended_next_phase`: `Phase12-C dynamic allocation + recalibrated exit`
+
+Phase 12-Cでは、フルバックテストではなく、2025年限定で以下を統合評価する。
+
+```text
+A3_3 Dynamic Allocation
++
+B5_2 recalibrated Opportunity Exit
+```

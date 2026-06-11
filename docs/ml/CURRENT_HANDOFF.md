@@ -985,6 +985,55 @@ Important interpretation:
   Exit thresholds so the strategy can hold winners longer without normalizing
   into high DD.
 
+Phase 12-B5 Exit Threshold Recalibration is implemented:
+
+```text
+src/ml/phase12b5_exit_threshold_recalibration.py
+scripts/ml/run_phase12b5_exit_threshold_recalibration.py
+tests/test_ml_phase12b5_exit_threshold_recalibration.py
+```
+
+Latest generated report:
+
+```text
+reports/ml/phase12b5_exit_threshold_recalibration_2025.md
+reports/ml/phase12b5_exit_threshold_recalibration_2025.json
+```
+
+Core Phase 12-B5 result:
+
+- scope: 2025 exit threshold recalibration only
+- base BUY/allocation: `S3a_dynamic_raw_weight`
+- stop_loss: `-8%` fixed
+- full_backtest_executed: `false`
+- existing_model_overwritten: `false`
+- profile_changed: `false`
+- historical_predictions_regenerated: `false`
+- leakage_risk: `low`
+- blocking_issues: `0`
+- best_variant: `B5_2_proba_drop_larger`
+- variants meeting minimum target: `B5_2_proba_drop_larger`, `B5_3_both_relaxed`
+- ready_for_phase12c: `true`
+- recommended next phase: `Phase12-C dynamic allocation + recalibrated exit`
+
+Key results:
+
+| variant | net profit | PF | DD | utilization | avg holding days | opportunity exits |
+|---|---:|---:|---:|---:|---:|---:|
+| `B5_0_baseline` | `39,770` | `1.5971` | `-2.66%` | `0.1007` | `6.20` | `47` |
+| `B5_2_proba_drop_larger` | `71,922` | `2.1827` | `-3.24%` | `0.1613` | `13.34` | `19` |
+| `B5_3_both_relaxed` | `71,450` | `2.0482` | `-4.02%` | `0.1755` | `14.15` | `17` |
+
+Important interpretation:
+
+- The main early-exit lever was not rank floor; lowering rank floor to `0.30`
+  had no effect.
+- Increasing opportunity_drop_threshold from `0.15` to `0.30` improved profit,
+  PF, holding days, and capital utilization together.
+- Confirmation-day and profit/loss-only variants were worse.
+- Phase 12-C can now test the integrated 2025-only configuration:
+  `A3_3 Dynamic Allocation + B5_2 recalibrated Opportunity Exit`.
+
 Important reference profiles are:
 
 ```text
@@ -1060,8 +1109,9 @@ Phase 10 / Phase 11 decision:
 - Phase 12-B2 Allocation Execution Adjustment is complete.
 - Phase 12-B3 Exit / Hold Decision Audit is complete.
 - Phase 12-B4 Trailing Exit Prototype is complete.
+- Phase 12-B5 Exit Threshold Recalibration is complete.
 - Do not proceed to broader backtests or adoption from Phase 11-I results.
-- Recommended next step is Phase 12-B5 exit threshold recalibration.
+- Recommended next step is Phase 12-C dynamic allocation + recalibrated exit.
 - Do not overwrite current PM AI, current Exit AI, or v2_82.
 - Do not use backtest results, trades, profit, cash, portfolio, selected,
   bought, affordable, or current PM multiplier as Phase 11 / Phase 12 features.
