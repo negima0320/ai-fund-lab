@@ -791,3 +791,85 @@ Interpretation:
 - `dd_improved_variant_found`: `true`
 - `recommended_next_phase`: `Phase11-F limited robustness check`
 - Phase 11-Fではfull periodへ広げず、2025年限定のままE3/E4について手数料、スリッページ、exit閾値感度、過剰回転を確認する。
+
+## Phase 11-F Implementation Status
+
+実装済み:
+
+- `src/ml/phase11f_robustness_check.py`
+- `scripts/ml/run_phase11f_robustness_check.py`
+- `tests/test_ml_phase11f_robustness_check.py`
+
+生成report:
+
+- `reports/ml/phase11f_robustness_check_2025.md`
+- `reports/ml/phase11f_robustness_check_2025.json`
+
+Scope:
+
+- Phase 11-E E4をbase strategyとして検証
+- 2025年のみのlimited robustness check
+- full period backtestなし
+- profile追加/変更なし
+- 既存model上書きなし
+- historical prediction再生成なし
+- future系は評価指標のみ
+
+Cost sensitivity:
+
+| one-way cost | net_profit | PF | DD | win_rate | trades | avg_holding_days | cost_paid |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `0.0%` | `615,110` | `2.6219` | `-6.02%` | `52.26%` | `155` | `6.26` | `0` |
+| `0.1%` | `568,935` | `2.4304` | `-6.59%` | `51.61%` | `155` | `6.26` | `43,075` |
+| `0.2%` | `473,578` | `2.0551` | `-6.36%` | `50.96%` | `157` | `6.21` | `85,882` |
+| `0.3%` | `394,497` | `1.8790` | `-8.50%` | `50.00%` | `158` | `6.07` | `128,063` |
+
+Opportunity Exit threshold sensitivity:
+
+| threshold | drop | rank_floor | net_profit | PF | DD | trades | avg_holding_days |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loose` | `0.25` | `0.40` | `355,440` | `2.0448` | `-9.45%` | `112` | `9.32` |
+| `baseline` | `0.15` | `0.50` | `615,110` | `2.6219` | `-6.02%` | `155` | `6.26` |
+| `strict` | `0.08` | `0.60` | `496,270` | `2.0189` | `-9.14%` | `229` | `3.91` |
+
+Overtrading check:
+
+| item | value |
+| --- | ---: |
+| average_holding_days | `6.26` |
+| median_holding_days | `4.00` |
+| same_code_reentry_count | `115` |
+| reentry_within_5_days_count | `88` |
+| opportunity_proba_drop exits | `111` |
+| stop_loss exits | `15` |
+
+Monthly notes:
+
+- Negative months: January `-30,120`, November `-53,100`.
+- December trade count is high at `25`, indicating possible turnover concentration.
+- Baseline threshold is strongest on 2025 metrics, but strict threshold increases trades to `229` and average holding falls below `5` days.
+
+Robustness判定:
+
+| check | result |
+| --- | --- |
+| PF >= `2.0` | `true` |
+| DD >= `-10%` | `true` |
+| net_profit >= `300,000` | `true` |
+| average_holding_days >= `5` | `true` |
+| cost `0.2%` PF >= `1.8` | `true` |
+| cost `0.2%` DD >= `-10%` | `true` |
+| all_passed | `true` |
+
+Interpretation:
+
+- E4は2025年限定では片道 `0.2%` コストに耐え、片道 `0.3%` でもDDは `-10%` 以内に残った。
+- Opportunity Exit閾値はbaselineが最も強く、loose/strictとも成立はするが利益が低下する。
+- 過剰回転リスクは残る。特に同一銘柄再エントリーと5営業日以内の再エントリーが多い。
+
+推奨:
+
+- `robustness_passed`: `true`
+- `recommended_next_phase`: `Phase11-G limited out-of-sample year check`
+- Phase 11-Gではfull periodへは広げず、まず2024年または2026年一部などの限定out-of-sample year checkを行う。
+- 併せて、same-code reentry cooldownとminimum holding guardの軽量感度を見る。

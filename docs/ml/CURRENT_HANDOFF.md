@@ -282,6 +282,63 @@ Important interpretation:
   days, so the next step should test transaction cost, slippage, and threshold
   robustness before expanding scope.
 
+Phase 11-F Limited Robustness Check is implemented:
+
+```text
+src/ml/phase11f_robustness_check.py
+scripts/ml/run_phase11f_robustness_check.py
+tests/test_ml_phase11f_robustness_check.py
+```
+
+Latest generated report:
+
+```text
+reports/ml/phase11f_robustness_check_2025.md
+reports/ml/phase11f_robustness_check_2025.json
+```
+
+Core Phase 11-F result:
+
+- period: `2025-01-01` to `2025-12-31` entries only
+- base strategy: `E4_stop_loss_8pct_plus_opportunity`
+- leakage_risk: `low`
+- blocking_issues: `0`
+- full_backtest_executed: `false`
+- profile_changed: `false`
+- historical_predictions_regenerated: `false`
+
+Cost sensitivity:
+
+| one-way cost | net_profit | PF | DD | trades | avg holding | cost paid |
+|---:|---:|---:|---:|---:|---:|---:|
+| `0.0%` | `615,110` | `2.6219` | `-6.02%` | `155` | `6.26` | `0` |
+| `0.1%` | `568,935` | `2.4304` | `-6.59%` | `155` | `6.26` | `43,075` |
+| `0.2%` | `473,578` | `2.0551` | `-6.36%` | `157` | `6.21` | `85,882` |
+| `0.3%` | `394,497` | `1.8790` | `-8.50%` | `158` | `6.07` | `128,063` |
+
+Threshold sensitivity:
+
+| threshold | net_profit | PF | DD | trades | avg holding |
+|---|---:|---:|---:|---:|---:|
+| loose | `355,440` | `2.0448` | `-9.45%` | `112` | `9.32` |
+| baseline | `615,110` | `2.6219` | `-6.02%` | `155` | `6.26` |
+| strict | `496,270` | `2.0189` | `-9.14%` | `229` | `3.91` |
+
+Overtrading notes:
+
+- same_code_reentry_count: `115`
+- reentry_within_5_days_count: `88`
+- median_holding_days: `4.00`
+- December trade count: `25`
+
+Important interpretation:
+
+- E4 passes the 2025-only robustness checks, including `0.2%` one-way cost.
+- Overtrading risk remains meaningful; Phase 11-G should not jump to a broad
+  full-period backtest yet.
+- Next check should be limited out-of-sample year validation plus same-code
+  reentry cooldown / minimum holding guard sensitivity.
+
 Important reference profiles are:
 
 ```text
@@ -344,8 +401,9 @@ Phase 10 / Phase 11 decision:
 - Phase 11-C2 Budget Usage Constraint Audit is complete.
 - Phase 11-D Limited Combined Backtest is complete.
 - Phase 11-E Limited Exit / DD Guard is complete.
-- Proceed toward strict limited-scope Phase 11-F robustness checks for E3/E4
-  transaction cost, slippage, threshold sensitivity, and overtrading risk.
+- Phase 11-F Limited Robustness Check is complete.
+- Proceed toward strict limited-scope Phase 11-G out-of-sample year check and
+  reentry/cooldown sensitivity.
 - Do not overwrite current PM AI, current Exit AI, or v2_82.
 - Do not use backtest results, trades, profit, cash, portfolio, selected,
   bought, affordable, or current PM multiplier as Phase 11 features.
@@ -395,6 +453,7 @@ Recent active work includes:
 - Phase 11-C2 Budget Usage Constraint Audit implementation
 - Phase 11-D Limited Combined Backtest implementation
 - Phase 11-E Limited Exit / DD Guard implementation
+- Phase 11-F Limited Robustness Check implementation
 
 Current generated reports of interest:
 
