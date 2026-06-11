@@ -1013,3 +1013,96 @@ Decision:
 - `recommended_next_phase`: `Phase12-C3 DD guard refinement`
 
 Phase 12-C2では、利用率を維持したままDDを`-12%`以内へ抑える候補は見つからなかった。次はdownside penaltyではなく、1銘柄集中を直接抑えるposition concentration guard / rebalancing capを検証する。
+
+## Phase 12-C3 Implementation Status
+
+実装済み:
+
+- `src/ml/phase12c3_position_concentration_guard.py`
+- `scripts/ml/run_phase12c3_position_concentration_guard.py`
+- `tests/test_ml_phase12c3_position_concentration_guard.py`
+
+生成report:
+
+- `reports/ml/phase12c3_position_concentration_guard_2025.md`
+- `reports/ml/phase12c3_position_concentration_guard_2025.json`
+
+Scope:
+
+- Phase 12-A artifactを使用
+- 2025年のみ
+- C2c normalized downside-squared allocation + B5_2 Exitをbaseに固定
+- position concentration guardを少数比較
+- cap余り資金は原則再配分しない
+- full backtestなし
+- 既存model上書きなし
+- profile追加/変更なし
+- historical prediction再生成なし
+- future系は評価指標のみ
+
+## Phase 12-C3 Result
+
+Variant results:
+
+| variant | net_profit | PF | DD | utilization | largest max | top2 mean |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `C3_0_baseline_downside_squared` | `315,227` | `2.1172` | `-18.26%` | `0.9157` | `0.8011` | `0.7556` |
+| `C3_1_per_name_cap_40pct` | `106,084` | `1.2357` | `-26.94%` | `0.7213` | `0.4951` | `0.6446` |
+| `C3_2_per_name_cap_30pct` | `53,101` | `1.1459` | `-19.96%` | `0.6817` | `0.3470` | `0.4920` |
+| `C3_3_per_name_cap_25pct` | `91,652` | `1.2799` | `-19.56%` | `0.6216` | `0.2978` | `0.4179` |
+| `C3_4_top2_cap_60pct` | `247,206` | `1.6596` | `-23.96%` | `0.8345` | `0.6466` | `0.6948` |
+| `C3_5_per_name_30pct_and_top2_60pct` | `53,101` | `1.1459` | `-19.96%` | `0.6817` | `0.3470` | `0.4920` |
+| `C3_6_concentration_scaled` | `16,113` | `1.0456` | `-20.40%` | `0.6083` | `0.4644` | `0.4760` |
+
+Minimum target:
+
+```text
+PF >= 1.8
+DD >= -12%
+utilization >= 0.50
+net_profit > 0
+```
+
+Minimum targetを満たしたvariant:
+
+```text
+none
+```
+
+Concentration reduction:
+
+- baseline largest position max: `80.11%`
+- best concentration variant: `C3_3_per_name_cap_25pct`
+- best largest position max: `29.78%`
+- baseline top2 mean: `75.56%`
+- best top2 mean: `41.79%`
+
+Interpretation:
+
+- per-name capは集中度を大きく下げられる。
+- しかし、cap余りを再配分しない単純capではPFが大きく落ち、DDも`-12%`以内へ改善しなかった。
+- `C3_1_per_name_cap_40pct`は集中を減らしたにもかかわらずDDが`-26.94%`まで悪化し、capだけではDD guardとして不十分。
+- `C3_4_top2_cap_60pct`は利益を比較的残したが、DDは`-23.96%`で悪化。
+- concentration_scaledは利用率を維持しつつ張り過ぎを抑える狙いだったが、利益/PFが崩れた。
+- Phase 12-C3では「normalizedの集中がDD原因」という診断は維持されたが、「単純な集中cap」で解ける問題ではないことが分かった。
+
+Leakage:
+
+| item | value |
+| --- | --- |
+| future_columns_used_only_for_evaluation | `future_return_20d`, `future_max_return_20d`, `future_max_drawdown_20d`, `opportunity_value_20d`, `opportunity_top_decile_20d`, `downside_bad_20d` |
+| future_columns_used_as_features | `[]` |
+| existing_model_overwritten | `false` |
+| profile_changed | `false` |
+| full_backtest_executed | `false` |
+| leakage_risk | `low` |
+| blocking_issues | `0` |
+
+Decision:
+
+- `best_variant`: `C3_0_baseline_downside_squared`
+- `variants_meeting_minimum_target`: none
+- `ready_for_phase13`: `false`
+- `recommended_next_phase`: `Phase12-C4 concentration guard refinement`
+
+Phase 12-C3では、1銘柄集中を抑えることでDDを改善できるとは確認できなかった。次は単純capではなく、cap後の候補補充、同時保有の相関/同日entry制限、またはnormalized自体を日次ではなくportfolio-levelで制御する方向を検討する。

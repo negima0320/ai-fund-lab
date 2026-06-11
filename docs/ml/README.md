@@ -116,7 +116,8 @@ adoption notes for the AI / ML stack.
   - Phase 12-B5 relaxed Opportunity Exit proba drop threshold and found `B5_2_proba_drop_larger` passed minimum targets with PF `2.1827`, DD `-3.24%`, net profit `71,922`, and utilization `16.13%`
   - Phase 12-C integrated Dynamic Allocation with the recalibrated B5_2 exit; normalized allocation raised profit to `306,382` and PF `2.0680` but DD worsened to `-18.88%`, while raw allocation kept DD low but utilization stayed `16.13%`
   - Phase 12-C2 attributed the normalized DD problem mainly to single-name concentration: largest position weight reached `80.11%`, top2 average weight was `75.65%`, and no cap/penalty variant met PF/DD/utilization minimums
-  - current decision: do not proceed to Phase 13 yet; continue with Phase 12-C3 DD guard refinement focused on direct position concentration controls, still 2025-limited before any broad/full backtests
+  - Phase 12-C3 tested direct position concentration guards; per-name caps reduced largest position max to `29.78%`, but PF/DD deteriorated and no variant met minimum targets
+  - current decision: do not proceed to Phase 13 yet; continue with Phase 12-C4 concentration guard refinement using candidate refill / portfolio-level controls, still 2025-limited before any broad/full backtests
 
 ## Adoption Notes
 
@@ -159,6 +160,7 @@ Current strongest full-backtested research candidate:
   - Phase 12-B5 found `B5_2_proba_drop_larger` improved net profit to `71,922`, PF to `2.1827`, DD `-3.24%`, average holding days `13.34`, and reduced opportunity_exit_count from `47` to `19`; `ready_for_phase12c=true`
   - Phase 12-C found no integrated strategy met the minimum line of PF `>=1.8`, DD `>=-10%`, net profit positive, and utilization `>=20%`; `C2_dynamic_normalized_B5_2_exit` had high profit/PF but DD `-18.88%`, so `ready_for_phase13=false`
   - Phase 12-C2 found normalized DD was not primarily high-downside exposure; all base C2 trades were in `downside_proba_lt_0.40`, while largest position weight reached `80.11%`; `C2c_downside_penalty_squared` improved profit/PF but DD remained `-18.26%`
+  - Phase 12-C3 found simple concentration caps reduced concentration but did not improve DD enough: `C3_3_per_name_cap_25pct` largest max `29.78%`, PF `1.2799`, DD `-19.56%`; `ready_for_phase13=false`
   - still a backtest/research profile; not connected to live order placement
 
 Experimental next candidates:

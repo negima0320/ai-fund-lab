@@ -12,28 +12,29 @@ next useful actions. For the full history, see
 `docs/ml/Portfolio_Manager_AI_Phase10_Stop_and_Hold_Summary.md`, and
 `docs/ml/Portfolio_Manager_AI_Phase11_Valuation_Allocation_Plan.md`.
 
-## Latest Phase 12-C2 Handoff
+## Latest Phase 12-C3 Handoff
 
-Phase 12-C2 Utilization Without DD Explosion is implemented:
+Phase 12-C3 Position Concentration Guard is implemented:
 
 ```text
-src/ml/phase12c2_utilization_without_dd_explosion.py
-scripts/ml/run_phase12c2_utilization_without_dd_explosion.py
-tests/test_ml_phase12c2_utilization_without_dd_explosion.py
+src/ml/phase12c3_position_concentration_guard.py
+scripts/ml/run_phase12c3_position_concentration_guard.py
+tests/test_ml_phase12c3_position_concentration_guard.py
 ```
 
 Latest generated report:
 
 ```text
-reports/ml/phase12c2_utilization_without_dd_explosion_2025.md
-reports/ml/phase12c2_utilization_without_dd_explosion_2025.json
+reports/ml/phase12c3_position_concentration_guard_2025.md
+reports/ml/phase12c3_position_concentration_guard_2025.json
 ```
 
 Scope and constraints:
 
 - 2025年のみ
-- C2 normalized + B5_2 ExitをbaseにDD attributionを監査
-- normalized系の少数variantのみ比較
+- C2c normalized downside-squared allocation + B5_2 Exitをbaseに固定
+- position concentration guardを少数比較
+- cap余り資金は原則再配分しない
 - full backtestなし
 - profile追加/変更なし
 - 既存model上書きなし
@@ -45,43 +46,51 @@ Core result:
 
 | variant | net_profit | PF | DD | utilization |
 | --- | ---: | ---: | ---: | ---: |
-| `C2_base_dynamic_normalized_B5_2_exit` | `306,382` | `2.0680` | `-18.88%` | `0.9076` |
-| `C2a_normalized_cap_20pct` | `132,958` | `1.4752` | `-17.99%` | `0.5799` |
-| `C2b_normalized_cap_15pct` | `103,392` | `1.4541` | `-14.99%` | `0.4242` |
-| `C2c_normalized_downside_penalty_squared` | `315,227` | `2.1172` | `-18.26%` | `0.9157` |
-| `C2d_normalized_top_weight_cap_30pct` | `64,548` | `1.2234` | `-16.19%` | `0.5064` |
-| `C2e_normalized_cash_reserve_80pct` | `118,114` | `1.3973` | `-21.08%` | `0.6152` |
+| `C3_0_baseline_downside_squared` | `315,227` | `2.1172` | `-18.26%` | `0.9157` |
+| `C3_1_per_name_cap_40pct` | `106,084` | `1.2357` | `-26.94%` | `0.7213` |
+| `C3_2_per_name_cap_30pct` | `53,101` | `1.1459` | `-19.96%` | `0.6817` |
+| `C3_3_per_name_cap_25pct` | `91,652` | `1.2799` | `-19.56%` | `0.6216` |
+| `C3_4_top2_cap_60pct` | `247,206` | `1.6596` | `-23.96%` | `0.8345` |
+| `C3_5_per_name_30pct_and_top2_60pct` | `53,101` | `1.1459` | `-19.96%` | `0.6817` |
+| `C3_6_concentration_scaled` | `16,113` | `1.0456` | `-20.40%` | `0.6083` |
 
-Phase 12-C2 minimum line:
+Phase 12-C3 minimum line:
 
 ```text
 PF >= 1.8
 DD >= -12%
 capital_utilization >= 0.50
+net_profit > 0
 ```
 
-No variant met the minimum line. `C2c` improved profit/PF/utilization, but DD
-remained `-18.26%`.
+No variant met the minimum line.
 
-DD attribution:
+Concentration result:
 
-- `main_dd_cause`: `single_name_concentration`
-- largest position weight mean / p90 / max: `50.49%` / `75.85%` / `80.11%`
-- top2 average weight: `75.65%`
-- top3 average weight: `82.30%`
-- all base C2 trades were in `downside_proba_lt_0.40`; high-downside exposure
-  was not the main DD cause.
+- baseline largest position max: `80.11%`
+- best concentration variant: `C3_3_per_name_cap_25pct`
+- best largest position max: `29.78%`
+- baseline top2 mean: `75.56%`
+- best top2 mean: `41.79%`
+
+Interpretation:
+
+- Direct caps can reduce concentration sharply.
+- But simple caps without candidate refill/reallocation harmed PF and still did
+  not bring DD inside `-12%`.
+- The issue is no longer just identifying concentration; it is how to reduce
+  concentration without destroying the profitable exposure.
 
 Current decision:
 
 ```text
 ready_for_phase13 = false
-recommended_next_phase = Phase12-C3 DD guard refinement
+recommended_next_phase = Phase12-C4 concentration guard refinement
 ```
 
 Do not proceed to Phase 13 broad/OOS checks yet. Continue with a 2025-limited
-DD guard focused on direct position concentration controls, because downside
-penalty and simple caps did not solve the DD problem.
+concentration refinement that can use candidate refill, portfolio-level caps,
+or staged buying rather than blunt no-redistribution caps.
 
 ## Current State
 
