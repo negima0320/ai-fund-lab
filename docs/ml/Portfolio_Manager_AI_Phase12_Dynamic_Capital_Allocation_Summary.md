@@ -1195,3 +1195,94 @@ Decision:
 - `recommended_next_phase`: `Phase12-C5 portfolio-level risk gate`
 
 Phase 12-C4では、集中を落としつつ良い露出を残すvariantは見つからなかった。次はposition単位のcapではなく、portfolio-levelのDD/risk gateを2025年限定で検証する。
+
+## Phase 12-D1 Implementation Status
+
+実装済み:
+
+- `src/ml/phase12d1_winning_to_losing_audit.py`
+- `scripts/ml/run_phase12d1_winning_to_losing_audit.py`
+- `tests/test_ml_phase12d1_winning_to_losing_audit.py`
+
+生成report:
+
+- `reports/ml/phase12d1_winning_to_losing_audit_2025.md`
+- `reports/ml/phase12d1_winning_to_losing_audit_2025.json`
+
+Scope:
+
+- Phase 12-A artifactを使用
+- 2025年のみ
+- C2c normalized downside-squared allocation + B5_2 Exitを対象
+- strategy改善ではなくtrade path監査のみ
+- full backtestなし
+- 既存model上書きなし
+- profile追加/変更なし
+- historical prediction再生成なし
+- future系は監査指標のみ
+
+## Phase 12-D1 Result
+
+Target strategy metrics:
+
+| metric | value |
+| --- | ---: |
+| net_profit | `315,227` |
+| PF | `2.1172` |
+| DD | `-18.26%` |
+| win_rate | `54.35%` |
+| total_trades | `46` |
+| capital_utilization | `91.57%` |
+| average_holding_days | `14.89` |
+
+Winning trades turned losers:
+
+| condition | count | avg_peak_profit | avg_final_return | avg_profit_decay | realized_loss | estimated_recoverable_profit |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| peak `>= +5%`, final loss | `7` | `7.39%` | `-6.23%` | `13.23%` | `-157,341` | `328,000` |
+| peak `>= +10%`, final loss | `1` | `10.03%` | `-0.40%` | `10.03%` | `-1,783` | `44,700` |
+
+Exit timing:
+
+| exit_reason | count | avg_peak_profit | avg_final_return | avg_profit_decay | profit_decay_amount_sum | realized_profit_sum |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `forced_end_of_period` | `5` | `2.93%` | `2.46%` | `0.07%` | `1,000` | `47,153` |
+| `opportunity_exit` | `12` | `1.77%` | `-0.06%` | `1.43%` | `31,200` | `9,408` |
+| `stop_loss` | `7` | `5.25%` | `-10.11%` | `14.98%` | `315,900` | `-201,326` |
+| `time_exit_20d` | `22` | `11.47%` | `6.65%` | `4.40%` | `355,000` | `459,992` |
+
+Top examples:
+
+- `77290`: peak `+7.75%`, final `-9.40%`, profit decay `16.77%`, realized profit `-75,987`, exit `stop_loss`
+- `31030`: peak `+5.73%`, final `-8.66%`, profit decay `14.01%`, realized profit `-42,166`, exit `stop_loss`
+- `66990`: peak `+5.18%`, final `-12.67%`, profit decay `17.48%`, realized profit `-23,496`, exit `stop_loss`
+
+Interpretation:
+
+- winning-to-losing conversionは明確に存在する。
+- peak `>= +5%`から最終損失化したtradeは7件で、損失合計は`-157,341`。
+- これらのpeakからfinalまでの推定profit decayは`328,000`で、DD改善余地として無視できない。
+- winning-to-losingに限定したmain leakage sourceは`stop_loss`。
+- 全tradeのprofit decay総額では`time_exit_20d`も大きいが、time_exitは平均final returnがプラスで、今回の「勝ちを負けに変える」主因ではない。
+
+Leakage:
+
+| item | value |
+| --- | --- |
+| future_columns_used_only_for_audit | `future_return_20d`, `future_max_return_20d`, `future_max_drawdown_20d`, `opportunity_value_20d`, `opportunity_top_decile_20d`, `downside_bad_20d` |
+| future_columns_used_as_features | `[]` |
+| existing_model_overwritten | `false` |
+| profile_changed | `false` |
+| full_backtest_executed | `false` |
+| leakage_risk | `low` |
+| blocking_issues | `0` |
+
+Decision:
+
+- `main_profit_leakage_source`: `stop_loss`
+- `winning_to_losing_conversion_detected`: `true`
+- `estimated_recoverable_profit`: `328,000`
+- `recommended_exit_improvement`: `Phase12-D2 profit_protection_exit or break_even_guard`
+- `recommended_next_phase`: `Phase12-D2`
+
+Phase 12-D2では、profit protection exit、break-even guard、またはtrailing profit lockを2025年限定で検証する。特に、一度`+5%`以上乗ったtradeをstop_lossまで落とさないguardを優先する。

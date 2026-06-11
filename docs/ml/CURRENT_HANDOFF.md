@@ -12,84 +12,74 @@ next useful actions. For the full history, see
 `docs/ml/Portfolio_Manager_AI_Phase10_Stop_and_Hold_Summary.md`, and
 `docs/ml/Portfolio_Manager_AI_Phase11_Valuation_Allocation_Plan.md`.
 
-## Latest Phase 12-C4 Handoff
+## Latest Phase 12-D1 Handoff
 
-Phase 12-C4 Concentration Guard Refinement is implemented:
+Phase 12-D1 Winning Trades Turned Into Losers Audit is implemented:
 
 ```text
-src/ml/phase12c4_concentration_guard_refinement.py
-scripts/ml/run_phase12c4_concentration_guard_refinement.py
-tests/test_ml_phase12c4_concentration_guard_refinement.py
+src/ml/phase12d1_winning_to_losing_audit.py
+scripts/ml/run_phase12d1_winning_to_losing_audit.py
+tests/test_ml_phase12d1_winning_to_losing_audit.py
 ```
 
 Latest generated report:
 
 ```text
-reports/ml/phase12c4_concentration_guard_refinement_2025.md
-reports/ml/phase12c4_concentration_guard_refinement_2025.json
+reports/ml/phase12d1_winning_to_losing_audit_2025.md
+reports/ml/phase12d1_winning_to_losing_audit_2025.json
 ```
 
 Scope and constraints:
 
 - 2025年のみ
-- C2c normalized downside-squared allocation + B5_2 Exitをbaseに固定
-- cap後redistribution、score-gap dynamic cap、staged buy proxyを少数比較
+- C2c normalized downside-squared allocation + B5_2 Exitを対象
+- strategy改善ではなくtrade path監査のみ
 - full backtestなし
 - profile追加/変更なし
 - 既存model上書きなし
 - historical prediction再生成なし
-- future系は評価指標のみ
+- future系は監査指標のみ
 - leakage_risk `low`, blocking_issues `0`
 
 Core result:
 
-| variant | net_profit | PF | DD | utilization |
-| --- | ---: | ---: | ---: | ---: |
-| `C4_0_baseline_downside_squared` | `315,227` | `2.1172` | `-18.26%` | `0.9157` |
-| `C4_1_cap_40_redistribute` | `68,939` | `1.1527` | `-26.94%` | `0.7228` |
-| `C4_2_cap_35_redistribute` | `-114,807` | `0.7319` | `-28.02%` | `0.6429` |
-| `C4_3_cap_30_redistribute` | `4,564` | `1.0115` | `-24.82%` | `0.6608` |
-| `C4_4_dynamic_cap_by_score_gap` | `292,483` | `1.7602` | `-25.78%` | `0.8163` |
-| `C4_5_staged_buy_half_first` | `60,236` | `1.1699` | `-19.62%` | `0.5905` |
-| `C4_6_staged_buy_70pct_first` | `265,290` | `1.7452` | `-20.47%` | `0.7630` |
+| metric | value |
+| --- | ---: |
+| target net_profit | `315,227` |
+| target PF | `2.1172` |
+| target DD | `-18.26%` |
+| target utilization | `91.57%` |
+| total trades | `46` |
+| average holding days | `14.89` |
 
-Phase 12-C4 minimum line:
+Winning-to-losing audit:
 
-```text
-PF >= 1.8
-DD >= -12%
-capital_utilization >= 0.50
-net_profit > 0
-```
-
-No variant met the minimum line.
-
-Effect summary:
-
-- cap redistribution reduced concentration but destroyed PF/DD.
-- dynamic cap by score gap preserved profit better, but DD worsened to
-  `-25.78%`.
-- staged buy 70% preserved utilization `76.30%` and profit `265,290`, but PF
-  `1.7452` and DD `-20.47%` remained below target.
+| condition | count | avg_peak | avg_final | decay | realized_loss | recoverable |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| peak `>= +5%`, final loss | `7` | `+7.39%` | `-6.23%` | `13.23%` | `-157,341` | `328,000` |
+| peak `>= +10%`, final loss | `1` | `+10.03%` | `-0.40%` | `10.03%` | `-1,783` | `44,700` |
 
 Interpretation:
 
-- C4 still did not find a way to reduce concentration while preserving
-  profitable exposure and DD.
-- The next risk control should move from position-level caps to portfolio-level
-  risk gates: new-buy pause/scale-down during equity drawdown, unrealized loss
-  cluster guard, or market/portfolio heat control.
+- Winning-to-losing conversion is clearly present.
+- The main profit leakage source for winning-to-losing trades is `stop_loss`.
+- Stop-loss trades had avg peak profit `+5.25%`, avg final return `-10.11%`,
+  and profit decay amount `315,900`.
+- Time exits also have large total decay, but they remain profitable on
+  average and are not the main winning-to-losing source.
 
 Current decision:
 
 ```text
 ready_for_phase13 = false
-recommended_next_phase = Phase12-C5 portfolio-level risk gate
+recommended_next_phase = Phase12-D2
+recommended_exit_improvement = profit_protection_exit or break_even_guard
 ```
 
 Do not proceed to Phase 13 broad/OOS checks yet. Continue with a 2025-limited
-portfolio-level risk gate. Position-level caps and staged-buy proxies did not
-solve the DD problem.
+exit improvement that prevents trades once up `+5%` or more from falling all
+the way to stop-loss. Candidate next variants: profit protection exit,
+trailing profit lock, break-even guard.
 
 ## Current State
 
