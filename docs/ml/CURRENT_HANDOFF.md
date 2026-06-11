@@ -728,6 +728,58 @@ Important interpretation:
 - Do not move to Phase 12-B yet. A3 should test slightly stronger top5/top10
   rank penalties before any strategy check.
 
+Phase 12-A3 Top5 Penalty Refinement is implemented:
+
+```text
+src/ml/phase12a3_top5_penalty_refinement.py
+scripts/ml/run_phase12a3_top5_penalty_refinement.py
+tests/test_ml_phase12a3_top5_penalty_refinement.py
+```
+
+Latest generated report:
+
+```text
+reports/ml/phase12a3_top5_penalty_refinement_2025.md
+reports/ml/phase12a3_top5_penalty_refinement_2025.json
+```
+
+Core Phase 12-A3 result:
+
+- scope: 2025 top5 penalty refinement only
+- source artifact: `data/ml/valuation_engine/phase12a_dynamic_capital_allocation_2025.parquet`
+- candidate universe: `opportunity_top5` fixed
+- strategy_backtest_executed: `false`
+- full_backtest_executed: `false`
+- existing_model_overwritten: `false`
+- profile_changed: `false`
+- historical_predictions_regenerated: `false`
+- leakage_risk: `low`
+- blocking_issues: `0`
+- ready_for_phase12b: `true`
+- recommended next phase: `Phase12-B limited allocation strategy check`
+
+Best rule:
+
+| rule | weighted top-decile | weighted downside bad | weighted opportunity value | average weight |
+|---|---:|---:|---:|---:|
+| `A3_3_rank_medium_floor_zero` | `0.2614` | `0.1432` | `0.0683` | `0.1168` |
+
+Rules meeting the minimum target:
+
+- `A3_1_rank_medium_plus`
+- `A3_2_rank_medium_stronger_tail`
+- `A3_3_rank_medium_floor_zero`
+
+Important interpretation:
+
+- A3 reached the Phase 12 minimum line without broadening beyond Opportunity
+  top5.
+- `A3_3_rank_medium_floor_zero` also met the ideal line, but this is still BUY
+  quality / allocation audit only.
+- Phase 12-B should be a 2025-only limited allocation strategy check using
+  `A3_3_rank_medium_floor_zero`; it should not be a full backtest or profile
+  change.
+
 Important reference profiles are:
 
 ```text
@@ -798,8 +850,9 @@ Phase 10 / Phase 11 decision:
 - Phase 11-B3 Expected Downside Model Prototype is complete.
 - Phase 12-A Dynamic Capital Allocation Research is complete.
 - Phase 12-A2 Allocation Score Refinement is complete.
+- Phase 12-A3 Top5 Penalty Refinement is complete.
 - Do not proceed to broader backtests or adoption from Phase 11-I results.
-- Recommended next step is Phase 12-A3 allocation refinement.
+- Recommended next step is Phase 12-B limited allocation strategy check.
 - Do not overwrite current PM AI, current Exit AI, or v2_82.
 - Do not use backtest results, trades, profit, cash, portfolio, selected,
   bought, affordable, or current PM multiplier as Phase 11 / Phase 12 features.

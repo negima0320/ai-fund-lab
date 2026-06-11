@@ -234,7 +234,109 @@ Decision:
 
 Phase 12-A3では、strategy backtestへ進まず、以下を軽量auditする。
 
-- `opportunity_top5` + stronger rank penalty
-- `opportunity_top10` + stronger rank penalty
-- top5/top10でdownside_bad_rate `<= 0.25` を達成できるか
-- budget usage proxyが低すぎる場合、top5とtop10の中間配分を検討する
+- `opportunity_top5`固定
+- stronger rank penalty
+- hybrid rank/proba penalty
+- top-decile rate `>= 0.20` を維持しながら downside_bad_rate `<= 0.25` を達成できるか
+
+## Phase 12-A3 Implementation Status
+
+実装済み:
+
+- `src/ml/phase12a3_top5_penalty_refinement.py`
+- `scripts/ml/run_phase12a3_top5_penalty_refinement.py`
+- `tests/test_ml_phase12a3_top5_penalty_refinement.py`
+
+生成report:
+
+- `reports/ml/phase12a3_top5_penalty_refinement_2025.md`
+- `reports/ml/phase12a3_top5_penalty_refinement_2025.json`
+
+Scope:
+
+- Phase 12-A artifactを使用
+- 2025年のみ
+- `opportunity_top5`固定
+- downside penalty refinementのみ
+- strategy backtestなし
+- full backtestなし
+- 既存model上書きなし
+- profile追加/変更なし
+- historical prediction再生成なし
+- future系は評価指標のみ
+
+## Phase 12-A3 Result
+
+比較対象:
+
+| rule | weighted_top_decile_rate | weighted_downside_bad_rate | weighted_opportunity_value | average_weight | minimum_target |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `A2_baseline_penalty_rank_medium` | `0.2454` | `0.2664` | `0.0453` | `0.1907` | false |
+| `A3_1_rank_medium_plus` | `0.2386` | `0.2447` | `0.0445` | `0.1194` | true |
+| `A3_2_rank_medium_stronger_tail` | `0.2466` | `0.2221` | `0.0523` | `0.1460` | true |
+| `A3_3_rank_medium_floor_zero` | `0.2614` | `0.1432` | `0.0683` | `0.1168` | true |
+| `A3_4_hybrid_rank_and_proba` | `0.2444` | `0.2621` | `0.0458` | `0.1882` | false |
+| `A3_5_hybrid_rank_and_proba_strict` | `0.2461` | `0.2556` | `0.0470` | `0.1845` | false |
+
+Minimum target:
+
+```text
+weighted_opportunity_top_decile_rate >= 0.20
+weighted_downside_bad_rate <= 0.25
+```
+
+Minimum targetを満たしたrule:
+
+- `A3_1_rank_medium_plus`
+- `A3_2_rank_medium_stronger_tail`
+- `A3_3_rank_medium_floor_zero`
+
+Ideal target:
+
+```text
+weighted_opportunity_top_decile_rate >= 0.24
+weighted_downside_bad_rate <= 0.20
+```
+
+Ideal targetを満たしたrule:
+
+- `A3_3_rank_medium_floor_zero`
+
+Best rule:
+
+```text
+A3_3_rank_medium_floor_zero
+```
+
+理由:
+
+- weighted top-decile rate `0.2614` でOpportunity濃度を維持した。
+- weighted downside bad rate `0.1432` まで下げた。
+- weighted opportunity value `0.0683` が比較対象内で最も高い。
+- average weight `0.1168` で、警告ライン `0.10` は下回らなかった。
+
+Interpretation:
+
+- A3により、Opportunity top5固定のままDownside penaltyだけで最低ラインを達成した。
+- `A3_3_rank_medium_floor_zero` はtail downside rankにweight `0` を与えるため、budget usage proxyは低くなる可能性がある。
+- これはBUY品質監査であり、strategy backtestではない。Phase 12-Bでは、実際の約定・単元株・cash・exitとの接続時に、低weight候補をどう扱うかを限定検証する必要がある。
+
+Leakage:
+
+| item | value |
+| --- | --- |
+| future_columns_used_as_features | `[]` |
+| future_columns_used_only_for_evaluation | `future_return_20d`, `future_max_return_20d`, `future_max_drawdown_20d`, `opportunity_value_20d`, `opportunity_top_decile_20d`, `downside_bad_20d` |
+| existing_model_overwritten | `false` |
+| profile_changed | `false` |
+| strategy_backtest_executed | `false` |
+| full_backtest_executed | `false` |
+| leakage_risk | `low` |
+| blocking_issues | `0` |
+
+Decision:
+
+- `ready_for_phase12b`: `true`
+- `recommended_next_phase`: `Phase12-B limited allocation strategy check`
+
+Phase 12-Bでは、フルバックテストではなく、2025年限定で`A3_3_rank_medium_floor_zero`を実売買ロジックへ最小接続する。

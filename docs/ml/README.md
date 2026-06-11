@@ -108,7 +108,8 @@ adoption notes for the AI / ML stack.
   - Phase 12-A ran a 2025-only allocation quality audit with Phase 11-B3 research models and no strategy backtest
   - Phase 12-A found no rule meeting the minimum line of weighted top-decile rate `>= 0.20` and weighted downside bad rate `<= 0.25`
   - Phase 12-A2 narrowed candidate universes to opportunity top5/top10/top20 and used downside only as a penalty
-  - current decision: proceed to Phase 12-A3 allocation refinement, not Phase 12-B strategy checks
+  - Phase 12-A3 fixed the universe to opportunity top5 and found `A3_3_rank_medium_floor_zero` passed the ideal line with weighted top-decile rate `0.2614` and weighted downside bad rate `0.1432`
+  - current decision: proceed to Phase 12-B limited allocation strategy check, not broad/full backtests
 
 ## Adoption Notes
 
@@ -143,6 +144,7 @@ Current strongest full-backtested research candidate:
   - Phase 11-B3 trained a strict OOS downside model; downside model test AUC `0.6180`, PR-AUC `0.2323`, precision@top10% `0.2992`; `score_v1` reduced downside_bad_rate to `19.76%` but top-decile rate fell to `15.27%`
   - Phase 12-A allocation audit found `score_a_weighted` reduced weighted downside_bad_rate to `22.60%` but weighted top-decile rate was only `15.37%`; no rule was ready for Phase 12-B
   - Phase 12-A2 found `opportunity_top5__penalty_rank_medium` kept weighted top-decile rate `24.54%` and reduced downside to `26.64%`, narrowly missing the `25%` downside target
+  - Phase 12-A3 found `A3_3_rank_medium_floor_zero` improved weighted top-decile rate to `26.14%`, reduced weighted downside_bad_rate to `14.32%`, and set `ready_for_phase12b=true`
   - still a backtest/research profile; not connected to live order placement
 
 Experimental next candidates:
