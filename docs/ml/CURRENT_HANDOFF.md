@@ -673,6 +673,61 @@ Important interpretation:
   dilutes opportunity concentration.
 - Do not move to Phase 12-B strategy checks yet.
 
+Phase 12-A2 Allocation Score Refinement is implemented:
+
+```text
+src/ml/phase12a2_allocation_score_refinement.py
+scripts/ml/run_phase12a2_allocation_score_refinement.py
+tests/test_ml_phase12a2_allocation_score_refinement.py
+```
+
+Latest generated report:
+
+```text
+reports/ml/phase12a2_allocation_score_refinement_2025.md
+reports/ml/phase12a2_allocation_score_refinement_2025.json
+```
+
+Core Phase 12-A2 result:
+
+- scope: 2025 allocation score refinement only
+- source artifact: `data/ml/valuation_engine/phase12a_dynamic_capital_allocation_2025.parquet`
+- strategy_backtest_executed: `false`
+- full_backtest_executed: `false`
+- existing_model_overwritten: `false`
+- profile_changed: `false`
+- historical_predictions_regenerated: `false`
+- leakage_risk: `low`
+- blocking_issues: `0`
+- ready_for_phase12b: `false`
+- recommended next phase: `Phase12-A3 allocation refinement`
+
+Best near-pass rule:
+
+| rule | avg candidates/day | weighted top-decile | weighted downside bad | weighted opportunity value | budget usage proxy |
+|---|---:|---:|---:|---:|---:|
+| `opportunity_top5__penalty_rank_medium` | `5.0` | `0.2454` | `0.2664` | `0.0453` | `0.1907` |
+
+Other useful references:
+
+| rule | weighted top-decile | weighted downside bad | note |
+|---|---:|---:|---|
+| `opportunity_top5__penalty_none` | `0.2400` | `0.3794` | original opportunity-only risk |
+| `opportunity_top5__penalty_rank_soft` | `0.2517` | `0.2970` | improves value but still high downside |
+| `opportunity_top10__penalty_rank_medium` | `0.2122` | `0.2721` | broader, still misses downside target |
+| `opportunity_p95__penalty_rank_soft` | `0.1773` | `0.2452` | downside passes but universe is too broad |
+
+Important interpretation:
+
+- The A2 direction is right: keep Opportunity as the candidate universe and use
+  Downside only as a sizing penalty.
+- `opportunity_top5__penalty_rank_medium` preserves Opportunity concentration
+  and almost reaches the downside target, but `26.64%` is still above the
+  required `25%`.
+- p95/p90 universes are overbroad and should not be used to declare readiness.
+- Do not move to Phase 12-B yet. A3 should test slightly stronger top5/top10
+  rank penalties before any strategy check.
+
 Important reference profiles are:
 
 ```text
@@ -742,8 +797,9 @@ Phase 10 / Phase 11 decision:
 - Phase 11-B2 Strict OOS Failure Diagnosis is complete.
 - Phase 11-B3 Expected Downside Model Prototype is complete.
 - Phase 12-A Dynamic Capital Allocation Research is complete.
+- Phase 12-A2 Allocation Score Refinement is complete.
 - Do not proceed to broader backtests or adoption from Phase 11-I results.
-- Recommended next step is Phase 12-A2 allocation score refinement.
+- Recommended next step is Phase 12-A3 allocation refinement.
 - Do not overwrite current PM AI, current Exit AI, or v2_82.
 - Do not use backtest results, trades, profit, cash, portfolio, selected,
   bought, affordable, or current PM multiplier as Phase 11 / Phase 12 features.
