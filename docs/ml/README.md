@@ -99,7 +99,8 @@ adoption notes for the AI / ML stack.
   - Phase 11-G Limited 2024 Year Check supported E4 on an additional year, but flagged that 2024 overlaps the Phase 11-B model training period and is not strict model OOS
   - Phase 11-H Cooldown / Minimum Holding Guard found `H2_cooldown_10d` and `H3_min_hold_3d` passed 2024/2025 guard checks and produced a strict walk-forward OOS design
   - Phase 11-I Strict Walk-Forward OOS Prototype trained a research-only 2023 model and found strict OOS rank lift remained, but 2025 strategy checks did not beat the equal-allocation baseline
-  - current decision: return to Phase 11-B2 valuation model improvement before any broader backtest or adoption; keep `v2_82_cap38` as reference only
+  - Phase 11-B2 Strict OOS Failure Diagnosis found the strict OOS top5 improved top-decile rate but also concentrated high-downside candidates, supporting an expected_downside model next
+  - current decision: proceed to Phase 11-B3 expected_downside model prototype before any broader backtest or adoption; keep `v2_82_cap38` as reference only
 
 ## Adoption Notes
 
@@ -130,6 +131,7 @@ Current strongest full-backtested research candidate:
   - Phase 11-H checked cooldown/min-hold guards on 2024/2025 with `0.2%` cost; `H2_cooldown_10d` and `H3_min_hold_3d` passed both years, while combined cooldown+min-hold was unstable in 2025
   - Phase 11-I strict OOS trained a separate research model on 2023 only, validated on 2024, and tested on 2025; test AUC `0.6297`, PR-AUC `0.1514`, precision@top10% `0.1837`, strict_model_oos `true`
   - Phase 11-I strategy check with `0.2%` cost did not pass strict OOS adoption criteria: baseline net profit `180,876`, PF `2.2930`, DD `-6.39%`; strict OOS E4 net profit `116,049`, PF `1.2501`, DD `-13.14%`
+  - Phase 11-B2 diagnosed the failure: strict OOS valuation top5 top-decile rate `24.00%` versus baseline `8.85%`, but downside_bad_rate `37.94%` versus baseline `13.58%`; feature drift was also detected in score and market/financial features
   - still a backtest/research profile; not connected to live order placement
 
 Experimental next candidates:

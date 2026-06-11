@@ -511,6 +511,55 @@ Important interpretation:
 - Phase 11-D/E/F/H remain useful strategy/path evidence, but Phase 11-I shows
   the valuation model itself needs improvement before broader adoption work.
 
+Phase 11-B2 Strict OOS Failure Diagnosis is implemented:
+
+```text
+src/ml/phase11b2_strict_oos_failure_diagnosis.py
+scripts/ml/audit_phase11b2_strict_oos_failure_diagnosis.py
+tests/test_ml_phase11b2_strict_oos_failure_diagnosis.py
+```
+
+Latest generated report:
+
+```text
+reports/ml/phase11b2_strict_oos_failure_diagnosis_2025.md
+reports/ml/phase11b2_strict_oos_failure_diagnosis_2025.json
+```
+
+Core Phase 11-B2 result:
+
+- scope: 2025 diagnosis only
+- Phase 11-I research model read only; no overwrite
+- profile_changed: `false`
+- full_backtest_executed: `false`
+- historical_predictions_regenerated: `false`
+- leakage_risk: `low`
+- blocking_issues: `0`
+- main failure reason: high-downside candidate concentration plus feature drift
+- recommended next phase: `Phase11-B3 expected_downside model prototype`
+
+Top candidate diagnosis:
+
+| candidate set | future return | max return | max drawdown | opportunity value | top-decile rate | downside bad rate |
+|---|---:|---:|---:|---:|---:|---:|
+| baseline top5 | `0.0162` | `0.0699` | `-0.0514` | `0.0185` | `0.0885` | `0.1358` |
+| strict OOS valuation top5 | `0.0063` | `0.1311` | `-0.1042` | `0.0269` | `0.2400` | `0.3794` |
+
+Important interpretation:
+
+- Strict OOS valuation top5 still enriches top-decile candidates and future
+  max return.
+- It also concentrates large downside risk. Downside bad rate rises from
+  `13.58%` to `37.94%`.
+- Stop-loss exits have only a small average proba drop, so the classifier is
+  not directly recognizing drawdown risk.
+- Opportunity Exit was frequent but not classified as pure overreaction,
+  because `opportunity_proba_drop` exits had positive average realized return.
+- Feature drift is meaningful in Stock Selection score features and in
+  `Sales_growth` / `topix_return_20d`.
+- Daily range filtering reduced downside in a quick audit, but it removed too
+  many candidates to be treated as a final rule.
+
 Important reference profiles are:
 
 ```text
@@ -577,8 +626,9 @@ Phase 10 / Phase 11 decision:
 - Phase 11-G Limited Out-of-Sample Year Check is complete.
 - Phase 11-H Cooldown / Minimum Holding Guard is complete.
 - Phase 11-I Strict Walk-Forward OOS Prototype is complete.
+- Phase 11-B2 Strict OOS Failure Diagnosis is complete.
 - Do not proceed to broader backtests or adoption from Phase 11-I results.
-- Recommended next step is Phase 11-B2 valuation model improvement.
+- Recommended next step is Phase 11-B3 expected_downside model prototype.
 - Do not overwrite current PM AI, current Exit AI, or v2_82.
 - Do not use backtest results, trades, profit, cash, portfolio, selected,
   bought, affordable, or current PM multiplier as Phase 11 features.

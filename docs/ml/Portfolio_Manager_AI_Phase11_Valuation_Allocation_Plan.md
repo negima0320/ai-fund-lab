@@ -1147,3 +1147,117 @@ Leakage checklist:
 - Phase 11-B2ではモデルを拡張する前に、2023-only trainの信号劣化要因を確認する。
 - 候補: feature drift確認、market regime別quality、validation calibration、2023 train量不足の確認、2024 validationでのthreshold/exit parameter固定化。
 - Phase 11-D/E/F/Hの結果はstrategy ideaとして有望だが、strict model OOSが未達のため、現時点では採用・full period拡張しない。
+
+## Phase 11-B2 Implementation Status
+
+実装済み:
+
+- `src/ml/phase11b2_strict_oos_failure_diagnosis.py`
+- `scripts/ml/audit_phase11b2_strict_oos_failure_diagnosis.py`
+- `tests/test_ml_phase11b2_strict_oos_failure_diagnosis.py`
+
+生成report:
+
+- `reports/ml/phase11b2_strict_oos_failure_diagnosis_2025.md`
+- `reports/ml/phase11b2_strict_oos_failure_diagnosis_2025.json`
+
+Scope:
+
+- Phase 11-A datasetを読む
+- Phase 11-I research-only strict OOS modelを読む
+- 2025年のみ診断
+- full backtestなし
+- profile追加/変更なし
+- 既存model上書きなし
+- historical prediction保存/再生成なし
+- future系は評価・診断のみ
+
+Diagnosis summary:
+
+| item | value |
+| --- | --- |
+| main_failure_reason | `valuation_top5_contains_high_downside_candidates`, `major_feature_distribution_drift_between_2023_train_and_2025_test` |
+| downside_problem_detected | `true` |
+| exit_overreaction_detected | `false` |
+| feature_drift_detected | `true` |
+| leakage_risk | `low` |
+| blocking_issues | `0` |
+| recommended_next_phase | `Phase11-B3 expected_downside model prototype` |
+
+Prediction quality by proba decile:
+
+| decile | future_return_20d | future_max_return_20d | future_max_drawdown_20d | opportunity_value_20d | top_decile_rate | downside_bad_rate |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `1` | `0.0145` | `0.0517` | `-0.0369` | `0.0148` | `0.0452` | `0.0742` |
+| `5` | `0.0136` | `0.0681` | `-0.0529` | `0.0152` | `0.0845` | `0.1359` |
+| `10` | `0.0256` | `0.1286` | `-0.0770` | `0.0516` | `0.1837` | `0.2531` |
+
+Interpretation:
+
+- strict OOS classifierは上位decileほどtop-decile rate、future max return、opportunity valueを上げている。
+- 一方で、上位decileほど`future_max_drawdown_20d <= -10%`のdownside_bad_rateも上昇する。
+- classification単独では「期待値が高い」候補だけでなく「上下どちらにも大きい」候補を拾っている。
+
+Top candidate diagnostics:
+
+| candidate_set | future_return_20d | future_max_return_20d | future_max_drawdown_20d | opportunity_value_20d | top_decile_rate | downside_bad_rate | avg_lot_cost |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `baseline_top5` | `0.0162` | `0.0699` | `-0.0514` | `0.0185` | `0.0885` | `0.1358` | `201,351` |
+| `strict_oos_valuation_top5` | `0.0063` | `0.1311` | `-0.1042` | `0.0269` | `0.2400` | `0.3794` | `388,161` |
+
+Interpretation:
+
+- Valuation top5はtop-decile率を `8.85%` から `24.00%` に改善した。
+- future max returnも `6.99%` から `13.11%` に改善した。
+- しかしfuture max drawdownは `-5.14%` から `-10.42%` に悪化し、downside_bad_rateは `13.58%` から `37.94%` へ悪化した。
+- strict OOS strategy未達の主因は、候補品質改善がdownside悪化で相殺されたことと見る。
+
+Exit trigger diagnostics:
+
+| exit_reason | count | avg_holding_days | avg_realized_return | avg_entry_proba | avg_exit_proba | avg_proba_drop |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `opportunity_proba_drop` | `80` | `5.75` | `0.0279` | `0.4375` | `0.2135` | `0.2240` |
+| `stop_loss` | `27` | `10.81` | `-0.1110` | `0.3397` | `0.3102` | `0.0295` |
+| `time_exit_20d` | `25` | `20.16` | `0.0458` | `0.2977` | `0.2554` | `0.0423` |
+
+Interpretation:
+
+- Opportunity Exitは多いが、平均実現returnはpositiveで、単純な過敏反応とは判定しなかった。
+- Stop loss銘柄ではentryからexitまでprobaがあまり落ちていない。つまり、classifierは下落リスクを十分に下げられていない。
+
+Feature drift:
+
+| feature | standardized_mean_diff |
+| --- | ---: |
+| `candidate_strength` | `0.9832` |
+| `stock_selection_rank_score` | `0.8885` |
+| `expected_return` | `0.7736` |
+| `Sales_growth` | `-0.7319` |
+| `topix_return_20d` | `-0.7227` |
+| `risk_adjusted_score` | `0.6100` |
+
+Interpretation:
+
+- 2023 trainと2025 testで、Stock Selection score系と市場/財務featureに大きな分布差がある。
+- 2023単年trainのstrict OOS modelは、2025のscore水準やmarket regimeに対してcalibrationが弱い可能性がある。
+
+Downside filter quick audit:
+
+| filter | rows | future_return_20d | future_max_drawdown_20d | opportunity_value_20d | top_decile_rate | downside_bad_rate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `no_filter` | `825` | `0.0063` | `-0.1042` | `0.0269` | `0.2400` | `0.3794` |
+| `daily_range_ratio_p90_or_lower` | `371` | `0.0203` | `-0.0834` | `0.0393` | `0.2237` | `0.2965` |
+| `relative_return_20d_p90_or_lower` | `470` | `0.0124` | `-0.0988` | `0.0332` | `0.2447` | `0.4021` |
+| `turnover_value_p10_or_higher` | `631` | `-0.0118` | `-0.1165` | `0.0037` | `0.2187` | `0.4532` |
+
+Interpretation:
+
+- `daily_range_ratio_p90_or_lower` はdownside_bad_rateを `37.94%` から `29.65%` に下げ、opportunity_valueも改善した。
+- ただし候補数が825から371へ減り、単独filterとしては強すぎる可能性がある。
+- turnover下限filterは逆効果だった。
+
+推奨:
+
+- `recommended_model_improvement`: expected_downside / drawdown-risk targetを追加する。
+- `recommended_next_phase`: `Phase11-B3 expected_downside model prototype`
+- Phase 11-B3ではclassification top-decile modelを置き換えるのではなく、downside risk modelを追加し、`opportunity_top_decile_proba` と `expected_downside` の2軸で候補を評価する。
