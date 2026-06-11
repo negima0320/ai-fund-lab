@@ -131,6 +131,13 @@ adoption notes for the AI / ML stack.
   - summarizes strict OOS findings, allocation/execution bottlenecks, Exit bottlenecks, and Stock Selection objective mismatch
   - current decision: no adoption-ready Phase 12 strategy yet; next limited research step is removing or replacing the Stock Selection prefilter
 
+- `Phase13_Horizon_Aware_Selection_Valuation_Exit_Redesign.md`
+  - Phase 13 design document before implementation
+  - reorganizes Stock Selection, Valuation, Allocation, and Exit / Hold around explicit 5d / 10d / 20d / 40d horizons
+  - summarizes why Phase 11/12 succeeded on BUY quality but failed to produce an adoption-ready integrated strategy
+  - defines Phase 13-A through Phase 13-E roadmap, success criteria, and implementation constraints
+  - current next action: Phase13-A Horizon Reality Audit
+
 ## Adoption Notes
 
 - `v2_66_ml_ranked_adoption_notes.md`

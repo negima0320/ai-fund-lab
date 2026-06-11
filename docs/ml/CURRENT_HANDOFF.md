@@ -12,9 +12,71 @@ next useful actions. For the full history, see
 `docs/ml/Portfolio_Manager_AI_Phase10_Stop_and_Hold_Summary.md`,
 `docs/ml/Portfolio_Manager_AI_Phase11_Valuation_Allocation_Plan.md`,
 `docs/ml/Portfolio_Manager_AI_Phase12_Dynamic_Capital_Allocation_Summary.md`,
-and `docs/ml/Portfolio_Manager_AI_Phase11_12_Research_Summary.md`.
+`docs/ml/Portfolio_Manager_AI_Phase11_12_Research_Summary.md`, and
+`docs/ml/Phase13_Horizon_Aware_Selection_Valuation_Exit_Redesign.md`.
 
-## Latest Phase 12-E2 Handoff
+## Latest Phase 13 Handoff
+
+Phase 13 design documentation is created:
+
+```text
+docs/ml/Phase13_Horizon_Aware_Selection_Valuation_Exit_Redesign.md
+```
+
+Phase 13 purpose:
+
+```text
+Horizon-Aware Selection / Valuation / Exit Redesign
+```
+
+Why Phase 13 is needed:
+
+- Phase 11 proved Opportunity / Valuation signal exists.
+- Phase 11-B2/B3 proved Opportunity alone also captures downside, so Downside
+  must be modeled separately.
+- Phase 12 proved Valuation + Downside improves BUY quality, but allocation and
+  exit/hold are not yet adoption-ready.
+- Phase 12-E1/E2 proved Stock Selection top5 is not a valid Phase 12 prefilter:
+  `stock_selection_adds_value=false`, `stock_selection_top5_valid=false`, and
+  `stock_selection_prefilter_hurts_valuation=true`.
+- The root architectural issue is horizon mismatch:
+
+```text
+Stock Selection AI   -> 5d / 10d / short swing composite
+Valuation Engine     -> 20d opportunity / downside
+Exit / Hold          -> fixed holding days + thresholds
+Capital Allocation   -> opportunity/downside weights without explicit horizon
+```
+
+Phase 13 design target:
+
+```text
+5d / 10d / 20d / 40d
+```
+
+Each layer should declare which horizon it serves:
+
+```text
+candidate generation
+valuation
+capital allocation
+hold / exit
+```
+
+Current decision:
+
+```text
+ready_for_phase13 = design-ready
+ready_for_adoption = false
+phase12_results_trustworthy = true
+recommended_next_phase = Phase13-A Horizon Reality Audit
+```
+
+Do not run broad/full backtests yet. The next step should be a 2025-limited
+audit that compares Stock Selection scores, Candidate Strength, Opportunity,
+and Opportunity + Downside across 5d / 10d / 20d / 40d horizons.
+
+## Latest Phase 12-E2 Context
 
 Phase 12-E2 Stock Selection Architecture Audit is implemented:
 
@@ -89,7 +151,7 @@ Interpretation:
 - Phase 12-D3 already confirmed Phase 12 inputs are strict OOS and
   `phase12_results_trustworthy=true`.
 
-Current decision:
+Phase 12-E2 decision:
 
 ```text
 ready_for_phase13 = false
