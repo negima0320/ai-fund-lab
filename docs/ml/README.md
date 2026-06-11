@@ -97,7 +97,8 @@ adoption notes for the AI / ML stack.
   - Phase 11-E Limited Exit / DD Guard found Opportunity Disappeared Exit variants that reduced DD below `-10%` in 2025-only testing
   - Phase 11-F Limited Robustness Check found E4 resilient to `0.2%` one-way cost and Opportunity Exit threshold sensitivity, with overtrading risk still present
   - Phase 11-G Limited 2024 Year Check supported E4 on an additional year, but flagged that 2024 overlaps the Phase 11-B model training period and is not strict model OOS
-  - current decision: proceed toward Phase 11-H cooldown/min-hold guard and strict walk-forward OOS design; keep `v2_82_cap38` as reference only
+  - Phase 11-H Cooldown / Minimum Holding Guard found `H2_cooldown_10d` and `H3_min_hold_3d` passed 2024/2025 guard checks and produced a strict walk-forward OOS design
+  - current decision: proceed toward Phase 11-I strict walk-forward OOS prototype; keep `v2_82_cap38` as reference only
 
 ## Adoption Notes
 
@@ -125,6 +126,7 @@ Current strongest full-backtested research candidate:
   - Phase 11-E showed simple stop loss was harmful, while Opportunity Disappeared Exit improved DD to `-7.85%` and Stop + Opportunity Exit improved DD to `-6.02%`
   - Phase 11-F showed E4 remains above PF `2.0`, DD within `-10%`, and net profit above `300,000` under `0.2%` one-way cost, but has `115` same-code reentries and `88` reentries within 5 business days
   - Phase 11-G checked 2024 only: E4 net profit `699,520`, PF `2.7918`, DD `-8.25%`; E4 with `0.2%` cost net profit `574,984`, PF `2.3421`, DD `-9.11%`; strict model OOS remains false because Phase 11-B trained through 2024
+  - Phase 11-H checked cooldown/min-hold guards on 2024/2025 with `0.2%` cost; `H2_cooldown_10d` and `H3_min_hold_3d` passed both years, while combined cooldown+min-hold was unstable in 2025
   - still a backtest/research profile; not connected to live order placement
 
 Experimental next candidates:

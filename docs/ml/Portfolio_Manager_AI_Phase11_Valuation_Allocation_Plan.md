@@ -955,3 +955,84 @@ Interpretation:
 - `strict_model_oos`: `false`
 - `recommended_next_phase`: `Phase11-H cooldown/min-hold guard plus strict walk-forward OOS design`
 - Phase 11-Hではsame-code cooldown / minimum holding guardを限定検証し、その後に2024をtrain外にするstrict walk-forward OOS設計を行う。
+
+## Phase 11-H Implementation Status
+
+実装済み:
+
+- `src/ml/phase11h_cooldown_minhold_guard.py`
+- `scripts/ml/run_phase11h_cooldown_minhold_guard.py`
+- `tests/test_ml_phase11h_cooldown_minhold_guard.py`
+
+生成report:
+
+- `reports/ml/phase11h_cooldown_minhold_guard_2024_2025.md`
+- `reports/ml/phase11h_cooldown_minhold_guard_2024_2025.json`
+
+Scope:
+
+- 2024年 + 2025年のみ
+- base strategy: E4 + one-way cost `0.2%`
+- cooldown / minimum holding guardの少数variantのみ
+- strict OOS design report作成
+- full period backtestなし
+- profile追加/変更なし
+- 既存model上書きなし
+- 本格walk-forward再学習なし
+- historical prediction再生成なし
+
+Variant:
+
+| variant | cooldown | min_hold_guard |
+| --- | ---: | ---: |
+| `H0_baseline_E4` | `0` | `0` |
+| `H1_cooldown_5d` | `5` | `0` |
+| `H2_cooldown_10d` | `10` | `0` |
+| `H3_min_hold_3d` | `0` | `3` |
+| `H4_cooldown_5d_min_hold_3d` | `5` | `3` |
+
+2024 results:
+
+| variant | net_profit | PF | DD | trades | avg_hold | reentry_5d |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `H0_baseline_E4` | `574,984` | `2.3421` | `-9.11%` | `168` | `5.23` | `107` |
+| `H1_cooldown_5d` | `448,303` | `2.1910` | `-8.13%` | `136` | `5.82` | `48` |
+| `H2_cooldown_10d` | `451,707` | `2.5265` | `-6.18%` | `115` | `6.17` | `36` |
+| `H3_min_hold_3d` | `610,157` | `2.3592` | `-9.01%` | `138` | `6.73` | `89` |
+| `H4_cooldown_5d_min_hold_3d` | `623,772` | `3.1105` | `-4.82%` | `118` | `7.43` | `44` |
+
+2025 results:
+
+| variant | net_profit | PF | DD | trades | avg_hold | reentry_5d |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `H0_baseline_E4` | `473,578` | `2.0551` | `-6.36%` | `157` | `6.21` | `90` |
+| `H1_cooldown_5d` | `255,308` | `1.6062` | `-8.72%` | `147` | `5.84` | `41` |
+| `H2_cooldown_10d` | `389,740` | `2.1260` | `-6.94%` | `137` | `5.88` | `38` |
+| `H3_min_hold_3d` | `397,786` | `1.9285` | `-7.65%` | `138` | `7.11` | `78` |
+| `H4_cooldown_5d_min_hold_3d` | `170,482` | `1.4359` | `-14.14%` | `120` | `7.61` | `41` |
+
+Guard effectiveness:
+
+- `H2_cooldown_10d` は2024/2025両方でPF `>= 1.8`, DD `>= -10%`, net profit positiveを満たし、5営業日以内reentryを大きく削減した。
+- `H3_min_hold_3d` も両年で基準を満たし、平均保有日数を伸ばした。
+- `H1_cooldown_5d` は2025でPF `1.6062` となり基準未達。
+- `H4_cooldown_5d_min_hold_3d` は2024では最良級だが、2025でPF `1.4359`, DD `-14.14%` となり不安定。
+
+Strict walk-forward OOS design:
+
+| item | recommendation |
+| --- | --- |
+| why_2024_is_not_strict_oos | Phase11-B candidate modelが2024年までをtrainに含むため |
+| recommended_first_split | train `2023`, validation `2024`, test `2025` |
+| required_artifacts | versioned dataset, strict-oos model dir, per-split feature list, split metadata, leakage checklist |
+| estimated_cost_risk | medium |
+| recommended_first_strict_oos_year | `2025` |
+
+Phase 11-Hでは再学習もwalk-forward prediction再生成も実行していない。
+
+推奨:
+
+- `cooldown_minhold_passed`: `true`
+- passing variants: `H2_cooldown_10d`, `H3_min_hold_3d`
+- `recommended_next_phase`: `Phase11-I strict walk-forward OOS prototype`
+- Phase 11-Iでは、既存modelを上書きせず、research-only strict OOS modelを別dirに作り、train `2023` / validation `2024` / test `2025` の最小構成で検証する。

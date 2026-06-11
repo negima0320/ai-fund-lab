@@ -392,6 +392,63 @@ Important interpretation:
 - Next step should combine cooldown/minimum-hold guard with a strict
   walk-forward OOS design where 2024 is not inside the training window.
 
+Phase 11-H Cooldown / Minimum Holding Guard is implemented:
+
+```text
+src/ml/phase11h_cooldown_minhold_guard.py
+scripts/ml/run_phase11h_cooldown_minhold_guard.py
+tests/test_ml_phase11h_cooldown_minhold_guard.py
+```
+
+Latest generated report:
+
+```text
+reports/ml/phase11h_cooldown_minhold_guard_2024_2025.md
+reports/ml/phase11h_cooldown_minhold_guard_2024_2025.json
+```
+
+Core Phase 11-H result:
+
+- years: `2024`, `2025`
+- base strategy: E4 with `0.2%` one-way cost
+- leakage_risk: `low`
+- blocking_issues: `0`
+- full_backtest_executed: `false`
+- walk_forward_retraining_executed: `false`
+- historical_predictions_regenerated: `false`
+
+2024 guard comparison:
+
+| variant | net_profit | PF | DD | trades | avg hold | reentry within 5d |
+|---|---:|---:|---:|---:|---:|---:|
+| H0 baseline E4 | `574,984` | `2.3421` | `-9.11%` | `168` | `5.23` | `107` |
+| H1 cooldown 5d | `448,303` | `2.1910` | `-8.13%` | `136` | `5.82` | `48` |
+| H2 cooldown 10d | `451,707` | `2.5265` | `-6.18%` | `115` | `6.17` | `36` |
+| H3 min hold 3d | `610,157` | `2.3592` | `-9.01%` | `138` | `6.73` | `89` |
+| H4 cooldown 5d + min hold 3d | `623,772` | `3.1105` | `-4.82%` | `118` | `7.43` | `44` |
+
+2025 guard comparison:
+
+| variant | net_profit | PF | DD | trades | avg hold | reentry within 5d |
+|---|---:|---:|---:|---:|---:|---:|
+| H0 baseline E4 | `473,578` | `2.0551` | `-6.36%` | `157` | `6.21` | `90` |
+| H1 cooldown 5d | `255,308` | `1.6062` | `-8.72%` | `147` | `5.84` | `41` |
+| H2 cooldown 10d | `389,740` | `2.1260` | `-6.94%` | `137` | `5.88` | `38` |
+| H3 min hold 3d | `397,786` | `1.9285` | `-7.65%` | `138` | `7.11` | `78` |
+| H4 cooldown 5d + min hold 3d | `170,482` | `1.4359` | `-14.14%` | `120` | `7.61` | `41` |
+
+Important interpretation:
+
+- H2 cooldown 10d and H3 minimum holding 3d passed both years.
+- H2 gives the strongest reentry reduction while preserving PF/DD in both
+  years.
+- H3 preserves more profit but reduces 5-day reentries less than H2.
+- H4 is attractive in 2024 but unstable in 2025, so it should not be promoted
+  without retuning.
+- Strict OOS design was documented but not executed. Recommended first split:
+  train `2023`, validation `2024`, test `2025`, with a separate research-only
+  model directory.
+
 Important reference profiles are:
 
 ```text
@@ -456,8 +513,9 @@ Phase 10 / Phase 11 decision:
 - Phase 11-E Limited Exit / DD Guard is complete.
 - Phase 11-F Limited Robustness Check is complete.
 - Phase 11-G Limited Out-of-Sample Year Check is complete.
-- Proceed toward Phase 11-H cooldown/min-hold guard and strict walk-forward
-  OOS design.
+- Phase 11-H Cooldown / Minimum Holding Guard is complete.
+- Proceed toward Phase 11-I strict walk-forward OOS prototype with no current
+  model overwrite.
 - Do not overwrite current PM AI, current Exit AI, or v2_82.
 - Do not use backtest results, trades, profit, cash, portfolio, selected,
   bought, affordable, or current PM multiplier as Phase 11 features.
@@ -509,6 +567,7 @@ Recent active work includes:
 - Phase 11-E Limited Exit / DD Guard implementation
 - Phase 11-F Limited Robustness Check implementation
 - Phase 11-G Limited Out-of-Sample Year Check implementation
+- Phase 11-H Cooldown / Minimum Holding Guard implementation
 
 Current generated reports of interest:
 
