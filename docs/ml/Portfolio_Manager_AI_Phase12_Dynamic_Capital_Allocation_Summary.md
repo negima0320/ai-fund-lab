@@ -1403,3 +1403,120 @@ Decision:
 - `recommended_next_phase`: `Phase12-D3 Exit AI Dataset Audit`
 
 Phase 12-D2 Reality Auditの結論として、買い側はValuation + Downsideで一定の妥当性が確認された。次はBuy Model Revisitではなく、Exit AI / profit protection / break-even guardに進むのが自然。
+
+## Phase 12-D3 Prediction Lineage / Strict OOS Integrity Audit Implementation Status
+
+実装済み:
+
+- `src/ml/phase12d3_prediction_lineage_oos_audit.py`
+- `scripts/ml/run_phase12d3_prediction_lineage_oos_audit.py`
+- `tests/test_ml_phase12d3_prediction_lineage_oos_audit.py`
+
+生成report:
+
+- `reports/ml/phase12d3_prediction_lineage_oos_audit.md`
+- `reports/ml/phase12d3_prediction_lineage_oos_audit.json`
+
+Scope:
+
+- 既存artifact / model metadata / report JSONのみ監査
+- 新規AI学習なし
+- prediction再生成なし
+- full backtestなし
+- 既存model上書きなし
+- profile追加/変更なし
+- J-Quants / OpenAI API呼び出しなし
+
+## Phase 12-D3 Result
+
+Final trust decision:
+
+| item | value |
+| --- | --- |
+| `stock_selection_strict_oos_for_2025` | `true` |
+| `valuation_strict_oos_for_2025` | `true` |
+| `downside_strict_oos_for_2025` | `true` |
+| `phase12_results_trustworthy` | `true` |
+| `blocking_issues` | `[]` |
+| `recommended_next_phase` | `Phase12-D4 Exit AI Dataset Audit` |
+
+Stock Selection lineage:
+
+| item | value |
+| --- | --- |
+| source | `data/ml/walk_forward_predictions` via Phase 11-A dataset builder |
+| code reference | `src/ml/phase11a_valuation_dataset_audit.py` |
+| audit report | `reports/ml/walk_forward_model_audit_5y_enriched_v2.json` |
+| prediction_root_is_walk_forward | `true` |
+| fold_specific_model_used_by_code_path | `true` |
+| current_model_used_by_walk_forward_code_path | `false` |
+| 2025 fold count | `12` |
+| all 2025 effective train end before test start | `true` |
+| uses_2025_training_data | `false` |
+| strict_oos_for_2025 | `true` |
+| warning | `831 walk-forward prediction files have no model_id metadata; relying on walk-forward audit code-path evidence` |
+
+Valuation lineage:
+
+| item | value |
+| --- | --- |
+| source model | `models/ml/valuation_engine/research_phase11b3_downside/opportunity_top_decile_20d_classifier.joblib` |
+| train | `2023-01-04` to `2023-12-31` |
+| validation | `2024-01-01` to `2024-12-31` |
+| test | `2025-01-01` to `2025-12-31` |
+| strict_model_oos | `true` |
+| train_validation_test_overlap | `false` |
+| uses_2025_training_data | `false` |
+
+Downside lineage:
+
+| item | value |
+| --- | --- |
+| source model | `models/ml/valuation_engine/research_phase11b3_downside/downside_bad_20d_classifier.joblib` |
+| train | `2023-01-04` to `2023-12-31` |
+| validation | `2024-01-01` to `2024-12-31` |
+| test | `2025-01-01` to `2025-12-31` |
+| strict_model_oos | `true` |
+| train_validation_test_overlap | `false` |
+| uses_2025_training_data | `false` |
+
+Phase 12 input integrity:
+
+- Phase 12-A through Phase 12-D2 reports were present.
+- No Phase 12 report indicated new model training.
+- No Phase 12 report indicated historical prediction regeneration.
+- No Phase 12 report indicated existing model overwrite.
+- No Phase 12 report indicated profile change.
+- No Phase 12 report indicated full backtest execution.
+
+Integrity checklist:
+
+| item | value |
+| --- | --- |
+| `new_model_trained` | `false` |
+| `historical_predictions_regenerated` | `false` |
+| `existing_model_overwritten` | `false` |
+| `profile_changed` | `false` |
+| `full_backtest_executed` | `false` |
+| `jquants_api_called` | `false` |
+| `openai_api_called` | `false` |
+| `stock_selection_lineage_unknown` | `false` |
+| `valuation_lineage_unknown` | `false` |
+| `downside_lineage_unknown` | `false` |
+| `uses_2025_training_data_for_2025_eval` | `false` |
+| `leakage_risk` | `low` |
+| `blocking_issues` | `[]` |
+
+Interpretation:
+
+- Phase 12の2025評価入力は、既存artifact上はstrict OOSとして信頼可能。
+- Stock Selection prediction file自体にはmodel_id metadata欠落があるためwarningは残るが、walk-forward auditによりcode path上はfold-specific modelを使い、current modelを使っていないことが確認されている。
+- Valuation / DownsideはPhase 11-B3 strict split model由来で、2025をtrainに含まない。
+- Phase 12 resultsは少なくともlineage/integrity面では前進可能。
+
+Decision:
+
+- `phase12_results_trustworthy`: `true`
+- `recommended_next_phase`: `Phase12-D4 Exit AI Dataset Audit`
+
+Phase 12-D3により、D2のBUY品質Reality Auditを止める理由はなくなった。次はExit AI Dataset Audit、またはprofit protection / break-even guardを設計するためのExit dataset監査へ進む。

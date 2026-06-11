@@ -12,28 +12,28 @@ next useful actions. For the full history, see
 `docs/ml/Portfolio_Manager_AI_Phase10_Stop_and_Hold_Summary.md`, and
 `docs/ml/Portfolio_Manager_AI_Phase11_Valuation_Allocation_Plan.md`.
 
-## Latest Phase 12-D2 Handoff
+## Latest Phase 12-D3 Handoff
 
-Phase 12-D2 Buy Quality Reality Audit is implemented:
+Phase 12-D3 Prediction Lineage / Strict OOS Integrity Audit is implemented:
 
 ```text
-src/ml/phase12d2_buy_quality_reality_audit.py
-scripts/ml/run_phase12d2_buy_quality_reality_audit.py
-tests/test_ml_phase12d2_buy_quality_reality_audit.py
+src/ml/phase12d3_prediction_lineage_oos_audit.py
+scripts/ml/run_phase12d3_prediction_lineage_oos_audit.py
+tests/test_ml_phase12d3_prediction_lineage_oos_audit.py
 ```
 
 Latest generated report:
 
 ```text
-reports/ml/phase12d2_buy_quality_reality_audit_2025.md
-reports/ml/phase12d2_buy_quality_reality_audit_2025.json
+reports/ml/phase12d3_prediction_lineage_oos_audit.md
+reports/ml/phase12d3_prediction_lineage_oos_audit.json
 ```
 
 Scope and constraints:
 
-- 2025年のみ
-- BUY品質 / strategy layer contributionのReality Auditのみ
+- 既存artifact / model metadata / report JSONのみ監査
 - 新規AI学習なし
+- prediction再生成なし
 - full backtestなし
 - profile追加/変更なし
 - 既存model上書きなし
@@ -41,46 +41,43 @@ Scope and constraints:
 - future系は評価指標のみ
 - leakage_risk `low`, blocking_issues `0`
 
-BUY quality layer comparison:
+Final trust decision:
 
-| layer | top_decile | downside | opportunity_value |
-| --- | ---: | ---: | ---: |
-| universe | `0.1053` | `0.1650` | `0.0211` |
-| Stock Selection top5 | `0.0885` | `0.1358` | `0.0185` |
-| Opportunity top5 | `0.2400` | `0.3794` | `0.0269` |
-| Opportunity+Downside A3_3 | `0.2963` unweighted / `0.2614` weighted | `0.1481` unweighted / `0.1432` weighted | `0.0771` |
-
-Strategy comparison:
-
-| strategy | net_profit | PF | DD | utilization |
-| --- | ---: | ---: | ---: | ---: |
-| `S0_stock_selection_only` | `138,402` | `1.6472` | `-9.78%` | `0.9138` |
-| `S1_stock_selection_plus_B5_2_exit` | `187,059` | `1.4158` | `-12.35%` | `0.9532` |
-| `S2_opportunity_only` | `-21,755` | `0.9675` | `-32.29%` | `0.8658` |
-| `S3_opportunity_plus_B5_2_exit` | `388,607` | `1.5009` | `-25.02%` | `1.0454` |
-| `S4_opportunity_downside_dynamic_allocation_B5_2_exit` | `315,227` | `2.1172` | `-18.26%` | `0.9157` |
+| item | value |
+| --- | --- |
+| `stock_selection_strict_oos_for_2025` | `true` |
+| `valuation_strict_oos_for_2025` | `true` |
+| `downside_strict_oos_for_2025` | `true` |
+| `phase12_results_trustworthy` | `true` |
+| `blocking_issues` | `[]` |
 
 Interpretation:
 
-- Stock Selection top5 alone did not beat the universe on top-decile rate.
-- Valuation adds clear BUY-quality value: top-decile `0.0885 -> 0.2400`.
-- Opportunity alone also picks too much downside: downside `0.1358 -> 0.3794`.
-- Downside penalty fixes much of that: weighted downside `0.1432` while
-  weighted top-decile remains `0.2614`.
-- Therefore the buy side is not the main blocker. The current blocker remains
-  Exit / risk control, because S4 keeps PF high but DD is still `-18.26%`.
+- Stock Selection columns come from `data/ml/walk_forward_predictions` via the
+  Phase 11-A dataset builder.
+- Walk-forward audit evidence: prediction root is walk-forward, fold-specific
+  model is used by code path, current model is not used, and all 2025 folds
+  have effective train end before test start.
+- Warning: 831 walk-forward prediction files have no `model_id` metadata, so
+  evidence relies on the walk-forward audit code path rather than per-file
+  model_id metadata.
+- Valuation and Downside both come from
+  `models/ml/valuation_engine/research_phase11b3_downside/` with train 2023,
+  validation 2024, test 2025, strict_model_oos true.
+- No Phase 12 report indicated new model training, historical prediction
+  regeneration, existing model overwrite, profile change, or full backtest.
 
 Current decision:
 
 ```text
 ready_for_phase13 = false
-main_bottleneck = exit
-recommended_next_phase = Phase12-D3 Exit AI Dataset Audit
+phase12_results_trustworthy = true
+recommended_next_phase = Phase12-D4 Exit AI Dataset Audit
 ```
 
-Do not proceed to Phase 13 broad/OOS checks yet. Continue with a 2025-limited
-Exit dataset/profit-protection audit. Buy Model Revisit is not the immediate
-priority because Valuation + Downside improved BUY quality.
+Phase 12 input lineage is trustworthy enough to continue. Do not run broad/full
+backtests yet; next should audit/design Exit AI / profit protection using the
+validated 2025-limited setup.
 
 ## Current State
 

@@ -120,7 +120,8 @@ adoption notes for the AI / ML stack.
   - Phase 12-C4 tested capped redistribution, score-gap dynamic caps, and staged-buy proxies; none met minimum targets, though dynamic cap and staged 70% preserved more profit than blunt caps
   - Phase 12-D1 audited C2c trade paths and found 7 trades that had peak profit `>= +5%` but ended as losses, with realized loss `-157,341` and estimated peak-to-final leakage `328,000`
   - Phase 12-D2 Buy Quality Reality Audit found Valuation and Downside add BUY-quality value, while Stock Selection top5 alone did not beat the universe on top-decile rate; main bottleneck is Exit/risk control
-  - current decision: do not proceed to Phase 13 yet; continue with Phase 12-D3 Exit AI Dataset Audit or profit-protection exit design, still 2025-limited before any broad/full backtests
+  - Phase 12-D3 Prediction Lineage / Strict OOS Integrity Audit confirmed Stock Selection, Valuation, and Downside inputs are strict OOS for 2025 by existing artifact evidence, with no blocking issues
+  - current decision: proceed to Phase 12-D4 Exit AI Dataset Audit; Phase 12 2025 results are lineage-trustworthy, but still do not run broad/full backtests yet
 
 ## Adoption Notes
 
@@ -167,6 +168,7 @@ Current strongest full-backtested research candidate:
   - Phase 12-C4 found capped redistribution and staged-buy proxies still failed the PF/DD/utilization minimum; `C4_4_dynamic_cap_by_score_gap` kept profit `292,483` but DD worsened to `-25.78%`
   - Phase 12-D1 found winning-to-losing conversion is real: peak `>=+5%` then final loss occurred 7 times, main leakage source was `stop_loss`, and estimated recoverable profit was `328,000`
   - Phase 12-D2 Reality Audit found Opportunity top5 top-decile rate `0.2400` versus universe `0.1053` and Stock Selection top5 `0.0885`; A3_3 reduced weighted downside to `0.1432`, but S4 DD remained `-18.26%`
+  - Phase 12-D3 confirmed `phase12_results_trustworthy=true`: Stock Selection uses walk-forward predictions with 2025 fold train end before test start, and Valuation/Downside use Phase 11-B3 strict split models
   - still a backtest/research profile; not connected to live order placement
 
 Experimental next candidates:
