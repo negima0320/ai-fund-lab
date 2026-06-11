@@ -114,7 +114,8 @@ adoption notes for the AI / ML stack.
   - Phase 12-B3 audited S3a/S2 exits and found both early and late exit issues, with late profit decay before stop-loss the main problem
   - Phase 12-B4 tested stop-loss-only and trailing exits; trailing alone did not beat current Opportunity Exit, while Opportunity + trailing 8% gave only a small improvement without utilization gain
   - Phase 12-B5 relaxed Opportunity Exit proba drop threshold and found `B5_2_proba_drop_larger` passed minimum targets with PF `2.1827`, DD `-3.24%`, net profit `71,922`, and utilization `16.13%`
-  - current decision: proceed to Phase 12-C dynamic allocation + recalibrated exit, still 2025-limited before any broad/full backtests
+  - Phase 12-C integrated Dynamic Allocation with the recalibrated B5_2 exit; normalized allocation raised profit to `306,382` and PF `2.0680` but DD worsened to `-18.88%`, while raw allocation kept DD low but utilization stayed `16.13%`
+  - current decision: do not proceed to Phase 13 yet; continue with Phase 12-C2 allocation utilization refinement, still 2025-limited before any broad/full backtests
 
 ## Adoption Notes
 
@@ -155,6 +156,7 @@ Current strongest full-backtested research candidate:
   - Phase 12-B3 found S3a stop-loss trades had avg profit decay before exit `17.03%`, while opportunity exits still had avg post-exit 20d return `5.77%`; recommended `Phase12-B4 trailing_exit_prototype`
   - Phase 12-B4 found `T5_opportunity_plus_trailing_8pct` improved net profit to `43,962`, PF to `1.7044`, and DD to `-2.50%`, but capital utilization stayed `9.98%`; `ready_for_phase12c=false`
   - Phase 12-B5 found `B5_2_proba_drop_larger` improved net profit to `71,922`, PF to `2.1827`, DD `-3.24%`, average holding days `13.34`, and reduced opportunity_exit_count from `47` to `19`; `ready_for_phase12c=true`
+  - Phase 12-C found no integrated strategy met the minimum line of PF `>=1.8`, DD `>=-10%`, net profit positive, and utilization `>=20%`; `C2_dynamic_normalized_B5_2_exit` had high profit/PF but DD `-18.88%`, so `ready_for_phase13=false`
   - still a backtest/research profile; not connected to live order placement
 
 Experimental next candidates:

@@ -815,3 +815,93 @@ A3_3 Dynamic Allocation
 +
 B5_2 recalibrated Opportunity Exit
 ```
+
+## Phase 12-C Implementation Status
+
+実装済み:
+
+- `src/ml/phase12c_dynamic_allocation_recalibrated_exit.py`
+- `scripts/ml/run_phase12c_dynamic_allocation_recalibrated_exit.py`
+- `tests/test_ml_phase12c_dynamic_allocation_recalibrated_exit.py`
+
+生成report:
+
+- `reports/ml/phase12c_dynamic_allocation_recalibrated_exit_2025.md`
+- `reports/ml/phase12c_dynamic_allocation_recalibrated_exit_2025.json`
+
+Scope:
+
+- Phase 12-A artifactを使用
+- 2025年のみ
+- B5_2 recalibrated Opportunity Exitを固定
+- Dynamic Allocation実行方式を少数比較
+- full backtestなし
+- 既存model上書きなし
+- profile追加/変更なし
+- historical prediction再生成なし
+- future系は評価指標のみ
+
+## Phase 12-C Result
+
+Strategy results:
+
+| strategy | net_profit | PF | DD | capital_utilization | avg_holding_days | trades |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `C0_baseline_equal_allocation` | `138,402` | `1.6472` | `-9.78%` | `0.9138` | `19.09` | `64` |
+| `C1_dynamic_raw_B5_2_exit` | `71,922` | `2.1827` | `-3.24%` | `0.1613` | `13.34` | `41` |
+| `C2_dynamic_normalized_B5_2_exit` | `306,382` | `2.0680` | `-18.88%` | `0.9076` | `14.64` | `44` |
+| `C3_partial_normalized_30_B5_2_exit` | `113,140` | `1.4931` | `-12.36%` | `0.5041` | `14.17` | `54` |
+| `C4_partial_normalized_50_B5_2_exit` | `74,741` | `1.2070` | `-19.15%` | `0.6343` | `15.23` | `53` |
+
+Minimum target:
+
+```text
+PF >= 1.8
+DD >= -10%
+net_profit > 0
+capital_utilization >= 0.20
+```
+
+Minimum targetを満たしたstrategy:
+
+```text
+none
+```
+
+Best strategy by score:
+
+```text
+C2_dynamic_normalized_B5_2_exit
+```
+
+ただし、C2は利益とPFは高いがDDが`-18.88%`まで悪化し、最低ラインを満たさない。
+
+Interpretation:
+
+- B5_2 Exitを統合しても、raw dynamic allocationはPF/DDが良い一方で利用率が`16.13%`に留まる。
+- normalized allocationは利益と利用率を大きく上げるが、DDが`-18.88%`まで悪化する。
+- partial normalized 30/50はrawとnormalizedの中間を狙ったが、PFまたはDDが最低ライン未達。
+- 利用率だけを引き上げるとDDが崩れる構造はPhase 12-B/B2と同じで、Exit改善だけでは解消しなかった。
+
+Leakage:
+
+| item | value |
+| --- | --- |
+| future_columns_used_only_for_evaluation | `future_return_20d`, `future_max_return_20d`, `future_max_drawdown_20d`, `opportunity_value_20d`, `opportunity_top_decile_20d`, `downside_bad_20d` |
+| future_columns_used_as_features | `[]` |
+| existing_model_overwritten | `false` |
+| profile_changed | `false` |
+| full_backtest_executed | `false` |
+| leakage_risk | `low` |
+| blocking_issues | `0` |
+
+Decision:
+
+- `best_strategy`: `C2_dynamic_normalized_B5_2_exit`
+- `capital_utilization_improved`: `false`
+- `pf_improved`: `true`
+- `dd_improved`: `false`
+- `ready_for_phase13`: `false`
+- `recommended_next_phase`: `Phase12-C2 allocation utilization refinement`
+
+Phase 12-Cでは、Dynamic Allocation + Recalibrated Exitの統合による決定的改善は確認できなかった。Phase 13へ進まず、次は利用率を上げてもDDを壊さない実行制約を検討する。

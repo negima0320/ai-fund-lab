@@ -12,6 +12,69 @@ next useful actions. For the full history, see
 `docs/ml/Portfolio_Manager_AI_Phase10_Stop_and_Hold_Summary.md`, and
 `docs/ml/Portfolio_Manager_AI_Phase11_Valuation_Allocation_Plan.md`.
 
+## Latest Phase 12-C Handoff
+
+Phase 12-C Dynamic Allocation + Recalibrated Exit is implemented:
+
+```text
+src/ml/phase12c_dynamic_allocation_recalibrated_exit.py
+scripts/ml/run_phase12c_dynamic_allocation_recalibrated_exit.py
+tests/test_ml_phase12c_dynamic_allocation_recalibrated_exit.py
+```
+
+Latest generated report:
+
+```text
+reports/ml/phase12c_dynamic_allocation_recalibrated_exit_2025.md
+reports/ml/phase12c_dynamic_allocation_recalibrated_exit_2025.json
+```
+
+Scope and constraints:
+
+- 2025年のみ
+- B5_2 recalibrated Opportunity Exitを固定
+- Dynamic Allocation execution方式を少数比較
+- full backtestなし
+- profile追加/変更なし
+- 既存model上書きなし
+- historical prediction再生成なし
+- future系は評価指標のみ
+- leakage_risk `low`, blocking_issues `0`
+
+Core result:
+
+| strategy | net_profit | PF | DD | utilization |
+| --- | ---: | ---: | ---: | ---: |
+| `C0_baseline_equal_allocation` | `138,402` | `1.6472` | `-9.78%` | `0.9138` |
+| `C1_dynamic_raw_B5_2_exit` | `71,922` | `2.1827` | `-3.24%` | `0.1613` |
+| `C2_dynamic_normalized_B5_2_exit` | `306,382` | `2.0680` | `-18.88%` | `0.9076` |
+| `C3_partial_normalized_30_B5_2_exit` | `113,140` | `1.4931` | `-12.36%` | `0.5041` |
+| `C4_partial_normalized_50_B5_2_exit` | `74,741` | `1.2070` | `-19.15%` | `0.6343` |
+
+Phase 12-C minimum line:
+
+```text
+PF >= 1.8
+DD >= -10%
+net_profit > 0
+capital_utilization >= 0.20
+```
+
+No strategy met the minimum line. `C2` had strong profit and PF, but DD
+worsened to `-18.88%`. `C1` kept PF/DD healthy, but utilization stayed below
+the `20%` line.
+
+Current decision:
+
+```text
+ready_for_phase13 = false
+recommended_next_phase = Phase12-C2 allocation utilization refinement
+```
+
+Do not proceed to Phase 13 broad/OOS checks yet. Continue with a 2025-limited
+allocation execution refinement that raises utilization without recreating the
+normalized-allocation DD problem.
+
 ## Current State
 
 The latest full-backtested Version 1.0 Candidate remains:
