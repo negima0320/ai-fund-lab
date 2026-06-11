@@ -339,6 +339,59 @@ Important interpretation:
 - Next check should be limited out-of-sample year validation plus same-code
   reentry cooldown / minimum holding guard sensitivity.
 
+Phase 11-G Limited Out-of-Sample Year Check is implemented:
+
+```text
+src/ml/phase11g_out_of_sample_check.py
+scripts/ml/run_phase11g_out_of_sample_check.py
+tests/test_ml_phase11g_out_of_sample_check.py
+```
+
+Latest generated report:
+
+```text
+reports/ml/phase11g_out_of_sample_check_2024.md
+reports/ml/phase11g_out_of_sample_check_2024.json
+```
+
+Core Phase 11-G result:
+
+- period: `2024-01-01` to `2024-12-31`
+- rows: `262,224`
+- candidate_days: `166`
+- leakage_risk: `low`
+- blocking_issues: `0`
+- full_backtest_executed: `false`
+- profile_changed: `false`
+- historical_predictions_regenerated: `false`
+
+Important model-OOS limitation:
+
+- Phase 11-B candidate model train period is `2023-01-04` to `2024-12-31`.
+- Therefore, 2024 overlaps the model training period.
+- Phase 11-G supports strategy/path robustness on an additional year, but it
+  is not strict model out-of-sample proof.
+
+Strategy comparison:
+
+| strategy | net_profit | PF | DD | trades | avg holding | reentry within 5d |
+|---|---:|---:|---:|---:|---:|---:|
+| baseline equal allocation | `156,650` | `2.2226` | `-9.12%` | `56` | `19.66` | `10` |
+| valuation top5 no guard | `668,360` | `3.3827` | `-14.85%` | `61` | `19.30` | `41` |
+| valuation top5 E4 | `699,520` | `2.7918` | `-8.25%` | `172` | `5.18` | `111` |
+| valuation top5 E4 cost 0.2% | `574,984` | `2.3421` | `-9.11%` | `168` | `5.23` | `107` |
+
+Important interpretation:
+
+- E4 passes the 2024 limited year check versus baseline and remains robust
+  under `0.2%` one-way cost.
+- No-guard valuation is strong but DD is worse, matching the Phase 11-D/E
+  pattern that Opportunity Exit is needed.
+- Overtrading persists in 2024, with more than 100 reentries within 5 business
+  days for E4.
+- Next step should combine cooldown/minimum-hold guard with a strict
+  walk-forward OOS design where 2024 is not inside the training window.
+
 Important reference profiles are:
 
 ```text
@@ -402,8 +455,9 @@ Phase 10 / Phase 11 decision:
 - Phase 11-D Limited Combined Backtest is complete.
 - Phase 11-E Limited Exit / DD Guard is complete.
 - Phase 11-F Limited Robustness Check is complete.
-- Proceed toward strict limited-scope Phase 11-G out-of-sample year check and
-  reentry/cooldown sensitivity.
+- Phase 11-G Limited Out-of-Sample Year Check is complete.
+- Proceed toward Phase 11-H cooldown/min-hold guard and strict walk-forward
+  OOS design.
 - Do not overwrite current PM AI, current Exit AI, or v2_82.
 - Do not use backtest results, trades, profit, cash, portfolio, selected,
   bought, affordable, or current PM multiplier as Phase 11 features.
@@ -454,6 +508,7 @@ Recent active work includes:
 - Phase 11-D Limited Combined Backtest implementation
 - Phase 11-E Limited Exit / DD Guard implementation
 - Phase 11-F Limited Robustness Check implementation
+- Phase 11-G Limited Out-of-Sample Year Check implementation
 
 Current generated reports of interest:
 

@@ -873,3 +873,85 @@ Interpretation:
 - `recommended_next_phase`: `Phase11-G limited out-of-sample year check`
 - Phase 11-Gではfull periodへは広げず、まず2024年または2026年一部などの限定out-of-sample year checkを行う。
 - 併せて、same-code reentry cooldownとminimum holding guardの軽量感度を見る。
+
+## Phase 11-G Implementation Status
+
+実装済み:
+
+- `src/ml/phase11g_out_of_sample_check.py`
+- `scripts/ml/run_phase11g_out_of_sample_check.py`
+- `tests/test_ml_phase11g_out_of_sample_check.py`
+
+生成report:
+
+- `reports/ml/phase11g_out_of_sample_check_2024.md`
+- `reports/ml/phase11g_out_of_sample_check_2024.json`
+
+Scope:
+
+- 2024年のみのlimited year check
+- 比較対象は4本のみ
+- full period backtestなし
+- profile追加/変更なし
+- 既存model上書きなし
+- historical prediction保存/再生成なし
+- future系は評価指標のみ
+
+重要な制約:
+
+- Phase 11-B candidate modelのtrain periodは `2023-01-04` to `2024-12-31`。
+- そのため2024年はmodel training periodと重なっている。
+- Phase 11-Gはstrategy/pathの独立年確認として有用だが、strict model OOS proofではない。
+
+2024 dataset:
+
+| item | value |
+| --- | ---: |
+| rows | `262,224` |
+| unique_codes | `1,586` |
+| candidate_days | `166` |
+| date_range | `2024-01-04` to `2024-12-27` |
+
+Strategy comparison:
+
+| strategy | net_profit | PF | DD | win_rate | trades | avg_holding | reentry_5d |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `baseline_equal_allocation` | `156,650` | `2.2226` | `-9.12%` | `51.79%` | `56` | `19.66` | `10` |
+| `valuation_top5_no_guard` | `668,360` | `3.3827` | `-14.85%` | `68.85%` | `61` | `19.30` | `41` |
+| `valuation_top5_E4` | `699,520` | `2.7918` | `-8.25%` | `56.40%` | `172` | `5.18` | `111` |
+| `valuation_top5_E4_cost_0.2pct` | `574,984` | `2.3421` | `-9.11%` | `52.98%` | `168` | `5.23` | `107` |
+
+BUY quality:
+
+| strategy | future_return_20d | future_max_return_20d | future_max_drawdown_20d | opportunity_value_20d | top_decile_rate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `baseline_equal_allocation` | `0.0225` | `0.0867` | `-0.0548` | `0.0319` | `0.1429` |
+| `valuation_top5_no_guard` | `0.0889` | `0.2425` | `-0.0849` | `0.1576` | `0.5902` |
+| `valuation_top5_E4` | `0.1096` | `0.2623` | `-0.0762` | `0.1861` | `0.5814` |
+| `valuation_top5_E4_cost_0.2pct` | `0.1112` | `0.2637` | `-0.0767` | `0.1871` | `0.5774` |
+
+OOS year check judgement:
+
+| check | result |
+| --- | --- |
+| E4 beats baseline net profit | `true` |
+| E4 PF >= `1.5` | `true` |
+| E4 DD >= `-10%` | `true` |
+| cost `0.2%` PF >= `1.3` | `true` |
+| cost `0.2%` DD >= `-12%` | `true` |
+| all_passed | `true` |
+
+Interpretation:
+
+- 2024年でもValuation top5はbaselineより大きく高いBUY qualityを示した。
+- no guardは利益/PFが強い一方でDDが `-14.85%` まで悪化した。
+- E4はDDを `-8.25%` へ抑え、cost `0.2%` でも `-9.11%` に収まった。
+- ただしE4は2024年でも再エントリーが多い。5営業日以内reentryは `111`、cost `0.2%` でも `107`。
+- strict model OOSではないため、正式な汎化確認にはwalk-forward設計が必要。
+
+推奨:
+
+- `oos_passed`: `true`
+- `strict_model_oos`: `false`
+- `recommended_next_phase`: `Phase11-H cooldown/min-hold guard plus strict walk-forward OOS design`
+- Phase 11-Hではsame-code cooldown / minimum holding guardを限定検証し、その後に2024をtrain外にするstrict walk-forward OOS設計を行う。

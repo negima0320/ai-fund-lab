@@ -96,7 +96,8 @@ adoption notes for the AI / ML stack.
   - Phase 11-D Limited Combined Backtest connected Valuation to 2025-only buy logic and improved profit/PF/BUY quality, but worsened DD
   - Phase 11-E Limited Exit / DD Guard found Opportunity Disappeared Exit variants that reduced DD below `-10%` in 2025-only testing
   - Phase 11-F Limited Robustness Check found E4 resilient to `0.2%` one-way cost and Opportunity Exit threshold sensitivity, with overtrading risk still present
-  - current decision: proceed toward strict limited-scope Phase 11-G out-of-sample year check; keep `v2_82_cap38` as reference only
+  - Phase 11-G Limited 2024 Year Check supported E4 on an additional year, but flagged that 2024 overlaps the Phase 11-B model training period and is not strict model OOS
+  - current decision: proceed toward Phase 11-H cooldown/min-hold guard and strict walk-forward OOS design; keep `v2_82_cap38` as reference only
 
 ## Adoption Notes
 
@@ -123,6 +124,7 @@ Current strongest full-backtested research candidate:
   - Phase 11-D ran a 2025-only limited combined backtest; Valuation top5 improved net profit from `88,578` to `187,018` and top-decile BUY rate from `7.27%` to `29.31%`, while DD worsened from `-5.33%` to `-16.83%`
   - Phase 11-E showed simple stop loss was harmful, while Opportunity Disappeared Exit improved DD to `-7.85%` and Stop + Opportunity Exit improved DD to `-6.02%`
   - Phase 11-F showed E4 remains above PF `2.0`, DD within `-10%`, and net profit above `300,000` under `0.2%` one-way cost, but has `115` same-code reentries and `88` reentries within 5 business days
+  - Phase 11-G checked 2024 only: E4 net profit `699,520`, PF `2.7918`, DD `-8.25%`; E4 with `0.2%` cost net profit `574,984`, PF `2.3421`, DD `-9.11%`; strict model OOS remains false because Phase 11-B trained through 2024
   - still a backtest/research profile; not connected to live order placement
 
 Experimental next candidates:
