@@ -111,7 +111,8 @@ adoption notes for the AI / ML stack.
   - Phase 12-A3 fixed the universe to opportunity top5 and found `A3_3_rank_medium_floor_zero` passed the ideal line with weighted top-decile rate `0.2614` and weighted downside bad rate `0.1432`
   - Phase 12-B connected A3_3 to a 2025-only lightweight strategy check; raw dynamic weighting improved PF/DD versus S2 but did not beat the baseline, while normalized weighting raised profit but worsened DD
   - Phase 12-B2 tested partial normalization, min usage guards, and capped normalized execution; no strategy met the minimum line
-  - current decision: proceed to Phase 12-B3 execution adjustment or Phase 12-A4 risk score refinement, not Phase 12-C or broad/full backtests
+  - Phase 12-B3 audited S3a/S2 exits and found both early and late exit issues, with late profit decay before stop-loss the main problem
+  - current decision: proceed to Phase 12-B4 trailing exit prototype, not Phase 12-C or broad/full backtests
 
 ## Adoption Notes
 
@@ -149,6 +150,7 @@ Current strongest full-backtested research candidate:
   - Phase 12-A3 found `A3_3_rank_medium_floor_zero` improved weighted top-decile rate to `26.14%`, reduced weighted downside_bad_rate to `14.32%`, and set `ready_for_phase12b=true`
   - Phase 12-B found `S3a_dynamic_raw_weight` had net profit `39,770`, PF `1.5971`, DD `-2.66%`, and downside_bad_rate `17.86%`, but did not beat baseline net profit; `S3b_dynamic_normalized_weight` earned `135,752` but DD worsened to `-19.16%`
   - Phase 12-B2 found no execution adjustment met the minimum line; `S5_partial_normalized_30` improved utilization to `39.10%` and DD to `-11.75%` but PF stayed at `1.0094`
+  - Phase 12-B3 found S3a stop-loss trades had avg profit decay before exit `17.03%`, while opportunity exits still had avg post-exit 20d return `5.77%`; recommended `Phase12-B4 trailing_exit_prototype`
   - still a backtest/research profile; not connected to live order placement
 
 Experimental next candidates:

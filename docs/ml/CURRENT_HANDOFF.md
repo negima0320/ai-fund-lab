@@ -883,6 +883,58 @@ Important interpretation:
 - The issue is no longer only allocation amount; the dynamic high-quality BUY
   set may need exit/churn adjustment or a richer risk score before Phase 12-C.
 
+Phase 12-B3 Exit / Hold Decision Audit is implemented:
+
+```text
+src/ml/phase12b3_exit_hold_audit.py
+scripts/ml/run_phase12b3_exit_hold_audit.py
+tests/test_ml_phase12b3_exit_hold_audit.py
+```
+
+Latest generated report:
+
+```text
+reports/ml/phase12b3_exit_hold_audit_2025.md
+reports/ml/phase12b3_exit_hold_audit_2025.json
+```
+
+Core Phase 12-B3 result:
+
+- scope: 2025 exit / hold decision audit only
+- audited strategies: `S3a_dynamic_raw_weight` and `S2_opportunity_top5_E4`
+- full_backtest_executed: `false`
+- existing_model_overwritten: `false`
+- profile_changed: `false`
+- historical_predictions_regenerated: `false`
+- leakage_risk: `low`
+- blocking_issues: `0`
+- main_exit_problem: `late_exit`
+- early_exit_detected: `true`
+- late_exit_detected: `true`
+- opportunity_exit_effective: `false`
+- recommended next phase: `Phase12-B4 trailing_exit_prototype`
+
+Key audit findings:
+
+| audit | S2 | S3a |
+|---|---:|---:|
+| trade count | `149` | `56` |
+| avg post-exit 20d return | `0.0799` | `0.0653` |
+| post-exit 10%+ count | `46` | `13` |
+| late exit trade count | `24` | `5` |
+| avg profit decay before late exit | `0.1232` | `0.1703` |
+| opportunity exit avg post-exit 20d return | `0.0768` | `0.0577` |
+
+Important interpretation:
+
+- Dynamic allocation did not solve the hold/exit problem by itself.
+- S3a has fewer bad trades, but the remaining stop-loss cases often had profit
+  first and then decayed into loss.
+- Opportunity Exit is not clearly effective; many exits still leave meaningful
+  post-exit upside.
+- Next should be a 2025-only B4 trailing exit / profit-decay guard prototype,
+  not a broad backtest or profile change.
+
 Important reference profiles are:
 
 ```text
@@ -956,8 +1008,9 @@ Phase 10 / Phase 11 decision:
 - Phase 12-A3 Top5 Penalty Refinement is complete.
 - Phase 12-B Limited Allocation Strategy Check is complete.
 - Phase 12-B2 Allocation Execution Adjustment is complete.
+- Phase 12-B3 Exit / Hold Decision Audit is complete.
 - Do not proceed to broader backtests or adoption from Phase 11-I results.
-- Recommended next step is Phase 12-B3 execution adjustment or Phase 12-A4 risk score refinement.
+- Recommended next step is Phase 12-B4 trailing exit prototype.
 - Do not overwrite current PM AI, current Exit AI, or v2_82.
 - Do not use backtest results, trades, profit, cash, portfolio, selected,
   bought, affordable, or current PM multiplier as Phase 11 / Phase 12 features.
