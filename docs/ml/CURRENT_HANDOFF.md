@@ -12,29 +12,28 @@ next useful actions. For the full history, see
 `docs/ml/Portfolio_Manager_AI_Phase10_Stop_and_Hold_Summary.md`, and
 `docs/ml/Portfolio_Manager_AI_Phase11_Valuation_Allocation_Plan.md`.
 
-## Latest Phase 12-C3 Handoff
+## Latest Phase 12-C4 Handoff
 
-Phase 12-C3 Position Concentration Guard is implemented:
+Phase 12-C4 Concentration Guard Refinement is implemented:
 
 ```text
-src/ml/phase12c3_position_concentration_guard.py
-scripts/ml/run_phase12c3_position_concentration_guard.py
-tests/test_ml_phase12c3_position_concentration_guard.py
+src/ml/phase12c4_concentration_guard_refinement.py
+scripts/ml/run_phase12c4_concentration_guard_refinement.py
+tests/test_ml_phase12c4_concentration_guard_refinement.py
 ```
 
 Latest generated report:
 
 ```text
-reports/ml/phase12c3_position_concentration_guard_2025.md
-reports/ml/phase12c3_position_concentration_guard_2025.json
+reports/ml/phase12c4_concentration_guard_refinement_2025.md
+reports/ml/phase12c4_concentration_guard_refinement_2025.json
 ```
 
 Scope and constraints:
 
 - 2025年のみ
 - C2c normalized downside-squared allocation + B5_2 Exitをbaseに固定
-- position concentration guardを少数比較
-- cap余り資金は原則再配分しない
+- cap後redistribution、score-gap dynamic cap、staged buy proxyを少数比較
 - full backtestなし
 - profile追加/変更なし
 - 既存model上書きなし
@@ -46,15 +45,15 @@ Core result:
 
 | variant | net_profit | PF | DD | utilization |
 | --- | ---: | ---: | ---: | ---: |
-| `C3_0_baseline_downside_squared` | `315,227` | `2.1172` | `-18.26%` | `0.9157` |
-| `C3_1_per_name_cap_40pct` | `106,084` | `1.2357` | `-26.94%` | `0.7213` |
-| `C3_2_per_name_cap_30pct` | `53,101` | `1.1459` | `-19.96%` | `0.6817` |
-| `C3_3_per_name_cap_25pct` | `91,652` | `1.2799` | `-19.56%` | `0.6216` |
-| `C3_4_top2_cap_60pct` | `247,206` | `1.6596` | `-23.96%` | `0.8345` |
-| `C3_5_per_name_30pct_and_top2_60pct` | `53,101` | `1.1459` | `-19.96%` | `0.6817` |
-| `C3_6_concentration_scaled` | `16,113` | `1.0456` | `-20.40%` | `0.6083` |
+| `C4_0_baseline_downside_squared` | `315,227` | `2.1172` | `-18.26%` | `0.9157` |
+| `C4_1_cap_40_redistribute` | `68,939` | `1.1527` | `-26.94%` | `0.7228` |
+| `C4_2_cap_35_redistribute` | `-114,807` | `0.7319` | `-28.02%` | `0.6429` |
+| `C4_3_cap_30_redistribute` | `4,564` | `1.0115` | `-24.82%` | `0.6608` |
+| `C4_4_dynamic_cap_by_score_gap` | `292,483` | `1.7602` | `-25.78%` | `0.8163` |
+| `C4_5_staged_buy_half_first` | `60,236` | `1.1699` | `-19.62%` | `0.5905` |
+| `C4_6_staged_buy_70pct_first` | `265,290` | `1.7452` | `-20.47%` | `0.7630` |
 
-Phase 12-C3 minimum line:
+Phase 12-C4 minimum line:
 
 ```text
 PF >= 1.8
@@ -65,32 +64,32 @@ net_profit > 0
 
 No variant met the minimum line.
 
-Concentration result:
+Effect summary:
 
-- baseline largest position max: `80.11%`
-- best concentration variant: `C3_3_per_name_cap_25pct`
-- best largest position max: `29.78%`
-- baseline top2 mean: `75.56%`
-- best top2 mean: `41.79%`
+- cap redistribution reduced concentration but destroyed PF/DD.
+- dynamic cap by score gap preserved profit better, but DD worsened to
+  `-25.78%`.
+- staged buy 70% preserved utilization `76.30%` and profit `265,290`, but PF
+  `1.7452` and DD `-20.47%` remained below target.
 
 Interpretation:
 
-- Direct caps can reduce concentration sharply.
-- But simple caps without candidate refill/reallocation harmed PF and still did
-  not bring DD inside `-12%`.
-- The issue is no longer just identifying concentration; it is how to reduce
-  concentration without destroying the profitable exposure.
+- C4 still did not find a way to reduce concentration while preserving
+  profitable exposure and DD.
+- The next risk control should move from position-level caps to portfolio-level
+  risk gates: new-buy pause/scale-down during equity drawdown, unrealized loss
+  cluster guard, or market/portfolio heat control.
 
 Current decision:
 
 ```text
 ready_for_phase13 = false
-recommended_next_phase = Phase12-C4 concentration guard refinement
+recommended_next_phase = Phase12-C5 portfolio-level risk gate
 ```
 
 Do not proceed to Phase 13 broad/OOS checks yet. Continue with a 2025-limited
-concentration refinement that can use candidate refill, portfolio-level caps,
-or staged buying rather than blunt no-redistribution caps.
+portfolio-level risk gate. Position-level caps and staged-buy proxies did not
+solve the DD problem.
 
 ## Current State
 

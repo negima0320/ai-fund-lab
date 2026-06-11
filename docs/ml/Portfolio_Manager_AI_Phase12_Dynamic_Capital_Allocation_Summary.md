@@ -1106,3 +1106,92 @@ Decision:
 - `recommended_next_phase`: `Phase12-C4 concentration guard refinement`
 
 Phase 12-C3では、1銘柄集中を抑えることでDDを改善できるとは確認できなかった。次は単純capではなく、cap後の候補補充、同時保有の相関/同日entry制限、またはnormalized自体を日次ではなくportfolio-levelで制御する方向を検討する。
+
+## Phase 12-C4 Implementation Status
+
+実装済み:
+
+- `src/ml/phase12c4_concentration_guard_refinement.py`
+- `scripts/ml/run_phase12c4_concentration_guard_refinement.py`
+- `tests/test_ml_phase12c4_concentration_guard_refinement.py`
+
+生成report:
+
+- `reports/ml/phase12c4_concentration_guard_refinement_2025.md`
+- `reports/ml/phase12c4_concentration_guard_refinement_2025.json`
+
+Scope:
+
+- Phase 12-A artifactを使用
+- 2025年のみ
+- C2c normalized downside-squared allocation + B5_2 Exitをbaseに固定
+- cap後redistribution、score gap dynamic cap、staged buy proxyを少数比較
+- full backtestなし
+- 既存model上書きなし
+- profile追加/変更なし
+- historical prediction再生成なし
+- future系は評価指標のみ
+
+## Phase 12-C4 Result
+
+Variant results:
+
+| variant | net_profit | PF | DD | utilization | largest max | top2 mean |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `C4_0_baseline_downside_squared` | `315,227` | `2.1172` | `-18.26%` | `0.9157` | `0.8011` | `0.7556` |
+| `C4_1_cap_40_redistribute` | `68,939` | `1.1527` | `-26.94%` | `0.7228` | `0.4951` | `0.6490` |
+| `C4_2_cap_35_redistribute` | `-114,807` | `0.7319` | `-28.02%` | `0.6429` | `0.4173` | `0.6191` |
+| `C4_3_cap_30_redistribute` | `4,564` | `1.0115` | `-24.82%` | `0.6608` | `0.3518` | `0.5113` |
+| `C4_4_dynamic_cap_by_score_gap` | `292,483` | `1.7602` | `-25.78%` | `0.8163` | `0.5576` | `0.6828` |
+| `C4_5_staged_buy_half_first` | `60,236` | `1.1699` | `-19.62%` | `0.5905` | `0.4644` | `0.4838` |
+| `C4_6_staged_buy_70pct_first` | `265,290` | `1.7452` | `-20.47%` | `0.7630` | `0.6386` | `0.5751` |
+
+Minimum target:
+
+```text
+PF >= 1.8
+DD >= -12%
+utilization >= 0.50
+net_profit > 0
+```
+
+Minimum targetを満たしたvariant:
+
+```text
+none
+```
+
+Effect summary:
+
+- cap redistributionは集中を下げたが、利益/PF/DDが大きく悪化した。
+- dynamic cap by score gapは利益を`292,483`まで残したが、PF `1.7602`、DD `-25.78%`で最低ライン未達。
+- staged buy 70% proxyは利用率`0.7630`と利益`265,290`を残したが、PF `1.7452`、DD `-20.47%`で未達。
+- staged buy 50% proxyは集中を下げたが、利益/PFが大きく低下した。
+
+Interpretation:
+
+- C4でも、集中を落とすだけではDDは改善しなかった。
+- 良い集中と悪い集中を日次allocation時点で完全には区別できていない。
+- ただし`C4_4` / `C4_6`は利益を比較的残せたため、単純capよりは「強い候補への露出を残す」方向性がある。
+- DDは個別position capより、portfolio-levelのリスク状態、同時被弾、含み損拡大時の新規買い停止/縮小などで制御する方が自然。
+
+Leakage:
+
+| item | value |
+| --- | --- |
+| future_columns_used_only_for_evaluation | `future_return_20d`, `future_max_return_20d`, `future_max_drawdown_20d`, `opportunity_value_20d`, `opportunity_top_decile_20d`, `downside_bad_20d` |
+| future_columns_used_as_features | `[]` |
+| existing_model_overwritten | `false` |
+| profile_changed | `false` |
+| full_backtest_executed | `false` |
+| leakage_risk | `low` |
+| blocking_issues | `0` |
+
+Decision:
+
+- `best_variant`: `C4_0_baseline_downside_squared`
+- `variants_meeting_minimum_target`: none
+- `ready_for_phase13`: `false`
+- `recommended_next_phase`: `Phase12-C5 portfolio-level risk gate`
+
+Phase 12-C4では、集中を落としつつ良い露出を残すvariantは見つからなかった。次はposition単位のcapではなく、portfolio-levelのDD/risk gateを2025年限定で検証する。
